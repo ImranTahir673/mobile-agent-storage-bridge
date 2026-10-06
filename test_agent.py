@@ -1,33 +1,51 @@
-import json
 import os
 import requests
 
+# Load .env if present
+env_path = os.path.join(os.path.dirname(__file__), ".env")
+if os.path.exists(env_path):
+    with open(env_path) as f:
+        for line in f:
+            if line.strip() and not line.startswith("#") and "=" in line:
+                k, v = line.strip().split("=", 1)
+                os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
+
 # 1. Config
-GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
-PHONE_URL = "http://192.168.100.65:8080"
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+if not GEMINI_API_KEY:
+    raise ValueError("GEMINI_API_KEY is not set. Please set it in your .env file or environment.")
+PHONE_URL = "http://192.168.100.65:8080"  # Verify this matches your current Termux IP
 GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent?key={GEMINI_API_KEY}"
 
-# 2. Local Functions that execute on the Phone
+# 2. Tool Wrappers
 def list_files(path=""):
-    return requests.post(f"{PHONE_URL}/list_files", json={"path": path}).json()
+    return requests.post(f"{PHONE_URL}/list_files", json={"path": path}, timeout=10).json()
+
+def read_file_snippet(path="", max_chars=1000):
+    return requests.post(f"{PHONE_URL}/read_file_snippet", json={"path": path, "max_chars": max_chars}, timeout=10).json()
 
 def make_directory(path=""):
-    return requests.post(f"{PHONE_URL}/make_directory", json={"path": path}).json()
+    return requests.post(f"{PHONE_URL}/make_directory", json={"path": path}, timeout=10).json()
 
 def move_file(source="", destination=""):
-    return requests.post(f"{PHONE_URL}/move_file", json={"source": source, "destination": destination}).json()
+    return requests.post(f"{PHONE_URL}/move_file", json={"source": source, "destination": destination}, timeout=10).json()
 
 def trash_file(path=""):
-    return requests.post(f"{PHONE_URL}/trash_file", json={"path": path}).json()
+    return requests.post(f"{PHONE_URL}/trash_file", json={"path": path}, timeout=10).json()
+
+def rollback_last():
+    return requests.post(f"{PHONE_URL}/rollback_last", timeout=10).json()
 
 TOOL_FUNCTIONS = {
     "list_files": list_files,
+    "read_file_snippet": read_file_snippet,
     "make_directory": make_directory,
     "move_file": move_file,
     "trash_file": trash_file,
+    "rollback_last": rollback_last,
 }
 
-# 3. Tool Declarations for Gemini
+# 3. Tool Schemas for Gemini
 TOOLS_SCHEMA = [
     {
         "function_declarations": [
@@ -37,6 +55,18 @@ TOOLS_SCHEMA = [
                 "parameters": {
                     "type": "OBJECT",
                     "properties": {"path": {"type": "STRING", "description": "Folder path (e.g. 'Download')"}},
+                    "required": ["path"]
+                }
+            },
+            {
+                "name": "read_file_snippet",
+                "description": "Reads text contents or extracted PDF text of a file to understand what it contains.",
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "path": {"type": "STRING", "description": "Relative file path (e.g. 'Download/document.pdf')"},
+                        "max_chars": {"type": "INTEGER", "description": "Maximum characters to read"}
+                    },
                     "required": ["path"]
                 }
             },
@@ -69,33 +99,30 @@ TOOLS_SCHEMA = [
                     "properties": {"path": {"type": "STRING", "description": "Path to trash"}},
                     "required": ["path"]
                 }
+            },
+            {
+                "name": "rollback_last",
+                "description": "Reverts the most recent move or trash action.",
+                "parameters": {"type": "OBJECT", "properties": {}}
             }
         ]
     }
 ]
 
-# 4. Agent Event Loop
-conversation_history = [
-    {
-        "role": "user",
-        "parts": [{
-            "text": (
-                "Inspect my phone's 'Download' folder. Check what files are there, "
-                "create a folder named 'AI_Test_Archive', and move at least one test document or image into it. "
-                "Summarize what you did."
-            )
-        }]
-    }
-]
+# 4. Prompt: Instruct agent to find a cryptic document and inspect its content
+user_query = (
+    "Inspect the 'Download' folder. Find one PDF or document that has an uninformative name "
+    "(such as an arXiv number like '1508.06576v2.pdf' or a WhatsApp file like 'DOC-20251003-WA0018.'). "
+    "Read a snippet of its text, explain what the document actually is, "
+    "and suggest a clean, descriptive name for it."
+)
 
-print("Sending instructions to Gemini Agent...\n" + "="*50)
+conversation_history = [{"role": "user", "parts": [{"text": user_query}]}]
+
+print("Executing Content Inspection Agent...\n" + "="*50)
 
 while True:
-    payload = {
-        "contents": conversation_history,
-        "tools": TOOLS_SCHEMA
-    }
-    
+    payload = {"contents": conversation_history, "tools": TOOLS_SCHEMA}
     res = requests.post(GEMINI_URL, json=payload).json()
     
     if "candidates" not in res:
@@ -105,26 +132,27 @@ while True:
     candidate = res["candidates"][0]["content"]
     conversation_history.append(candidate)
     
-    # Check if Gemini wants to call any tool
     function_calls = [part["functionCall"] for part in candidate.get("parts", []) if "functionCall" in part]
     
     if not function_calls:
-        # No more tools called; print final answer
         for part in candidate.get("parts", []):
             if "text" in part:
-                print("\nAgent Summary:\n" + part["text"])
+                print("\nAgent Analysis & Verdict:\n" + part["text"])
         break
 
-    # Execute phone operations
     tool_responses = []
     for call in function_calls:
         name = call["name"]
         args = call.get("args", {})
-        print(f"\n[AI Calling Phone Tool]: {name}({args})")
+        print(f"\n[AI Calling Tool]: {name}({args})")
         
-        # Run function on phone
-        result = TOOL_FUNCTIONS[name](**args)
-        print(f"[Phone Response]: {result}")
+        try:
+            result = TOOL_FUNCTIONS[name](**args)
+            preview = str(result)[:200] + "..." if len(str(result)) > 200 else str(result)
+            print(f"[Phone Response]: {preview}")
+        except Exception as e:
+            result = {"error": f"Failed to connect to phone ({PHONE_URL}): {e}"}
+            print(f"[Phone Connection Error]: {e}")
         
         tool_responses.append({
             "functionResponse": {
@@ -133,5 +161,4 @@ while True:
             }
         })
     
-    # Feed tool output back to Gemini
     conversation_history.append({"role": "user", "parts": tool_responses})
