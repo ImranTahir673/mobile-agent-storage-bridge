@@ -14,27 +14,33 @@ if os.path.exists(env_path):
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 if not GEMINI_API_KEY:
     raise ValueError("GEMINI_API_KEY is not set. Please set it in your .env file or environment.")
-PHONE_URL = "http://192.168.100.65:8080"  # Verify this matches your current Termux IP
+PHONE_URL = os.getenv("PHONE_URL", "https://tion-hampshire-feel-ted.trycloudflare.com")
 GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent?key={GEMINI_API_KEY}"
 
 # 2. Tool Wrappers
+def _phone_post(endpoint, data=None):
+    res = requests.post(f"{PHONE_URL}{endpoint}", json=data or {}, timeout=10)
+    if not res.ok:
+        raise RuntimeError(f"HTTP {res.status_code} from bridge: {res.text[:150].strip()}")
+    return res.json()
+
 def list_files(path=""):
-    return requests.post(f"{PHONE_URL}/list_files", json={"path": path}, timeout=10).json()
+    return _phone_post("/list_files", {"path": path})
 
 def read_file_snippet(path="", max_chars=1000):
-    return requests.post(f"{PHONE_URL}/read_file_snippet", json={"path": path, "max_chars": max_chars}, timeout=10).json()
+    return _phone_post("/read_file_snippet", {"path": path, "max_chars": max_chars})
 
 def make_directory(path=""):
-    return requests.post(f"{PHONE_URL}/make_directory", json={"path": path}, timeout=10).json()
+    return _phone_post("/make_directory", {"path": path})
 
 def move_file(source="", destination=""):
-    return requests.post(f"{PHONE_URL}/move_file", json={"source": source, "destination": destination}, timeout=10).json()
+    return _phone_post("/move_file", {"source": source, "destination": destination})
 
 def trash_file(path=""):
-    return requests.post(f"{PHONE_URL}/trash_file", json={"path": path}, timeout=10).json()
+    return _phone_post("/trash_file", {"path": path})
 
 def rollback_last():
-    return requests.post(f"{PHONE_URL}/rollback_last", timeout=10).json()
+    return _phone_post("/rollback_last")
 
 TOOL_FUNCTIONS = {
     "list_files": list_files,
