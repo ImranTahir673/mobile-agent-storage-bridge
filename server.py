@@ -1,4 +1,5 @@
 import os
+import re
 import shutil
 import sqlite3
 import uuid
@@ -122,6 +123,8 @@ def resolve_safe_path(rel_path: str, allow_internal: bool = False) -> str:
                 raise ValueError("Access denied: .agent_trash is an internal protected vault")
             if first_segment.startswith(".ledger.db") or first_segment.endswith(".db"):
                 raise ValueError("Access denied: database files are protected")
+            if first_segment == ".git" or first_segment.startswith(".git"):
+                raise ValueError("Access denied: .git repository trees are protected")
             if first_segment.startswith(".") and first_segment not in (".", ""):
                 raise ValueError(f"Access denied: hidden root directory '{first_segment}' is protected")
 
@@ -208,6 +211,22 @@ def list_files():
 
     return jsonify({"path": rel_path, "items": items})
 
+PII_PATTERNS = [
+    (re.compile(r"\b\d{5}-\d{7}-\d\b"), "[REDACTED_CNIC]"),
+    (re.compile(r"(?:\+92[- ]?|0)?3\d{2}[- ]?\d{7}\b"), "[REDACTED_PHONE]"),
+    (re.compile(r"\b(?:\d{4}[- ]?){3}\d{4}\b"), "[REDACTED_CARD]"),
+    (re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b"), "[REDACTED_EMAIL]"),
+]
+
+def sanitize_pii(text: str) -> str:
+    """Pre-flight local scrubbing of sensitive personally identifiable information."""
+    if not text:
+        return ""
+    clean = text
+    for pattern, replacement in PII_PATTERNS:
+        clean = pattern.sub(replacement, clean)
+    return clean
+
 @app.route("/read_file_snippet", methods=["POST"])
 def read_file_snippet():
     data = request.get_json(force=True) or {}
@@ -244,7 +263,9 @@ def read_file_snippet():
         except Exception as e:
             return jsonify({"error": f"Failed reading file: {e}"}), 500
 
-    return jsonify({"path": rel_path, "snippet": snippet})
+    # Local pre-flight PII redaction before transmission over network
+    sanitized_snippet = sanitize_pii(snippet)
+    return jsonify({"path": rel_path, "snippet": sanitized_snippet})
 
 @app.route("/write_file", methods=["POST"])
 def write_file():

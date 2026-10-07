@@ -68,6 +68,12 @@ Examples:
         help="Target bridge URL (e.g. http://192.168.1.50:8080 or https://...trycloudflare.com)"
     )
     parser.add_argument(
+        "--prompt", "-p",
+        type=str,
+        default=None,
+        help="Custom natural-language goal or instructions (e.g. 'Only organize receipts and fee vouchers')"
+    )
+    parser.add_argument(
         "--target-folder",
         type=str,
         default="Download",
@@ -230,20 +236,53 @@ INSPECTION_TOOLS = [
 ]
 
 
+## ==============================================================================
+# Fail-Safe Privacy Shield & Local PII Sanitizer
+# ==============================================================================
+
+PII_PATTERNS = [
+    (re.compile(r"\b\d{5}-\d{7}-\d\b"), "[REDACTED_CNIC]"),
+    (re.compile(r"(?:\+92[- ]?|0)?3\d{2}[- ]?\d{7}\b"), "[REDACTED_PHONE]"),
+    (re.compile(r"\b(?:\d{4}[- ]?){3}\d{4}\b"), "[REDACTED_CARD]"),
+    (re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b"), "[REDACTED_EMAIL]"),
+]
+
+def sanitize_pii(text: str) -> str:
+    """Pre-flight local scrubbing of sensitive personally identifiable information."""
+    if not text:
+        return ""
+    clean = text
+    for pattern, replacement in PII_PATTERNS:
+        clean = pattern.sub(replacement, clean)
+    return clean
+
+
 # ==============================================================================
 # Agent System Prompt & Schema Specification
 # ==============================================================================
 
-SYSTEM_PROMPT_TEMPLATE = """You are an autonomous Mobile Storage Management Agent operating on an Android device storage bridge.
+SYSTEM_PROMPT_TEMPLATE = """You are an autonomous Mobile Storage Management & Semantic Copilot operating on an Android device storage bridge (/storage/emulated/0).
 
-Your mission is to perform Stage 1 (Reconnaissance) and synthesize Stage 2 (Action Plan):
+Operating Role & Zero-Cloud Invariants:
+- Role: You are a strictly local file management and semantic storage copilot. You organize, sanitize, find, and categorize files within user-designated storage zones on Android internal storage.
+- Zero Cloud Storage: User files, SQLite action ledgers (.ledger.db), and soft-delete trash (.agent_trash) remain strictly on the physical device. You NEVER upload, mirror, or transmit raw file content or database files to cloud storage.
+- Fail-Closed Storage Boundaries: You are permanently blocked from reading or modifying system paths, application private databases, /Android/data, /Android/obb, .git, or hidden system trees.
+
+Fail-Safe Privacy Shield & PII Protection:
+- Zero PII Invariants: You must NEVER infer, reconstruct, or output personally identifiable information (PII)—including CNICs/Gov IDs, phone numbers, payment cards, email addresses, or names of specific individuals—in your reasoning steps, chain-of-thought, action descriptions, or destination filenames.
+- Categorical Interpretation: Treat all text snippets purely as semantic category indicators (e.g. 'Fee Voucher', 'Assignment', 'Bank Statement', 'Lecture Slides') without attributing them to specific individuals or account numbers.
+- Zero Raw Image Uploads: Image and multimedia processing is strictly metadata-driven (filenames, modification timestamps, EXIF year/month). Never process or request raw image pixels or video frames.
+
+Reconnaissance (Stage 1) & Plan Synthesis (Stage 2):
 1. Inspect the target directory '{target_folder}'.
 2. Identify messy, cryptic, uninformative, or unstructured filenames:
-   - arXiv / Academic paper IDs (e.g. '1508.06576v2.pdf' -> identify author/title and move to 'Documents/Research/...').
-   - Messaging / WhatsApp download receipts (e.g. 'DOC-20220503-WA0103.pdf' -> identify invoice/document topic and move or rename).
-   - Cryptic hash names, raw download names, and temporary junk files (.tmp, session tokens, obsolete receipts -> soft-delete via 'trash').
-3. Use 'read_file_snippet' to inspect file content whenever a filename does not clearly convey its content.
-4. When finished inspecting, output a STRICT JSON Action Plan adhering to docs/SCHEMA_SPEC.md:
+   - Academic / Research papers (e.g. arXiv IDs '1508.06576v2.pdf' -> identify topic/title and move to 'Documents/Research/...').
+   - Administrative / Academic receipts (e.g. 'DOC-20220503-WA0103.pdf' -> identify topic and move to 'Documents/...').
+   - Cryptic hash names, raw download names, and temporary junk files (.tmp, session tokens -> soft-delete via 'trash').
+3. Semantic Search & Gathering: If the user provides a search or gathering directive (e.g. 'Find my OS lab' or 'Gather ML papers into Documents/Research/ML'), locate relevant files matching the query and formulate clean 'copy' or 'move' actions into the designated folder.
+4. Use 'read_file_snippet' to inspect file content whenever a filename does not clearly convey its content.
+{custom_goal_block}
+5. When finished inspecting, output a STRICT JSON Action Plan adhering to docs/SCHEMA_SPEC.md:
 
 ```json
 {{
@@ -275,7 +314,7 @@ Your mission is to perform Stage 1 (Reconnaissance) and synthesize Stage 2 (Acti
 Strict Policy & Safety Rules:
 - Blast Radius Limit: Max 20 actions per batch.
 - Storage Boundary: All paths must be relative to storage root without leading slashes.
-- Blacklisted Targets: NEVER touch or reference '/Android', '.agent_trash', '.ledger.db', or root dotfiles.
+- Blacklisted Targets: NEVER touch or reference '/Android', '.agent_trash', '.ledger.db', '.git', or root dotfiles.
 - Zero Hard-Delete: Only use action 'trash' for removal; physical deletes are prohibited.
 - Directory Dependency: If moving a file into a newly proposed directory, include a 'make_dir' step for that directory first.
 - Permitted Action Types: 'make_dir', 'move', 'copy', 'trash'.
@@ -356,7 +395,7 @@ def extract_json_plan(response_text: str) -> Dict[str, Any]:
 # CLI Diff / Table Rendering (Step B)
 # ==============================================================================
 
-def render_diff_table(plan: Dict[str, Any], dry_run_summary: Optional[List[Dict[str, Any]]] = None) -> None:
+def render_diff_table(plan: Dict[str, Any], dry_run_summary: Optional[List[Dict[str, Any]]] = None, custom_goal: Optional[str] = None) -> None:
     """
     Renders a clear, formatted CLI table showing original paths -> proposed targets.
     """
@@ -365,6 +404,8 @@ def render_diff_table(plan: Dict[str, Any], dry_run_summary: Optional[List[Dict[
     print("=" * 95)
     print(f" Plan ID:            {plan.get('plan_id')}")
     print(f" Description:        {plan.get('description')}")
+    if custom_goal:
+        print(f" Custom Goal:        {custom_goal}")
     print(f" Collision Policy:   {plan.get('collision_strategy', 'FAIL')}")
     print(f" Total Actions:      {len(plan.get('actions', []))}")
     print("-" * 95)
@@ -440,26 +481,54 @@ class GeminiAgentRunner:
             path = args.get("path", "")
             max_chars = int(args.get("max_chars", 1000))
             print(f"  [Inspection Tool] read_file_snippet(path='{path}', max_chars={max_chars})")
-            return self.bridge.read_file_snippet(path=path, max_chars=max_chars)
+            raw_res = self.bridge.read_file_snippet(path=path, max_chars=max_chars)
+            if isinstance(raw_res, dict) and "snippet" in raw_res:
+                raw_res["snippet"] = sanitize_pii(raw_res["snippet"])
+            return raw_res
         else:
             return {"error": f"Unknown tool '{name}'"}
 
-    def run(self, target_folder: str, max_iterations: int = 8) -> Dict[str, Any]:
+    def run(self, target_folder: str, custom_instruction: Optional[str] = None, max_iterations: int = 8) -> Dict[str, Any]:
         """
         Executes the Two-Stage Agent Protocol:
         Stage 1 (Reconnaissance) -> Stage 2 (Plan Synthesis)
         """
-        system_prompt = SYSTEM_PROMPT_TEMPLATE.format(target_folder=target_folder)
-        initial_prompt = (
-            f"Please inspect the '{target_folder}' directory on the device storage. "
-            f"Use 'list_files' to inspect contents, and 'read_file_snippet' on any cryptic or unstructured files "
-            f"(such as academic papers, WhatsApp receipts, or temporary cache files). "
-            f"Synthesize an organized folder structure and output a strict JSON Action Plan."
+        custom_goal_block = ""
+        if custom_instruction:
+            custom_goal_block = (
+                f"\n*** CRITICAL: USER CUSTOM GOAL & PRIORITIZED CRITERIA ***\n"
+                f"The user has provided an explicit custom goal for this execution:\n"
+                f"\"{custom_instruction}\"\n"
+                f"You MUST prioritize this instruction above generic cleanup. Focus your inspection and actions specifically "
+                f"on satisfying this criteria. Do not touch or move unrelated files unless requested by this instruction.\n"
+                f"*********************************************************"
+            )
+
+        system_prompt = SYSTEM_PROMPT_TEMPLATE.format(
+            target_folder=target_folder,
+            custom_goal_block=custom_goal_block
         )
+
+        if custom_instruction:
+            initial_prompt = (
+                f"Please inspect the '{target_folder}' directory on the device storage. "
+                f"The user has specified an explicit custom goal: '{custom_instruction}'. "
+                f"Use 'list_files' to inspect contents, and 'read_file_snippet' to check content of relevant files. "
+                f"Synthesize an organized folder structure fulfilling this criteria and output a strict JSON Action Plan."
+            )
+        else:
+            initial_prompt = (
+                f"Please inspect the '{target_folder}' directory on the device storage. "
+                f"Use 'list_files' to inspect contents, and 'read_file_snippet' on any cryptic or unstructured files "
+                f"(such as academic papers, WhatsApp receipts, or temporary cache files). "
+                f"Synthesize an organized folder structure and output a strict JSON Action Plan."
+            )
 
         print("\n" + "=" * 70)
         print(" [Stage 1: Reconnaissance] Launching Gemini Decision Engine...")
-        print(f" Target Folder:  {target_folder}")
+        print(f" Target Folder:   {target_folder}")
+        if custom_instruction:
+            print(f" Custom Goal:     \"{custom_instruction}\"")
         print(f" Reasoning Model: {self.model_name}")
         print(" Inspection Tools: list_files(path), read_file_snippet(path, max_chars)")
         print("=" * 70)
@@ -727,10 +796,24 @@ def main():
             temp_dir_obj.cleanup()
         sys.exit(1)
 
+    # 4. Resolve Custom Instruction / Goal
+    custom_instruction = args.prompt
+    if not custom_instruction and not args.auto_approve and sys.stdin.isatty():
+        try:
+            user_input = input("\nCustom Goal / Instruction (press Enter for general cleanup): ").strip()
+            if user_input:
+                custom_instruction = user_input
+        except (KeyboardInterrupt, EOFError):
+            pass
+
     try:
-        # 4. Reconnaissance & Plan Synthesis (Two-Stage Agent Protocol)
+        # 5. Reconnaissance & Plan Synthesis (Two-Stage Agent Protocol)
         runner = GeminiAgentRunner(api_key=api_key, model_name=args.model, bridge=bridge)
-        action_plan = runner.run(target_folder=args.target_folder, max_iterations=args.max_iterations)
+        action_plan = runner.run(
+            target_folder=args.target_folder,
+            custom_instruction=custom_instruction,
+            max_iterations=args.max_iterations
+        )
 
         print("\n[Stage 2: Plan Synthesis Complete] Vetted Action Plan:")
         print(json.dumps(action_plan, indent=2))
@@ -751,7 +834,7 @@ def main():
         # Step B: Render CLI Diff/Table
         # ======================================================================
         print("\n[Step B] Rendering proposed filesystem mutations table...")
-        render_diff_table(action_plan, dry_run_res.get("summary"))
+        render_diff_table(action_plan, dry_run_res.get("summary"), custom_goal=custom_instruction)
 
         if args.dry_run_only:
             print("\n[*] Flag '--dry-run-only' specified. Stopping without live execution.")

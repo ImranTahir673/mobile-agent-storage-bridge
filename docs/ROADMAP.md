@@ -6,22 +6,32 @@ This roadmap details the engineering phases required to evolve the **Mobile Agen
 
 ```
 +-----------------------------------------------------------------------------------------+
-| Phase 1: Hardening server.py (Gatekeeper, SQLite Ledger, Batch Plans) [CURRENT FOCUS]   |
+| Phase 1: Hardened server.py (Gatekeeper, SQLite Ledger, Batch Plans) [COMPLETED]        |
 +-----------------------------------------------------------------------------------------+
                                            |
                                            v
 +-----------------------------------------------------------------------------------------+
-| Phase 2: Client & Decision Engine Evolution (Action Plan Generator & CLI)               |
+| Phase 2: Client & Decision Engine Evolution (Action Plan Generator & CLI) [COMPLETED]   |
 +-----------------------------------------------------------------------------------------+
                                            |
                                            v
 +-----------------------------------------------------------------------------------------+
-| Phase 3: Android Daemon Resiliency & Named Cloudflare Tunnels                           |
+| Phase 2.5: Custom Goals (--prompt) & Pre-Flight PII Privacy Shield [COMPLETED]          |
 +-----------------------------------------------------------------------------------------+
                                            |
                                            v
 +-----------------------------------------------------------------------------------------+
-| Phase 4: On-Device Hybrid LLMs & Web Audit Dashboard                                    |
+| Phase 2.6: Deterministic Ledger Lookup & Semantic Gathering (--find/--gather) [CURRENT] |
++-----------------------------------------------------------------------------------------+
+                                           |
+                                           v
++-----------------------------------------------------------------------------------------+
+| Phase 3: Android Daemon Resiliency & Cloudflare Tunnels [COMPLETED - VERIFIED ON DEVICE]|
++-----------------------------------------------------------------------------------------+
+                                           |
+                                           v
++-----------------------------------------------------------------------------------------+
+| Phase 4: Standalone Native Mobile Client, UI Diff Cards & Freemium/BYOK [NEXT]          |
 +-----------------------------------------------------------------------------------------+
 ```
 
@@ -80,7 +90,7 @@ Transition the client from single-action imperative tool calls to structured bat
     - Action type (`MOVE`, `TRASH`, `MKDIR`)
   - Require explicit user confirmation `[Y/n]` before firing non-dry-run batches.
 
-- [ ] **2.3 Automated End-to-End Test Suite**
+- [x] **2.3 Automated End-to-End Test Suite**
   - Create test scripts validating:
     - Directory boundary escape attacks.
     - Blacklist violation rejection.
@@ -89,11 +99,49 @@ Transition the client from single-action imperative tool calls to structured bat
 
 ---
 
-## 4. Phase 3: Android Daemon Resiliency & Named Tunnels
+## 4. Phase 2.5: Custom Interactive Goals & Pre-Flight PII Sanitization [COMPLETED]
 
-Ensure the phone server runs reliably in the background without being killed by Android's aggressive memory and battery managers.
+Enhance the Decision Engine with natural-language user guidance and an uncompromising device-local privacy shield.
 
 ### 4.1 Tasks & Deliverables
+
+- [x] **2.5.1 Natural Language Custom Goals (`--prompt` / `-p`)**
+  - Implement CLI argument `--prompt` / `-p` accepting custom user goals (e.g., `python agent_batch_runner.py --prompt "Only organize receipts and fee vouchers"`).
+  - Add interactive CLI prompt: `Custom Goal / Instruction (press Enter for general cleanup): `.
+  - Inject custom goals into Stage 1 reconnaissance and Stage 2 plan synthesis prompts, prioritizing explicit user constraints.
+
+- [x] **2.5.2 Local Pre-Flight PII Privacy Shield**
+  - Implement deterministic device-local regex scrubbing on `/read_file_snippet` before any content leaves the device:
+    - Government IDs / CNIC (`\b\d{5}-\d{7}-\d\b`) ➔ `[REDACTED_CNIC]`
+    - Mobile numbers (`(?:\+92[- ]?|0)?3\d{2}[- ]?\d{7}\b`) ➔ `[REDACTED_PHONE]`
+    - Payment card numbers (`\b(?:\d{4}[- ]?){3}\d{4}\b`) ➔ `[REDACTED_CARD]`
+    - Email addresses ➔ `[REDACTED_EMAIL]`
+  - Enforce model role constraints: forbid reconstructing or outputting PII in reasoning steps or proposed filenames.
+  - Zero raw image uploads: file categorization is strictly metadata-driven (filenames, sizes, timestamps, EXIF year/month).
+
+---
+
+## 5. Phase 2.6: Deterministic Ledger Lookup & Semantic Gathering [CURRENT FOCUS]
+
+Extend the platform from passive cleanup into active information retrieval and structured file gathering.
+
+### 5.1 Tasks & Deliverables
+
+- [ ] **2.6.1 Deterministic Historical Search (`/lookup_history`)**
+  - Implement SQLite query resolver tracking historical moves, renames, and soft-deletes via `action_ledger` and `trash_index`.
+  - Resolve former paths and filenames to their current live disk location or soft-deleted vault target.
+
+- [ ] **2.6.2 Semantic Content Search & Gathering (`--find` / `--gather`)**
+  - Enable natural-language content querying (e.g., *"Find my operating systems lab"* or *"Gather all machine learning papers into Documents/Research/ML"*).
+  - Synthesize candidate matching files into a standard declarative Action Plan using `move` or `copy` operations.
+  - Enforce max 20-action blast radius cap and require explicit human-in-the-loop diff confirmation before executing mutations.
+  - Guarantee 1-tap rollback restoration via pre-logged inverted undo vectors in `.ledger.db`.
+
+## 6. Phase 3: Android Daemon Resiliency & Named Tunnels [COMPLETED]
+
+Ensure the phone server runs reliably in the background without being killed by Android's aggressive memory and battery managers. Verified operational on physical hardware (`/storage/emulated/0`).
+
+### 6.1 Tasks & Deliverables
 
 - [x] **3.1 Termux Daemonization & Wake-Lock**
   - Integrate `termux-wake-lock` commands in startup scripts to prevent CPU sleep during OTA operations.
@@ -108,7 +156,7 @@ Ensure the phone server runs reliably in the background without being killed by 
   - Enable automatic background launching upon device power-on via Termux:Boot integration.
   - Provide daemon status inspection tool reporting PID, memory footprint, port state, and tunnel connectivity (`scripts/status_daemon.sh`).
 
-### 4.2 Daemon Management Guide
+### 6.2 Daemon Management Guide
 
 #### Starting the Daemon
 
@@ -174,16 +222,25 @@ To run the storage bridge automatically every time your Android device powers on
 
 ---
 
-## 5. Phase 4: On-Device Hybrid LLMs & Web Audit Dashboard
+## 7. Phase 4: Production Standalone Mobile Client & Ecosystem
 
-Bring intelligent edge computing directly onto the phone and provide visual observability.
+Evolve from a developer bridging daemon into a standalone consumer Android mobile application with embedded privacy-first AI.
 
-### 5.1 Tasks & Deliverables
+### 7.1 Tasks & Deliverables
 
-- [ ] **4.1 On-Device Local SLM Execution**
-  - Support running lightweight quantized models (e.g. Gemma 2B, Qwen 2.5 1.5B via `llama.cpp` on Termux) for 100% offline categorization.
-  - Implement a **Hybrid Split-Brain Router**: Local model performs fast file inspection; Remote Gemini handles complex multi-step reasoning.
+- [ ] **4.1 Native Mobile UI & Interactive Diff Cards**
+  - Develop a standalone Android client (Kotlin / Jetpack Compose or Flutter) featuring clean visual diff cards (Source $\to$ Target, File Sizes, Action Badges).
+  - One-tap interactive confirmation and 1-tap persistent rollback (`undo`) directly from device notifications and home screen widgets.
 
-- [ ] **4.2 Mobile Bridge Audit Dashboard**
-  - Lightweight web dashboard hosted on the phone (`/dashboard`).
-  - View historical batches, inspect trashed items, visualize storage health, and trigger one-click rollbacks from any browser.
+- [ ] **4.2 Monetization & Inference Modes (Freemium / BYOK / AdMob)**
+  - **BYOK (Bring-Your-Own-Key)**: Zero-fee usage allowing users to enter personal Gemini or OpenAI API keys directly in app settings.
+  - **Freemium Tier**: Daily free quota supported by rewarded ads via Google AdMob.
+  - **Premium Pro Subscription**: Unlimited fast remote reasoning, background automated daily folder audits, and custom rule configurations.
+
+- [ ] **4.3 On-Device Hybrid SLM Execution & Split-Brain Router**
+  - Support running lightweight quantized models (e.g. Gemma 2B, Qwen 2.5 1.5B via `llama.cpp` on Termux / NDK) for 100% offline categorization.
+  - Implement a **Hybrid Split-Brain Router**: Local model performs fast pre-flight inspection and PII redaction; Remote Gemini handles complex multi-step reasoning.
+
+- [ ] **4.4 Mobile Storage Health & Audit Dashboard**
+  - Lightweight web dashboard hosted on the phone (`/dashboard`) or native screen.
+  - View historical batches, inspect trashed items, visualize storage health, and trigger one-click rollbacks from any browser or locally.

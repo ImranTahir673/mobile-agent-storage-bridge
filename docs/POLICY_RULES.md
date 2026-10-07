@@ -1,8 +1,13 @@
 # Policy Gatekeeper Safety Specification
 
-## 1. Core Principles
+## 1. Core Principles & Operating Boundaries
 
-The **Policy Gatekeeper** enforces deterministic, non-negotiable safety guardrails between generative AI reasoning models and mobile storage systems. Generative AI outputs are probabilistic by nature; the filesystem must remain deterministic and resilient against accidental data destruction, hallucinations, or prompt-injection attacks.
+The **Policy Gatekeeper** enforces deterministic, non-negotiable safety guardrails between generative AI reasoning models and mobile storage systems. Generative AI outputs are probabilistic by nature; the filesystem must remain deterministic, privacy-preserving, and resilient against accidental data destruction, hallucinations, or prompt-injection attacks.
+
+### 1.1 Core Operating Role
+* **Primary Scope**: The AI agent operates strictly as a **local file management and semantic storage copilot**. It inspects, organizes, sanitizes, gathers, and categorizes files within user-designated storage zones on Android internal storage (`/storage/emulated/0` / `~/storage/shared`).
+* **Zero Cloud Storage Architecture**: The application **never stores, uploads, or mirrors** user files, directory trees, or database records to external cloud storage. All operations, metadata ledgers (`.ledger.db`), and safety vaults (`.agent_trash`) remain strictly on the physical device. The device is the single source of truth.
+* **Fail-Closed Storage Scoping**: The agent is permanently blocked from reading or modifying system paths, application private databases, `/Android/data`, `/Android/obb`, `.git`, or hidden runtime system trees.
 
 ```
        +---------------------------------------------+
@@ -17,6 +22,8 @@ The **Policy Gatekeeper** enforces deterministic, non-negotiable safety guardrai
        |  [Rule 3] Blast Radius Limit (Max 20/batch) |
        |  [Rule 4] Zero Hard-Delete (Trash Routing)  |
        |  [Rule 5] Collision Handling Strategy       |
+       |  [Rule 6] Privacy Shield & PII Sanitization |
+       |  [Rule 7] Zero Cloud Storage Invariant      |
        +---------------------------------------------+
                      /                 \
        (Passed)    v                     v    (Violated)
@@ -52,7 +59,7 @@ Before evaluating any path, the Gatekeeper applies canonicalization:
 
 ## 3. Rule 2: Storage Blacklists & Protected Entities
 
-The filesystem contains system-critical directories, app sandboxes, and bridge internal databases that the AI agent must never tamper with or read without explicit operational necessity.
+The filesystem contains system-critical directories, app sandboxes, version control directories, and bridge internal databases that the AI agent must never tamper with or read without explicit operational necessity.
 
 ### 3.1 Directory Blacklist Table
 
@@ -61,7 +68,9 @@ The filesystem contains system-critical directories, app sandboxes, and bridge i
 | `Android/` (`Android/data`, `Android/obb`) | **DENIED** (Read & Write) | Android OS application sandboxes and game assets. Modifying breaks installed apps. | Immediate Rejection |
 | `.agent_trash/` | **RESTRICTED** (Internal Only) | Internal soft-delete vault. Agent cannot delete, move, or modify `.agent_trash/` directly. | Immediate Rejection |
 | `.ledger.db*` / `*.db` (root) | **DENIED** (Write) | Rollback databases and write-ahead logs. | Immediate Rejection |
+| `.git/` / `.git*` | **DENIED** (Read & Write) | Version control repositories and operational hooks. | Immediate Rejection |
 | System Roots (`/system`, `/proc`, `/sys`, `/data`) | **DENIED** (All) | Host Linux/Android filesystem protection. | Immediate Rejection |
+| App Private Databases (`*.db`, `*.sqlite`) | **DENIED** (Write) | Third-party application private databases in shared storage. | Immediate Rejection |
 | Hidden Dot-Dirs (`.*/`) at Root | **DENIED** (Write) | System/app configuration trees (e.g. `.nomedia`, `.config`). | Immediate Rejection |
 | DCIM/Camera/ (Mass Mutation) | **RESTRICTED** | Photos/videos folder requires extra confirmation threshold. | Warning / Prompt |
 
@@ -146,29 +155,84 @@ When submitting an action, the plan may specify one of four deterministic strate
 
 ---
 
-## 7. Gatekeeper Validation Workflow
+## 7. Rule 6: Fail-Safe Privacy Shield & Pre-Flight PII Sanitization
+
+Generative AI reasoning models must never be exposed to raw, unscrubbed personal data from user documents or mobile storage.
+
+### 7.1 Local Pre-Flight Scrubbing Invariant
+Before any text snippet or preview leaves the device via `/read_file_snippet` or is processed by the agent reasoning loop, it **must** pass through a local, deterministic regex sanitizer running on the physical device (Python / Kotlin):
+
+| PII Category | Canonical Regex Pattern | Replacement Token |
+| :--- | :--- | :--- |
+| **Government IDs / CNIC** | `\b\d{5}-\d{7}-\d\b` | `[REDACTED_CNIC]` |
+| **Mobile / Phone Numbers** | `(?:\+92[- ]?\|0)?3\d{2}[- ]?\d{7}\b` | `[REDACTED_PHONE]` |
+| **Payment Card Numbers** | `\b(?:\d{4}[- ]?){3}\d{4}\b` | `[REDACTED_CARD]` |
+| **Email Addresses** | `\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b` | `[REDACTED_EMAIL]` |
+
+### 7.2 Model Role Constraints (Zero-PII Inference)
+1. **No PII in Output**: The model is strictly prohibited from inferring, reconstructing, guessing, or outputting PII (CNICs, phone numbers, card digits, email addresses, personal names) in its chain-of-thought, reasoning steps, action descriptions, or target destination names.
+2. **Purely Categorical Interpretation**: The model must treat all input text purely as semantic category indicators (e.g., *"Fee Voucher"*, *"Assignment"*, *"Bank Statement"*, *"Lab Manual"*), without attributing files to specific individuals or account numbers.
+3. **Fail-Closed Violation**: Any candidate plan proposing a filename containing unredacted PII patterns is immediately rejected by the Gatekeeper prior to dry-run simulation.
+
+### 7.3 Zero Raw Image / Video Uploads
+* Image and video organization is **strictly metadata-driven**:
+  - Filenames, file sizes, creation timestamps, and filesystem modification dates.
+  - Safe local EXIF metadata extraction (Year/Month, Camera Model) performed on-device.
+* **Hard Invariant**: Raw image pixels, thumbnails, or video frames must **never** be transmitted over the network or uploaded to external LLM APIs.
+
+---
+
+## 8. Rule 7: Zero Cloud Storage & Local Device Invariant
+
+The Mobile Agent Storage Bridge is built on a zero-cloud-storage architecture:
+
+1. **No External Storage Mirrors**: User files, folders, and archives are never uploaded, replicated, or backed up to external cloud object stores (e.g., AWS S3, Google Cloud Storage, Firebase).
+2. **Local Metadata Ledger**: The transactional SQLite database (`ledger.db`) and its write-ahead logs (`.ledger.db-wal`, `.ledger.db-shm`) reside exclusively within internal device storage.
+3. **Local Trash Vault**: Trashed files reside entirely within `.agent_trash/` on the physical device storage root.
+4. **Transient Inference Only**: When cloud-hosted LLMs (e.g., Gemini API) are used for reasoning, only sanitized, PII-scrubbed metadata and text snippets are sent over TLS 1.3 for stateless inference. No file data is retained or stored remotely.
+
+---
+
+## 9. Rule 8: Semantic Search & Gathering Safety Specification
+
+When an agent executes semantic search or file gathering directives (e.g., *"Find my operating systems lab"* or *"Gather all machine learning papers into Documents/Research/ML"*):
+
+1. **Declarative Plan Required**: The agent cannot directly copy or move search results. It must compile a standard declarative Action Plan adhering to `docs/SCHEMA_SPEC.md` using `move` or `copy` actions.
+2. **Blast Radius Cap**: File gathering batches are strictly limited to **20 files** per batch to prevent runaway disk copying or mass moves.
+3. **Non-Destructive Defaults**: Semantic search queries default to non-destructive inspections. When gathering files, target folder creation must precede file operations (`make_dir` followed by `move` or `copy`).
+4. **Human-in-the-Loop Diff**: Every gathering operation must generate a dry-run terminal/UI diff report requiring explicit user confirmation before any disk mutation occurs.
+5. **Full Rollback Guarantee**: All gathered files are pre-logged with inverted undo vectors in `.ledger.db`, ensuring 1-tap rollback restoration.
+
+---
+
+## 10. Gatekeeper Validation Workflow
 
 ```python
 def validate_action_plan(plan: dict) -> ValidationResult:
     actions = plan.get("actions", [])
     
-    # Check 1: Blast Radius
+    # Check 1: Blast Radius (Max 20 actions)
     if len(actions) > 20:
         return ValidationResult(valid=False, error="Batch exceeds max limit of 20 actions")
         
     for idx, action in enumerate(actions):
-        # Check 2: Path Containment & Blacklists
+        # Check 2: Path Containment & Blacklists (/Android, .git, .agent_trash, .ledger.db)
         for path_field in ["source", "destination", "path"]:
             if path_field in action:
                 resolved = resolve_safe_path(action[path_field])
                 if is_blacklisted(resolved):
                     return ValidationResult(valid=False, error=f"Path {action[path_field]} is blacklisted")
                     
-        # Check 3: Zero Hard-Delete Enforcement
+        # Check 3: Zero Hard-Delete Enforcement (Coerce delete -> trash)
         if action.get("type") == "delete":
-            action["type"] = "trash"  # Coerce to soft-delete
+            action["type"] = "trash"
             
-        # Check 4: Collision Verification
+        # Check 4: PII Shield in Destination Filenames
+        if "destination" in action:
+            if contains_pii(action["destination"]):
+                return ValidationResult(valid=False, error="Proposed destination contains unredacted PII")
+            
+        # Check 5: Collision Verification
         if action.get("type") in ["move", "copy"]:
             dest = resolve_safe_path(action.get("destination"))
             if os.path.exists(dest):

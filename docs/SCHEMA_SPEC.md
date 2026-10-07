@@ -237,3 +237,90 @@ ORDER BY step_index DESC;
 3. Update `action_ledger.status = 'REVERTED'`.
 4. Update `batches.status = 'ROLLED_BACK'` and `batches.rolled_back_at = CURRENT_TIMESTAMP`.
 5. Commit SQLite Transaction.
+
+---
+
+## 6. Semantic Search & Gathering Contract
+
+This section defines the contracts for deterministic historical lookups and semantic content-driven file gathering.
+
+### 6.1 Deterministic Historical Search Contract (`/lookup_history`)
+
+Allows instant, exact lookups for renamed, relocated, or soft-deleted files using the local SQLite ledger without touching file content.
+
+#### Request Schema:
+```json
+{
+  "query_type": "HISTORICAL_LOOKUP",
+  "path": "Download/1508.06576v2.pdf"
+}
+```
+
+#### SQL Resolution Logic:
+```sql
+-- Step 1: Trace forward moves from the original path
+SELECT batch_id, action_type, source_path, destination_path, executed_at, status
+FROM action_ledger
+WHERE source_path = :query_path AND status = 'EXECUTED'
+ORDER BY executed_at DESC LIMIT 1;
+
+-- Step 2: Check if file was soft-deleted
+SELECT trash_id, original_rel_path, trashed_rel_path, trashed_at, purged_at
+FROM trash_index
+WHERE original_rel_path = :query_path;
+```
+
+#### Response Schema:
+```json
+{
+  "status": "FOUND",
+  "original_path": "Download/1508.06576v2.pdf",
+  "current_location": "Documents/Research/Computer_Vision/Neural_Algorithm_of_Artistic_Style_Gatys.pdf",
+  "is_trashed": false,
+  "last_batch_id": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+  "modified_at": "2026-10-06T20:45:12Z"
+}
+```
+
+---
+
+### 6.2 Semantic Content Search & Gathering Contract
+
+Enables natural-language content aggregation (e.g., *"Find my operating systems lab"* or *"Gather all machine learning papers into Documents/Research/ML"*). The agent synthesizes search findings into a standard declarative Action Plan before any mutation occurs.
+
+#### Gathering Action Plan Example:
+```json
+{
+  "plan_id": "7b89e1a2-3c4d-5e6f-7a8b-9c0d1e2f3a4b",
+  "version": "1.0",
+  "timestamp": "2026-10-07T14:30:00Z",
+  "description": "Gather Machine Learning research papers into Documents/Research/ML",
+  "dry_run": false,
+  "collision_strategy": "RENAME_NUMERIC",
+  "actions": [
+    {
+      "action_id": "step-1",
+      "type": "make_dir",
+      "path": "Documents/Research/ML"
+    },
+    {
+      "action_id": "step-2",
+      "type": "move",
+      "source": "Download/2301.00001.pdf",
+      "destination": "Documents/Research/ML/Deep_Learning_Foundations.pdf"
+    },
+    {
+      "action_id": "step-3",
+      "type": "copy",
+      "source": "Documents/Drafts/attention_paper.pdf",
+      "destination": "Documents/Research/ML/attention_paper.pdf"
+    }
+  ]
+}
+```
+
+#### Invariants:
+1. **Zero Raw Cloud Upload**: Content matching is achieved via PII-scrubbed inspection snippets; full files are never streamed to remote APIs.
+2. **Blast Radius Guarantee**: Max 20 gathered actions per execution batch.
+3. **Diff Confirmation**: Terminal/UI diff preview must be explicitly confirmed by the user (`[y/N]`) before non-dry-run execution.
+4. **Reversible Mutations**: All `move` and `copy` gathering actions produce inverse vectors in `ledger.db` for 1-tap rollback.

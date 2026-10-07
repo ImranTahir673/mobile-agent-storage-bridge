@@ -11,6 +11,13 @@ The system addresses the fundamental friction between autonomous AI decision-mak
 
 To solve this, the platform is structured around a **Decoupled 3-Tier Architecture** supporting dual execution topologies: **External Cloud/Tunnel Control** and **Internal On-Device Execution**.
 
+### 1.1 Core Operating Scope & Boundaries
+- **Primary Role**: The agent operates strictly as a **local storage copilot**. It inspects messy directories, categorizes files, redacts sensitive previews, gathers content according to natural-language user instructions, and executes atomic, reversible filesystem mutations on Android internal storage (`/storage/emulated/0` / `~/storage/shared`).
+- **Zero Cloud Storage Architecture**: The application **never stores, replicates, or uploads** user documents, images, directories, or databases to external cloud storage. All user files, transactional SQLite metadata ledgers (`.ledger.db`), and safety soft-delete vaults (`.agent_trash`) remain strictly on the physical device.
+- **Fail-Closed Storage Scoping**: Operations are strictly confined to the user shared storage boundary (`BASE_DIR`). The agent is permanently blocked from reading, traversing, or modifying system trees (`/system`, `/proc`, `/sys`, `/data`), application private sandboxes (`/Android/data`, `/Android/obb`), `.git` repositories, or hidden dot-directories.
+- **Fail-Safe Privacy Shield**: Raw text inspection snippets are locally scrubbed of PII (CNICs, phone numbers, payment cards, email addresses) before any network transit. Raw image pixels/video frames are never uploaded.
+- **Canonical Architecture Reference**: See [`docs/SYSTEM_ARCHITECTURE.md`](file:///d:/Imran%20Tahir/SIDEHUSTLE/bridging-prototype/docs/SYSTEM_ARCHITECTURE.md) for full detailed specifications.
+
 ```mermaid
 graph TD
     subgraph Tier 1: Decision Engine
