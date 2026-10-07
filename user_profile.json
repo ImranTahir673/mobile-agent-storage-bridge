@@ -1,0 +1,39 @@
+{
+  "user_identity": {
+    "primary_name": "Imran Tahir",
+    "aliases": ["Imran", "Tahir"],
+    "identifiers": ["BSAI-182", "182"],
+    "organization": "University"
+  },
+  "known_peers": [
+    {
+      "name": "Fawad",
+      "aliases": ["fawad"],
+      "relation": "Peer / Classmate",
+      "designated_folder": "Documents/Peers/Fawad"
+    },
+    {
+      "name": "Sumbal",
+      "aliases": ["sumbal"],
+      "relation": "Peer / Classmate",
+      "designated_folder": "Documents/Peers/Sumbal"
+    },
+    {
+      "name": "Ahmed",
+      "aliases": ["ahmed"],
+      "relation": "Peer / Classmate",
+      "designated_folder": "Documents/Peers/Ahmed"
+    },
+    {
+      "name": "Yousaf",
+      "aliases": ["yousaf"],
+      "relation": "Peer / Classmate",
+      "designated_folder": "Documents/Peers/Yousaf"
+    }
+  ],
+  "routing_rules": {
+    "peer_documents_base": "Documents/Peers",
+    "personal_documents_base": "Documents/Personal",
+    "academic_base": "Documents/University"
+  }
+}

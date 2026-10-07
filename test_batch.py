@@ -261,6 +261,34 @@ def main():
         assert os.path.basename(src_3) not in down_names, f"{src_3} should have been trashed!"
         print("  ✓ State verification PASSED: files moved and soft-deleted correctly.")
 
+        # 5.5 Phase 2.6: Test Deterministic Ledger Lookup (/lookup_history)
+        print("\n[Step 4.5] Verifying Phase 2.6 Deterministic Ledger Lookup (/lookup_history)...")
+        # Lookup moved file
+        lookup_res1 = requests.post(f"{server_url}/lookup_history", json={"query": "sample_paper_1.pdf"}, timeout=10).json()
+        assert lookup_res1.get("status") == "success", f"Lookup failed: {lookup_res1}"
+        assert lookup_res1.get("matches_count", 0) >= 1, f"Expected match for sample_paper_1.pdf: {lookup_res1}"
+        match1 = lookup_res1["matches"][0]
+        assert match1["plan_id"] == plan_id, f"Plan ID mismatch: {match1}"
+        assert match1["is_trashed"] is False, f"Expected is_trashed=False for moved file: {match1}"
+        print(f"  ✓ Moved file lookup PASSED: {match1['source_path']} -> {match1['destination_path']} [Plan: {match1['plan_id']}]")
+
+        # Lookup soft-deleted / trashed file
+        lookup_res2 = requests.post(f"{server_url}/lookup_history", json={"query": "sample_junk_3.tmp"}, timeout=10).json()
+        assert lookup_res2.get("status") == "success", f"Lookup failed: {lookup_res2}"
+        assert lookup_res2.get("matches_count", 0) >= 1, f"Expected match for sample_junk_3.tmp: {lookup_res2}"
+        match2 = lookup_res2["matches"][0]
+        assert match2["is_trashed"] is True, f"Expected is_trashed=True for trashed file: {match2}"
+        print(f"  ✓ Trashed file lookup PASSED: is_trashed=True correctly identified.")
+
+        # 5.6 Phase 2.7: Test Device-Local User Profile Endpoint (/user_profile)
+        print("\n[Step 4.6] Verifying Phase 2.7 User Profile Endpoint (/user_profile)...")
+        profile_res = requests.get(f"{server_url}/user_profile", timeout=10).json()
+        assert profile_res.get("status") in ("success", "default"), f"Failed getting user profile: {profile_res}"
+        profile_data = profile_res.get("profile", {})
+        assert "user_identity" in profile_data, f"Missing user_identity in profile: {profile_data}"
+        assert "routing_rules" in profile_data, f"Missing routing_rules in profile: {profile_data}"
+        print(f"  ✓ User profile verified: owner='{profile_data['user_identity'].get('primary_name')}', rules={list(profile_data['routing_rules'].keys())}")
+
         # 6. Trigger Rollback
         print(f"\n[Step 5] Triggering POST /rollback_batch for Batch {plan_id}...")
         rollback_res = requests.post(f"{server_url}/rollback_batch", json={"batch_id": plan_id}, timeout=15).json()
@@ -280,6 +308,11 @@ def main():
         assert check_docs.status_code == 404, f"Directory Documents/Organized_Batch should have been removed on rollback!"
         print("  ✓ Destination directory cleanly removed.")
         print("  ✓ All 3 files restored to their exact original locations.")
+
+        # Verify lookup reflects rollback status
+        lookup_post_rollback = requests.post(f"{server_url}/lookup_history", json={"query": "sample_paper_1.pdf"}, timeout=10).json()
+        assert lookup_post_rollback["matches"][0]["status"] == "REVERTED", f"Expected REVERTED status after rollback: {lookup_post_rollback}"
+        print("  ✓ Historical lookup reflects REVERTED status accurately post-rollback.")
 
         # 8. Check Integrity if synthetic files were used
         if storage_dir:
