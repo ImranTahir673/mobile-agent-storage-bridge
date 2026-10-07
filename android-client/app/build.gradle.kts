@@ -93,4 +93,7 @@ dependencies {
     implementation(libs.okhttp.logging)
     implementation(libs.retrofit)
     implementation(libs.retrofit.converter.scalars)
+
+    // Unit Testing
+    testImplementation(libs.junit)
 }
