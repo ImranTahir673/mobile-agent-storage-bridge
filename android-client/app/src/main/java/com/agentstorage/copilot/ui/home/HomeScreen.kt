@@ -17,8 +17,10 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.automirrored.filled.Undo
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.SmartToy
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -161,22 +163,43 @@ fun HomeScreen(
 
                 FlowRow(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
                     FilterChip(
                         selected = false,
-                        onClick = { viewModel.generatePlan(effectiveApiKey, "Organize my Download folder by file category") },
-                        label = { Text("Organize Downloads") }
+                        onClick = {
+                            val task = "Gather my fee vouchers and university challans into Documents/University/Vouchers"
+                            viewModel.onPromptChange(task)
+                            viewModel.generatePlan(effectiveApiKey, task)
+                        },
+                        label = { Text("📋 Sort Student Vouchers") }
                     )
                     FilterChip(
                         selected = false,
-                        onClick = { viewModel.generatePlan(effectiveApiKey, "Sort fee vouchers and receipts") },
-                        label = { Text("Sort Receipts") }
+                        onClick = {
+                            val task = "Find files belonging to peers like Fawad and move them to Documents/Peers"
+                            viewModel.onPromptChange(task)
+                            viewModel.generatePlan(effectiveApiKey, task)
+                        },
+                        label = { Text("👥 Separate Peer Documents") }
                     )
                     FilterChip(
                         selected = false,
-                        onClick = { viewModel.generatePlan(effectiveApiKey, "Gather research papers into Documents/Research") },
-                        label = { Text("Gather Papers") }
+                        onClick = {
+                            val task = "Rename messy document downloads based on their contents"
+                            viewModel.onPromptChange(task)
+                            viewModel.generatePlan(effectiveApiKey, task)
+                        },
+                        label = { Text("🏷️ Clean Download Names") }
+                    )
+                    FilterChip(
+                        selected = false,
+                        onClick = {
+                            val task = "Move screenshots older than 30 days into .agent_trash"
+                            viewModel.onPromptChange(task)
+                            viewModel.generatePlan(effectiveApiKey, task)
+                        },
+                        label = { Text("🗑️ Cleanup Old Screenshots") }
                     )
                 }
 
@@ -194,12 +217,58 @@ fun HomeScreen(
                         Spacer(modifier = Modifier.width(12.dp))
                         Text(text = state.statusMessage, style = MaterialTheme.typography.bodyMedium)
                     }
-                } else {
-                    Text(
-                        text = state.statusMessage,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.outline
-                    )
+                }
+
+                // Conversational Assistant Response
+                if (state.conversationalResponse != null) {
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.surfaceVariant
+                        ),
+                        shape = RoundedCornerShape(12.dp)
+                    ) {
+                        Column(modifier = Modifier.padding(14.dp)) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Icon(
+                                        imageVector = Icons.Default.SmartToy,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Text(
+                                        text = "Agent Copilot",
+                                        fontWeight = FontWeight.Bold,
+                                        style = MaterialTheme.typography.titleSmall
+                                    )
+                                }
+                                IconButton(
+                                    onClick = { viewModel.dismissConversationalResponse() },
+                                    modifier = Modifier.size(24.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Close,
+                                        contentDescription = "Dismiss",
+                                        tint = MaterialTheme.colorScheme.outline,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                }
+                            }
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Text(
+                                text = state.conversationalResponse ?: "",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
                 }
 
                 // Error Message (Clickable to open Settings Dialog)
