@@ -1,10 +1,12 @@
-# Schema Specification: Action Plans & Rollback Ledger
+# Schema Specification: Action Plans, Rollback Ledger & Profiles
 
 ## 1. Overview
 
 This document specifies the strict schema contracts governing the **Mobile Agent Storage Bridge**:
 1. **The JSON Action Plan Schema**: Declarative contract emitted by the Decision Engine (LLM) and vetted by the Policy Gatekeeper.
-2. **The SQLite Rollback Ledger Schema**: Persistent, write-ahead transactional database (`ledger.db`) storing every executed operation, metadata, and inverted undo vectors for complete rollback capability.
+2. **The SQLite Rollback Ledger Schema**: Persistent, write-ahead transactional database (`.ledger.db`) storing every executed operation, metadata, and inverted undo vectors for complete rollback capability.
+3. **The User Profile & Peer Schema (`user_profile.json`)**: Device-local identity grounding schema and `/user_profile` bridge contract.
+4. **The Phase 4 Interactive Diff Card & IPC Approval Schema**: Client-to-engine contract for granular per-card action approval in the native Android application.
 
 ---
 
@@ -228,99 +230,263 @@ WHERE batch_id = :target_batch_id
 ORDER BY step_index DESC;
 ```
 
-### Rollback Process Flow:
-1. Begin SQLite Transaction.
-2. Iterate through each row in reverse step index:
-   - For `move`: Atomically move `undo_source_path` back to `undo_destination_path`.
-   - For `remove_dir`: Check if directory is empty; if empty, call `os.rmdir`.
-   - For `untrash`: Move file from `.agent_trash/` back to original relative path and mark `trash_index.purged_at = CURRENT_TIMESTAMP`.
-3. Update `action_ledger.status = 'REVERTED'`.
-4. Update `batches.status = 'ROLLED_BACK'` and `batches.rolled_back_at = CURRENT_TIMESTAMP`.
-5. Commit SQLite Transaction.
-
 ---
 
 ## 6. Semantic Search & Gathering Contract
 
-This section defines the contracts for deterministic historical lookups and semantic content-driven file gathering.
-
 ### 6.1 Deterministic Historical Search Contract (`/lookup_history`)
-
-Allows instant, exact lookups for renamed, relocated, or soft-deleted files using the local SQLite ledger without touching file content.
 
 #### Request Schema:
 ```json
 {
-  "query_type": "HISTORICAL_LOOKUP",
-  "path": "Download/1508.06576v2.pdf"
+  "query": "Download/1508.06576v2.pdf"
 }
 ```
 
 #### SQL Resolution Logic:
 ```sql
--- Step 1: Trace forward moves from the original path
-SELECT batch_id, action_type, source_path, destination_path, executed_at, status
+-- Step 1: Trace mutations in action_ledger matching query
+SELECT batch_id, step_index, action_type, source_path, destination_path, status, executed_at
 FROM action_ledger
-WHERE source_path = :query_path AND status = 'EXECUTED'
-ORDER BY executed_at DESC LIMIT 1;
+WHERE source_path LIKE '%' || :query || '%' OR destination_path LIKE '%' || :query || '%'
+ORDER BY id DESC;
 
--- Step 2: Check if file was soft-deleted
+-- Step 2: Check active or past trash records
 SELECT trash_id, original_rel_path, trashed_rel_path, trashed_at, purged_at
 FROM trash_index
-WHERE original_rel_path = :query_path;
+WHERE original_rel_path LIKE '%' || :query || '%' OR trashed_rel_path LIKE '%' || :query || '%';
 ```
 
 #### Response Schema:
 ```json
 {
-  "status": "FOUND",
-  "original_path": "Download/1508.06576v2.pdf",
-  "current_location": "Documents/Research/Computer_Vision/Neural_Algorithm_of_Artistic_Style_Gatys.pdf",
-  "is_trashed": false,
-  "last_batch_id": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
-  "modified_at": "2026-10-06T20:45:12Z"
-}
-```
-
----
-
-### 6.2 Semantic Content Search & Gathering Contract
-
-Enables natural-language content aggregation (e.g., *"Find my operating systems lab"* or *"Gather all machine learning papers into Documents/Research/ML"*). The agent synthesizes search findings into a standard declarative Action Plan before any mutation occurs.
-
-#### Gathering Action Plan Example:
-```json
-{
-  "plan_id": "7b89e1a2-3c4d-5e6f-7a8b-9c0d1e2f3a4b",
-  "version": "1.0",
-  "timestamp": "2026-10-07T14:30:00Z",
-  "description": "Gather Machine Learning research papers into Documents/Research/ML",
-  "dry_run": false,
-  "collision_strategy": "RENAME_NUMERIC",
-  "actions": [
+  "query": "sample_paper_1.pdf",
+  "count": 1,
+  "matches": [
     {
-      "action_id": "step-1",
-      "type": "make_dir",
-      "path": "Documents/Research/ML"
-    },
-    {
-      "action_id": "step-2",
+      "plan_id": "e4099765-710b-49c3-95d9-4ddeaa0e7b74",
+      "step_index": 2,
       "type": "move",
-      "source": "Download/2301.00001.pdf",
-      "destination": "Documents/Research/ML/Deep_Learning_Foundations.pdf"
-    },
-    {
-      "action_id": "step-3",
-      "type": "copy",
-      "source": "Documents/Drafts/attention_paper.pdf",
-      "destination": "Documents/Research/ML/attention_paper.pdf"
+      "source_path": "Download/sample_paper_1.pdf",
+      "destination_path": "Documents/Organized_Batch/sample_paper_1.pdf",
+      "status": "EXECUTED",
+      "timestamp": "2026-10-07 14:09:41",
+      "is_trashed": false
     }
   ]
 }
 ```
 
-#### Invariants:
-1. **Zero Raw Cloud Upload**: Content matching is achieved via PII-scrubbed inspection snippets; full files are never streamed to remote APIs.
-2. **Blast Radius Guarantee**: Max 20 gathered actions per execution batch.
-3. **Diff Confirmation**: Terminal/UI diff preview must be explicitly confirmed by the user (`[y/N]`) before non-dry-run execution.
-4. **Reversible Mutations**: All `move` and `copy` gathering actions produce inverse vectors in `ledger.db` for 1-tap rollback.
+---
+
+## 7. Device-Local User Profile & Peer Separation Schema (`user_profile.json`)
+
+To enable context-aware routing and isolate peer/third-party files, the bridge consumes a device-local `user_profile.json`.
+
+### 7.1 JSON Schema Specification
+
+```json
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "UserProfileConfig",
+  "type": "object",
+  "required": ["user_identity", "known_peers", "routing_rules"],
+  "properties": {
+    "user_identity": {
+      "type": "object",
+      "required": ["primary_name"],
+      "properties": {
+        "primary_name": { "type": "string" },
+        "aliases": { "type": "array", "items": { "type": "string" } },
+        "identifiers": { "type": "array", "items": { "type": "string" } },
+        "organization": { "type": "string" }
+      }
+    },
+    "known_peers": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "designated_folder"],
+        "properties": {
+          "name": { "type": "string" },
+          "aliases": { "type": "array", "items": { "type": "string" } },
+          "relation": { "type": "string" },
+          "designated_folder": { "type": "string" }
+        }
+      }
+    },
+    "routing_rules": {
+      "type": "object",
+      "required": ["peer_documents_base", "personal_documents_base", "academic_base"],
+      "properties": {
+        "peer_documents_base": { "type": "string" },
+        "personal_documents_base": { "type": "string" },
+        "academic_base": { "type": "string" }
+      }
+    }
+  }
+}
+```
+
+### 7.2 Example `user_profile.json` Payload
+
+```json
+{
+  "user_identity": {
+    "primary_name": "Imran Tahir",
+    "aliases": ["imran", "imran_tahir", "tahir_imran"],
+    "identifiers": ["BSAI-182", "bsai182"],
+    "organization": "University / Sidehustle"
+  },
+  "known_peers": [
+    {
+      "name": "Fawad",
+      "aliases": ["fawad", "fawad_khan", "fawadkhan"],
+      "relation": "Classmate / Colleague",
+      "designated_folder": "Documents/Peers/Fawad"
+    },
+    {
+      "name": "Sumbal",
+      "aliases": ["sumbal", "sumbal_ai", "sumbal_cs"],
+      "relation": "Classmate / Project Partner",
+      "designated_folder": "Documents/Peers/Sumbal"
+    }
+  ],
+  "routing_rules": {
+    "peer_documents_base": "Documents/Peers",
+    "personal_documents_base": "Documents/Personal",
+    "academic_base": "Documents/University"
+  }
+}
+```
+
+### 7.3 `GET /user_profile` Endpoint Contract
+
+* **Endpoint**: `GET /user_profile`
+* **Response (HTTP 200)**:
+```json
+{
+  "status": "ok",
+  "profile": {
+    "user_identity": {
+      "primary_name": "Imran Tahir",
+      "aliases": ["imran", "imran_tahir"],
+      "identifiers": ["BSAI-182"],
+      "organization": "University"
+    },
+    "known_peers": [
+      {
+        "name": "Fawad",
+        "aliases": ["fawad", "fawad_khan"],
+        "relation": "Classmate",
+        "designated_folder": "Documents/Peers/Fawad"
+      }
+    ],
+    "routing_rules": {
+      "peer_documents_base": "Documents/Peers",
+      "personal_documents_base": "Documents/Personal",
+      "academic_base": "Documents/University"
+    }
+  }
+}
+```
+
+---
+
+## 8. Phase 4 Client-to-Engine IPC & Interactive Card Approval Schema
+
+In the Phase 4 native Android application, the UI presents each proposed operation as an interactive Material 3 card. Users can toggle individual items on or off before confirming execution.
+
+### 8.1 Plan Card Presentation Model (Engine -> UI)
+
+```json
+{
+  "plan_id": "8d3e91a2-4c5b-6f7a-8b9c-0d1e2f3a4b5c",
+  "description": "Organize Fall 2026 University Fee Receipts and Sort Peer Submissions",
+  "total_actions": 3,
+  "estimated_bytes": 1420500,
+  "cards": [
+    {
+      "action_id": "step-1",
+      "type": "make_dir",
+      "path": "Documents/University/Fee_Vouchers",
+      "display_title": "Create Folder: Fee Vouchers",
+      "display_subtitle": "Documents/University/Fee_Vouchers",
+      "icon_type": "FOLDER_CREATE",
+      "is_destructive": false,
+      "default_approved": true
+    },
+    {
+      "action_id": "step-2",
+      "type": "move",
+      "source": "Download/voucher_182.pdf",
+      "destination": "Documents/University/Fee_Vouchers/Imran_Fee_Voucher_Fall2026.pdf",
+      "display_title": "Move: voucher_182.pdf",
+      "display_subtitle": "-> Documents/University/Fee_Vouchers/Imran_Fee_Voucher_Fall2026.pdf",
+      "file_size_formatted": "1.2 MB",
+      "icon_type": "FILE_MOVE",
+      "is_destructive": false,
+      "default_approved": true
+    },
+    {
+      "action_id": "step-3",
+      "type": "move",
+      "source": "Download/fawad_fee.pdf",
+      "destination": "Documents/Peers/Fawad/fawad_fee.pdf",
+      "display_title": "Route Peer File: Fawad Fee Receipt",
+      "display_subtitle": "-> Documents/Peers/Fawad/fawad_fee.pdf",
+      "peer_badge": "PEER: Fawad",
+      "file_size_formatted": "220 KB",
+      "icon_type": "PEER_MOVE",
+      "is_destructive": false,
+      "default_approved": true
+    }
+  ]
+}
+```
+
+### 8.2 User Interactive Approval Submission (UI -> Engine)
+
+When the user confirms the plan, the UI emits the user's granular decisions back to the local Android engine:
+
+```json
+{
+  "plan_id": "8d3e91a2-4c5b-6f7a-8b9c-0d1e2f3a4b5c",
+  "approved_action_ids": [
+    "step-1",
+    "step-2"
+  ],
+  "rejected_action_ids": [
+    "step-3"
+  ],
+  "collision_strategy": "RENAME_NUMERIC",
+  "dry_run": false
+}
+```
+
+### 8.3 Execution Progress & Rollback IPC Events (Engine -> UI)
+
+Emitted via Kotlin Flow / StateFlow (or SSE in bridge mode):
+
+```json
+{
+  "event": "STEP_COMPLETED",
+  "plan_id": "8d3e91a2-4c5b-6f7a-8b9c-0d1e2f3a4b5c",
+  "completed_step": 1,
+  "total_steps": 2,
+  "action_id": "step-1",
+  "message": "Created directory: Documents/University/Fee_Vouchers"
+}
+```
+
+```json
+{
+  "event": "BATCH_COMPLETE",
+  "batch_id": "8d3e91a2-4c5b-6f7a-8b9c-0d1e2f3a4b5c",
+  "status": "COMPLETED",
+  "executed_count": 2,
+  "reverted_count": 0,
+  "undo_available": true,
+  "undo_token": "8d3e91a2-4c5b-6f7a-8b9c-0d1e2f3a4b5c"
+}
+```

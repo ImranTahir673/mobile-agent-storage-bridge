@@ -6,7 +6,7 @@ The **Policy Gatekeeper** enforces deterministic, non-negotiable safety guardrai
 
 ### 1.1 Core Operating Role
 * **Primary Scope**: The AI agent operates strictly as a **local file management and semantic storage copilot**. It inspects, organizes, sanitizes, gathers, and categorizes files within user-designated storage zones on Android internal storage (`/storage/emulated/0` / `~/storage/shared`).
-* **Zero Cloud Storage Architecture**: The application **never stores, uploads, or mirrors** user files, directory trees, or database records to external cloud storage. All operations, metadata ledgers (`.ledger.db`), and safety vaults (`.agent_trash`) remain strictly on the physical device. The device is the single source of truth.
+* **Zero Cloud Storage Architecture**: The application **never stores, uploads, or mirrors** user files, directory trees, or database records to external cloud storage. All operations, metadata ledgers (`.ledger.db`), safety vaults (`.agent_trash`), and user profile configurations (`user_profile.json`) remain strictly on the physical device. The device is the single source of truth.
 * **Fail-Closed Storage Scoping**: The agent is permanently blocked from reading or modifying system paths, application private databases, `/Android/data`, `/Android/obb`, `.git`, or hidden runtime system trees.
 
 ```
@@ -22,8 +22,11 @@ The **Policy Gatekeeper** enforces deterministic, non-negotiable safety guardrai
        |  [Rule 3] Blast Radius Limit (Max 20/batch) |
        |  [Rule 4] Zero Hard-Delete (Trash Routing)  |
        |  [Rule 5] Collision Handling Strategy       |
-       |  [Rule 6] Privacy Shield & PII Sanitization |
+       |  [Rule 6] Tier 1 vs Tier 2 Privacy Shield   |
        |  [Rule 7] Zero Cloud Storage Invariant      |
+       |  [Rule 8] Semantic Search & Gathering Rules |
+       |  [Rule 9] Peer Separation & Isolation       |
+       |  [Rule 10] Standalone Client Invariants     |
        +---------------------------------------------+
                      /                 \
        (Passed)    v                     v    (Violated)
@@ -155,19 +158,39 @@ When submitting an action, the plan may specify one of four deterministic strate
 
 ---
 
-## 7. Rule 6: Fail-Safe Privacy Shield & Pre-Flight PII Sanitization
+## 7. Rule 6: Fail-Safe Privacy Shield & Tier 1 vs. Tier 2 Sanitization
 
 Generative AI reasoning models must never be exposed to raw, unscrubbed personal data from user documents or mobile storage.
 
-### 7.1 Local Pre-Flight Scrubbing Invariant
-Before any text snippet or preview leaves the device via `/read_file_snippet` or is processed by the agent reasoning loop, it **must** pass through a local, deterministic regex sanitizer running on the physical device (Python / Kotlin):
+### 7.1 Tier 1 vs. Tier 2 Data Classification
 
-| PII Category | Canonical Regex Pattern | Replacement Token |
-| :--- | :--- | :--- |
-| **Government IDs / CNIC** | `\b\d{5}-\d{7}-\d\b` | `[REDACTED_CNIC]` |
-| **Mobile / Phone Numbers** | `(?:\+92[- ]?\|0)?3\d{2}[- ]?\d{7}\b` | `[REDACTED_PHONE]` |
-| **Payment Card Numbers** | `\b(?:\d{4}[- ]?){3}\d{4}\b` | `[REDACTED_CARD]` |
-| **Email Addresses** | `\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b` | `[REDACTED_EMAIL]` |
+Sanitization occurs strictly in **device RAM** before any snippet is emitted to the network:
+
+```
++-----------------------------------------------------------------------------------------------+
+|                                PRIVACY SANITIZATION MATRIX                                    |
++-----------------------------------------------------------------------------------------------+
+| TIER 1: ZERO-TOLERANCE REDACTION (MANDATORY REGEX SCRUBBING)                                  |
+| Pattern Category              | Regex Pattern                             | Replacement Token |
+| ----------------------------- | ----------------------------------------- | ----------------- |
+| Government ID / CNIC          | \b\d{5}-\d{7}-\d\b                        | [REDACTED_CNIC]   |
+| Mobile / Telephone Numbers    | (?:\+92[- ]?|0)?3\d{2}[- ]?\d{7}\b        | [REDACTED_PHONE]  |
+| Credit / Debit Payment Cards  | \b(?:\d{4}[- ]?){3}\d{4}\b                | [REDACTED_CARD]   |
+| Bank IBANs                    | \b[A-Z]{2}\d{2}[A-Z0-9]{11,30}\b          | [REDACTED_IBAN]   |
+| Personal Email Addresses      | \b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z]{2,}\b | [REDACTED_EMAIL] |
+| Passwords, PINs, Auth Tokens  | (?i)(password|pin|secret|token)\s*[:=]\s*\S+ | [REDACTED_SECRET]|
+|                                                                                               |
+| TIER 2: SAFE RETAINED CONTEXT (PRESERVED FOR REASONING ACCURACY)                              |
+| Data Category                 | Example Context Preserved                 | Reasoning Value   |
+| ----------------------------- | ----------------------------------------- | ----------------- |
+| Challan / Fee Voucher Numbers | Challan #182-9021-A                       | Matches vouchers   |
+| Student Roll / Registration IDs| Roll No: BSAI-182                         | Matches coursework |
+| Course Codes / Academic Titles| CS-301, AI-202, Machine Learning          | Course routing     |
+| Issuing Banks / Universities  | HBL, Meezan Bank, FAST-NUCES               | Categorization     |
+| General Amounts & Currencies  | PKR 145,000, USD 45.00                    | Receipt sorting    |
+| Document & Fiscal Dates       | Fall Semester 2026, 2026-10-06             | Temporal indexing  |
++-----------------------------------------------------------------------------------------------+
+```
 
 ### 7.2 Model Role Constraints (Zero-PII Inference)
 1. **No PII in Output**: The model is strictly prohibited from inferring, reconstructing, guessing, or outputting PII (CNICs, phone numbers, card digits, email addresses, personal names) in its chain-of-thought, reasoning steps, action descriptions, or target destination names.
@@ -205,10 +228,37 @@ When an agent executes semantic search or file gathering directives (e.g., *"Fin
 
 ---
 
-## 10. Gatekeeper Validation Workflow
+## 10. Rule 9: Peer Separation & Profile Isolation
+
+To prevent misfiling classmate, peer, colleague, or third-party documents into personal user storage zones:
+
+1. **Strict Non-Pollution Invariant**: The agent must **never** move or classify documents belonging to identified peers or third parties into personal user directories (`personal_documents_base`, e.g. `Documents/Personal/Receipts`).
+2. **Identity Grounding via `user_profile.json`**: The agent grounds user identity in the device-local profile:
+   - Primary user identity: `user_identity.primary_name` and `user_identity.identifiers`.
+   - Known peers list: `known_peers` (names, aliases, relation, and designated folder).
+3. **Automated Peer Folder Routing**:
+   - Files containing peer names or aliases (e.g., `fawad fee.pdf`, `sumbal assignment.docx`) must be routed directly into their corresponding peer folder (e.g., `Documents/Peers/Fawad/`).
+   - If an unrecognized peer document is encountered, it must be kept in the peer root (`Documents/Peers/Unassigned/`) or left untouched—never co-mingled with personal files.
+4. **Precedence Over Generic Directives**: Rule 9 overrides broad gathering directives. Even if the user specifies *"Gather all fee vouchers into Documents/Personal/Receipts"*, any voucher matching a peer name must be routed to `Documents/Peers/<Peer_Name>` or excluded from the batch.
+
+---
+
+## 11. Rule 10: Standalone Mobile Client Gatekeeper Invariants
+
+In the Phase 4 native Android application (APK), the local Android Service and embedded engine must enforce identical safeguards to the server-side gatekeeper:
+
+1. **Equal Rigor on Mobile**: Running locally inside an Android Service does not relax any safety rules. The 20-action blast radius cap, 500 MB volume limit, path sandboxing, and directory blacklists remain active.
+2. **Mandatory Room / SQLite Pre-Logging**: Every forward action must have an inverted undo vector pre-logged in the local Room/SQLite database before invoking disk I/O.
+3. **Soft-Delete Only**: The Android client must route all file deletions to `.agent_trash/`. Direct calls to `File.delete()` on non-trash targets are strictly prohibited.
+4. **Foreground Execution & Wake-Lock**: Large batches must run within a foreground Android Service with a persistent notification and wake-lock to prevent OS process killing mid-transaction.
+5. **Granular Card-Level Approval**: The UI must allow users to toggle off specific actions from an Action Plan before execution, re-validating the resulting plan against the Gatekeeper.
+
+---
+
+## 12. Gatekeeper Validation Workflow
 
 ```python
-def validate_action_plan(plan: dict) -> ValidationResult:
+def validate_action_plan(plan: dict, user_profile: dict = None) -> ValidationResult:
     actions = plan.get("actions", [])
     
     # Check 1: Blast Radius (Max 20 actions)
@@ -227,12 +277,18 @@ def validate_action_plan(plan: dict) -> ValidationResult:
         if action.get("type") == "delete":
             action["type"] = "trash"
             
-        # Check 4: PII Shield in Destination Filenames
+        # Check 4: PII Shield in Destination Filenames (Tier 1 Check)
         if "destination" in action:
-            if contains_pii(action["destination"]):
+            if contains_tier1_pii(action["destination"]):
                 return ValidationResult(valid=False, error="Proposed destination contains unredacted PII")
+                
+        # Check 5: Peer Separation Invariant (Rule 9)
+        if user_profile and "destination" in action:
+            dest = action["destination"]
+            if violates_peer_isolation(dest, action.get("source", ""), user_profile):
+                return ValidationResult(valid=False, error="Peer document routed into personal folder")
             
-        # Check 5: Collision Verification
+        # Check 6: Collision Verification
         if action.get("type") in ["move", "copy"]:
             dest = resolve_safe_path(action.get("destination"))
             if os.path.exists(dest):
