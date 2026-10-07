@@ -30,9 +30,26 @@ class GeminiApiClient {
         .build()
 
     /**
-     * Stateless call to Gemini API using pre-flight sanitized contents.
+     * Stateless call to Gemini API for Action Plan synthesis.
      */
     suspend fun generateActionPlan(
+        apiKey: String,
+        model: String = DEFAULT_MODEL,
+        systemPrompt: String,
+        userPrompt: String
+    ): String = generateContent(apiKey, model, systemPrompt, userPrompt)
+
+    /**
+     * Stateless call to Gemini API for conversational inquiries and help.
+     */
+    suspend fun generateConversationalResponse(
+        apiKey: String,
+        model: String = DEFAULT_MODEL,
+        systemPrompt: String,
+        userPrompt: String
+    ): String = generateContent(apiKey, model, systemPrompt, userPrompt)
+
+    private suspend fun generateContent(
         apiKey: String,
         model: String = DEFAULT_MODEL,
         systemPrompt: String,

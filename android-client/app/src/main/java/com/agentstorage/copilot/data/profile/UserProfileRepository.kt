@@ -41,17 +41,35 @@ class UserProfileRepository(private val context: Context, private val baseDir: F
     private fun createDefaultProfile(): UserProfile {
         return UserProfile(
             userIdentity = UserIdentity(
-                primaryName = "User",
-                aliases = listOf("user", "me"),
-                identifiers = emptyList(),
-                organization = "Personal"
+                primaryName = "Imran Tahir",
+                aliases = listOf("Imran", "Tahir"),
+                identifiers = listOf("BSAI-182", "182"),
+                organization = "University"
             ),
             knownPeers = listOf(
                 PeerProfile(
-                    name = "Peer Example",
-                    aliases = listOf("colleague", "partner"),
-                    relation = "Colleague / Peer",
-                    designatedFolder = "Documents/Peers/Peer_Example"
+                    name = "Fawad",
+                    aliases = listOf("fawad"),
+                    relation = "Peer / Classmate",
+                    designatedFolder = "Documents/Peers/Fawad"
+                ),
+                PeerProfile(
+                    name = "Sumbal",
+                    aliases = listOf("sumbal"),
+                    relation = "Peer / Classmate",
+                    designatedFolder = "Documents/Peers/Sumbal"
+                ),
+                PeerProfile(
+                    name = "Ahmed",
+                    aliases = listOf("ahmed"),
+                    relation = "Peer / Classmate",
+                    designatedFolder = "Documents/Peers/Ahmed"
+                ),
+                PeerProfile(
+                    name = "Yousaf",
+                    aliases = listOf("yousaf"),
+                    relation = "Peer / Classmate",
+                    designatedFolder = "Documents/Peers/Yousaf"
                 )
             ),
             routingRules = RoutingRules(

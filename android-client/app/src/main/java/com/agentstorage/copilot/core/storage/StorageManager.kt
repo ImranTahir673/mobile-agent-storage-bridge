@@ -23,17 +23,17 @@ class StorageManager(
 ) {
 
     /**
-     * Lists files relative to base storage root.
+     * Lists files relative to base storage root, sorted by newest first.
      */
     fun listFiles(relativePath: String = ""): List<StorageFileInfo> {
         val target = gatekeeper.resolveSafePath(relativePath)
         if (!target.exists() || !target.isDirectory) return emptyList()
 
-        val files = target.listFiles() ?: return emptyList()
+        val files = target.listFiles()?.sortedByDescending { it.lastModified() } ?: return emptyList()
         val results = mutableListOf<StorageFileInfo>()
 
         for (file in files) {
-            if (gatekeeper.isBlacklisted(file)) continue
+            if (gatekeeper.isBlacklisted(file) || file.name.startsWith(".")) continue
 
             val relPath = file.canonicalPath.removePrefix(baseDir.canonicalPath).trimStart(File.separatorChar)
             results.add(
@@ -51,19 +51,56 @@ class StorageManager(
 
     /**
      * Reads a preview snippet of a file, scrubbing sensitive Tier 1 PII before returning.
+     * Extracts readable text strings safely from documents, text, and binary formats.
      */
     fun readFileSnippet(relativePath: String, maxChars: Int = 1000): String {
-        val file = gatekeeper.resolveSafePath(relativePath)
-        if (!file.exists() || !file.isFile) return ""
+        return try {
+            val file = gatekeeper.resolveSafePath(relativePath)
+            if (!file.exists() || !file.isFile || file.length() == 0L) return ""
 
-        val buffer = CharArray(maxChars)
-        val charsRead = file.bufferedReader().use { reader ->
-            reader.read(buffer, 0, maxChars)
+            val ext = file.extension.lowercase()
+            val rawSnippet = when (ext) {
+                "txt", "csv", "json", "xml", "md", "log", "html", "ini", "conf" -> {
+                    file.bufferedReader(Charsets.UTF_8).use { reader ->
+                        val buffer = CharArray(maxChars)
+                        val read = reader.read(buffer, 0, maxChars)
+                        if (read > 0) String(buffer, 0, read) else ""
+                    }
+                }
+                "pdf" -> {
+                    // Extract printable ASCII text chunks from PDF stream
+                    val bytesToRead = minOf(file.length().toInt(), 8192)
+                    val buffer = ByteArray(bytesToRead)
+                    file.inputStream().use { it.read(buffer) }
+                    extractPrintableText(buffer, maxChars)
+                }
+                else -> {
+                    // Default safe printable extraction
+                    val bytesToRead = minOf(file.length().toInt(), 4096)
+                    val buffer = ByteArray(bytesToRead)
+                    file.inputStream().use { it.read(buffer) }
+                    extractPrintableText(buffer, maxChars)
+                }
+            }
+
+            if (rawSnippet.isBlank()) "" else PiiSanitizer.sanitizeSnippet(rawSnippet)
+        } catch (e: Exception) {
+            ""
         }
+    }
 
-        if (charsRead <= 0) return ""
-        val rawSnippet = String(buffer, 0, charsRead)
-        return PiiSanitizer.sanitizeSnippet(rawSnippet)
+    private fun extractPrintableText(bytes: ByteArray, maxChars: Int): String {
+        val sb = StringBuilder()
+        for (b in bytes) {
+            val c = b.toInt().toChar()
+            if (c in ' '..'~' || c == '\n' || c == '\r' || c == '\t') {
+                sb.append(c)
+                if (sb.length >= maxChars) break
+            } else if (sb.isNotEmpty() && sb.last() != ' ') {
+                sb.append(' ')
+            }
+        }
+        return sb.toString().trim()
     }
 
     /**

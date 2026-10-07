@@ -127,10 +127,9 @@ class ExecutionForegroundService : Service() {
         database.batchDao().insertBatch(batchEntity)
 
         // 2. Pre-log actions and calculate inverted undo vectors
-        val preLoggedIds = mutableListOf<Long>()
-        plan.actions.forEachIndexed { index, action ->
+        val actionEntities = plan.actions.mapIndexed { index, action ->
             val undo = calculateUndoVector(action)
-            val actionEntity = ActionLedgerEntity(
+            ActionLedgerEntity(
                 batchId = batchId,
                 stepIndex = index + 1,
                 actionType = action.type,
@@ -141,9 +140,8 @@ class ExecutionForegroundService : Service() {
                 undoDestinationPath = undo.third,
                 status = "PRE_LOGGED"
             )
-            val id = database.actionLedgerDao().insertAction(actionEntity)
-            preLoggedIds.add(id)
         }
+        val preLoggedIds = database.actionLedgerDao().insertActions(actionEntities)
 
         database.batchDao().updateBatch(batchEntity.copy(status = "RUNNING"))
         updateNotification("Executing batch: ${plan.actions.size} actions...")
@@ -151,7 +149,7 @@ class ExecutionForegroundService : Service() {
         val strategy = try {
             CollisionStrategy.valueOf(plan.collisionStrategy)
         } catch (e: Exception) {
-            CollisionStrategy.FAIL
+            CollisionStrategy.RENAME_NUMERIC
         }
 
         var executedCount = 0
@@ -161,6 +159,7 @@ class ExecutionForegroundService : Service() {
         // 3. Execute step-by-step with auto-rollback on failure
         for ((idx, action) in plan.actions.withIndex()) {
             val recordId = preLoggedIds[idx]
+            val entity = actionEntities[idx]
             try {
                 when (action.type) {
                     "make_dir" -> {
@@ -196,17 +195,15 @@ class ExecutionForegroundService : Service() {
                 }
 
                 // Update action ledger status
-                val actionEntity = database.actionLedgerDao().getActionsForBatch(batchId)[idx]
                 database.actionLedgerDao().updateAction(
-                    actionEntity.copy(status = "EXECUTED", executedAt = timestamp)
+                    entity.copy(id = recordId, status = "EXECUTED", executedAt = timestamp)
                 )
                 executedCount++
             } catch (exc: Exception) {
                 failed = true
                 errorMsg = exc.message
-                val actionEntity = database.actionLedgerDao().getActionsForBatch(batchId)[idx]
                 database.actionLedgerDao().updateAction(
-                    actionEntity.copy(status = "FAILED", errorMessage = exc.message)
+                    entity.copy(id = recordId, status = "FAILED", errorMessage = exc.message)
                 )
                 break
             }
