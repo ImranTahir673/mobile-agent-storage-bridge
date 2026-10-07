@@ -28,10 +28,12 @@ class MainActivity : ComponentActivity() {
 
     private val homeViewModel: HomeViewModel by viewModels()
     private var hasStoragePermission by mutableStateOf(false)
+    private var currentApiKey by mutableStateOf("")
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         hasStoragePermission = checkStoragePermission()
+        currentApiKey = getApiKey()
 
         setContent {
             AgentStorageCopilotTheme {
@@ -40,8 +42,15 @@ class MainActivity : ComponentActivity() {
                     color = MaterialTheme.colorScheme.background
                 ) {
                     if (hasStoragePermission) {
-                        val apiKey = getApiKey()
-                        HomeScreen(viewModel = homeViewModel, apiKey = apiKey)
+                        HomeScreen(
+                            viewModel = homeViewModel,
+                            apiKey = currentApiKey,
+                            onSaveApiKey = { newKey ->
+                                saveApiKey(newKey)
+                                currentApiKey = newKey
+                                homeViewModel.saveApiKey(newKey)
+                            }
+                        )
                     } else {
                         StoragePermissionScreen(
                             onRequestPermission = { openStorageSettings(this) }
@@ -106,9 +115,23 @@ class MainActivity : ComponentActivity() {
     private fun getApiKey(): String {
         return try {
             val prefs = getSharedPreferences("copilot_settings", MODE_PRIVATE)
-            prefs.getString("gemini_api_key", "") ?: ""
+            val savedKey = prefs.getString("gemini_api_key", null)
+            if (!savedKey.isNullOrBlank()) {
+                savedKey
+            } else {
+                BuildConfig.DEFAULT_GEMINI_API_KEY
+            }
         } catch (e: Exception) {
-            ""
+            BuildConfig.DEFAULT_GEMINI_API_KEY
+        }
+    }
+
+    private fun saveApiKey(key: String) {
+        try {
+            val prefs = getSharedPreferences("copilot_settings", MODE_PRIVATE)
+            prefs.edit().putString("gemini_api_key", key).apply()
+        } catch (e: Exception) {
+            // Ignore
         }
     }
 }

@@ -17,6 +17,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import android.content.Context
+import com.agentstorage.copilot.BuildConfig
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.encodeToString
@@ -30,7 +32,8 @@ data class HomeUiState(
     val statusMessage: String = "Ready for instructions",
     val candidatePlan: ActionPlan? = null,
     val lastCompletedBatchId: String? = null,
-    val errorMessage: String? = null
+    val errorMessage: String? = null,
+    val hasApiKey: Boolean = false
 )
 
 class HomeViewModel(application: Application) : AndroidViewModel(application) {
@@ -47,6 +50,13 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     private val database = (application as CopilotApplication).database
 
     init {
+        val key = getSavedApiKey()
+        val hasKey = key.isNotBlank()
+        _uiState.value = _uiState.value.copy(
+            hasApiKey = hasKey,
+            errorMessage = if (!hasKey) "Gemini API key is not configured. Please configure your key in app settings." else null
+        )
+
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 val latest = database.batchDao().getLatestCompletedBatch()
@@ -59,22 +69,64 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun getSavedApiKey(): String {
+        return try {
+            val prefs = getApplication<Application>().getSharedPreferences("copilot_settings", Context.MODE_PRIVATE)
+            val savedKey = prefs.getString("gemini_api_key", null)
+            if (!savedKey.isNullOrBlank()) {
+                savedKey
+            } else {
+                BuildConfig.DEFAULT_GEMINI_API_KEY
+            }
+        } catch (e: Exception) {
+            BuildConfig.DEFAULT_GEMINI_API_KEY
+        }
+    }
+
+    fun saveApiKey(key: String) {
+        try {
+            val prefs = getApplication<Application>().getSharedPreferences("copilot_settings", Context.MODE_PRIVATE)
+            prefs.edit().putString("gemini_api_key", key).apply()
+        } catch (e: Exception) {
+            // Graceful fallback
+        }
+        val isConfigured = key.isNotBlank() || BuildConfig.DEFAULT_GEMINI_API_KEY.isNotBlank()
+        _uiState.value = _uiState.value.copy(
+            hasApiKey = isConfigured,
+            errorMessage = if (isConfigured) null else _uiState.value.errorMessage
+        )
+    }
+
+    fun updateApiKeyStatus(hasKey: Boolean) {
+        _uiState.value = _uiState.value.copy(
+            hasApiKey = hasKey,
+            errorMessage = if (hasKey) null else _uiState.value.errorMessage
+        )
+    }
+
     fun onPromptChange(newText: String) {
         _uiState.value = _uiState.value.copy(promptText = newText)
     }
 
-    fun generatePlan(apiKey: String, customGoal: String? = null) {
+    fun clearError() {
+        _uiState.value = _uiState.value.copy(errorMessage = null)
+    }
+
+    fun generatePlan(apiKey: String = "", customGoal: String? = null) {
+        val resolvedKey = if (apiKey.isNotBlank()) apiKey else getSavedApiKey()
         val goal = customGoal ?: _uiState.value.promptText
         if (goal.isBlank()) return
 
-        if (apiKey.isBlank()) {
+        if (resolvedKey.isBlank()) {
             _uiState.value = _uiState.value.copy(
+                hasApiKey = false,
                 errorMessage = "Gemini API key is not configured. Please configure your key in app settings."
             )
             return
         }
 
         _uiState.value = _uiState.value.copy(
+            hasApiKey = true,
             isLoading = true,
             statusMessage = "Performing local reconnaissance...",
             errorMessage = null
@@ -126,7 +178,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
                 """.trimIndent()
 
                 val rawResponse = geminiClient.generateActionPlan(
-                    apiKey = apiKey,
+                    apiKey = resolvedKey,
                     systemPrompt = systemPrompt,
                     userPrompt = "Goal: $goal\n\nReconnaissance:\n$reconnaissanceSummary"
                 )

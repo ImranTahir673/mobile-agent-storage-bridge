@@ -25,6 +25,17 @@ android {
         ksp {
             arg("room.schemaLocation", "$projectDir/schemas")
         }
+
+        val localProperties = java.util.Properties().apply {
+            val localPropFile = rootProject.file("local.properties")
+            if (localPropFile.exists()) {
+                load(localPropFile.inputStream())
+            }
+        }
+        val defaultApiKey = localProperties.getProperty("GEMINI_API_KEY")
+            ?: System.getenv("GEMINI_API_KEY")
+            ?: ""
+        buildConfigField("String", "DEFAULT_GEMINI_API_KEY", "\"$defaultApiKey\"")
     }
 
     buildTypes {
@@ -48,6 +59,7 @@ android {
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 
     composeOptions {
