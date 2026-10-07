@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">Agent Storage Copilot</string>
+    <string name="channel_execution_name">Storage Execution</string>
+    <string name="channel_execution_desc">Background storage mutations and rollback operations</string>
+</resources>
