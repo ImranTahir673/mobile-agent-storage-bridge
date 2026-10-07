@@ -95,16 +95,82 @@ Ensure the phone server runs reliably in the background without being killed by 
 
 ### 4.1 Tasks & Deliverables
 
-- [ ] **3.1 Termux Daemonization & Wake-Lock**
+- [x] **3.1 Termux Daemonization & Wake-Lock**
   - Integrate `termux-wake-lock` commands in startup scripts to prevent CPU sleep during OTA operations.
   - Configure `termux-notification` to display a persistent foreground service status.
+  - Implement graceful process management, PID tracking, and port cleanup (`scripts/start_daemon.sh`, `scripts/stop_daemon.sh`).
 
-- [ ] **3.2 Named Cloudflare Tunnel Configuration**
-  - Replace ephemeral `trycloudflare.com` tunnels with a dedicated named Cloudflare tunnel and static domain (e.g. `agent.yourdomain.com`).
-  - Store Cloudflare tunnel tokens securely in Termux config.
+- [x] **3.2 Named Cloudflare Tunnel Configuration**
+  - Support both quick tunnels (`trycloudflare.com`) and dedicated named Cloudflare tunnels with static domains (`cloudflared tunnel run --token <TOKEN>`).
+  - Automatically parse live tunnel endpoints and write to `.bridge_url` for consumption by client agents.
 
-- [ ] **3.3 Termux Boot Auto-Start**
-  - Create `~/.termux/boot/start-bridge.sh` using the Termux:Boot app so the storage bridge automatically launches when the phone powers on.
+- [x] **3.3 Termux Boot Auto-Start**
+  - Enable automatic background launching upon device power-on via Termux:Boot integration.
+  - Provide daemon status inspection tool reporting PID, memory footprint, port state, and tunnel connectivity (`scripts/status_daemon.sh`).
+
+### 4.2 Daemon Management Guide
+
+#### Starting the Daemon
+
+```bash
+# 1. Quick Tunnel Mode (Automatic ephemeral trycloudflare.com URL)
+./scripts/start_daemon.sh
+
+# 2. Named Cloudflare Tunnel (Static dedicated domain)
+./scripts/start_daemon.sh --token <TUNNEL_TOKEN> --hostname agent.yourdomain.com
+
+# 3. Local-Only Mode (No tunnel, runs on 127.0.0.1:8080)
+./scripts/start_daemon.sh --no-tunnel
+
+# 4. Custom Local Port
+./scripts/start_daemon.sh --port 9090
+```
+
+#### Checking Daemon Status
+
+```bash
+./scripts/status_daemon.sh
+```
+
+Displays:
+- **Server Process**: State (`RUNNING` / `OFFLINE`), PID, RSS memory consumption.
+- **Local Health**: HTTP 200 verification, engine version, storage base directory.
+- **Cloudflare Tunnel**: PID, memory RSS, and live connectivity status.
+- **Public URL**: Resolved endpoint loaded from `.bridge_url`.
+
+#### Stopping the Daemon
+
+```bash
+./scripts/stop_daemon.sh
+```
+
+- Sends `SIGTERM` followed by `SIGKILL` if necessary to both `server.py` and `cloudflared`.
+- Releases the Termux CPU wake-lock (`termux-wake-unlock`).
+- Removes the persistent Android status notification.
+- Verifies local port 8080 is freed and cleans up `.bridge_url` and PID files.
+
+#### Termux:Boot Integration (Auto-Start on Device Boot)
+
+To run the storage bridge automatically every time your Android device powers on:
+
+1. Install the **Termux:Boot** add-on APK from F-Droid.
+2. Launch the Termux:Boot app once to register its broadcast receiver.
+3. In Termux, create the boot scripts directory:
+   ```bash
+   mkdir -p ~/.termux/boot
+   ```
+4. Create `~/.termux/boot/start-bridge.sh`:
+   ```bash
+   #!/data/data/com.termux/files/usr/bin/bash
+   # Wait for networking to initialize
+   sleep 10
+   cd ~/storage/shared/mobile-agent-storage-bridge || cd ~/mobile-agent-storage-bridge
+   ./scripts/start_daemon.sh
+   ```
+5. Make the boot script executable:
+   ```bash
+   chmod +x ~/.termux/boot/start-bridge.sh
+   ```
 
 ---
 
