@@ -213,7 +213,7 @@ class ExecutionForegroundService : Service() {
         }
 
         if (failed) {
-            updateNotification("Error occurred. Rolling back executed steps...")
+            updateNotification("Error occurred (${errorMsg ?: "Unknown"}). Rolling back executed steps...")
             handleRollback(batchId)
             database.batchDao().updateBatch(
                 batchEntity.copy(
