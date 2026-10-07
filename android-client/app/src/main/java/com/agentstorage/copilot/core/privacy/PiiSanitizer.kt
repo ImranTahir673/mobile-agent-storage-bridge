@@ -10,13 +10,13 @@ import java.util.regex.Pattern
  */
 object PiiSanitizer {
 
-    // Tier 1 Zero-Tolerance Redaction Patterns
-    private val IBAN_PATTERN = Pattern.compile("\\b[A-Z]{2}\\d{2}[A-Z0-9]{11,30}\\b")
-    private val CARD_PATTERN = Pattern.compile("\\b(?:\\d{4}[- ]?){3}\\d{4}\\b")
-    private val CNIC_PATTERN = Pattern.compile("\\b\\d{5}-\\d{7}-\\d\\b")
-    private val PASSPORT_PATTERN = Pattern.compile("\\b[A-PR-WY][1-9]\\d\\s?\\d{4}[1-9]\\b")
-    private val PHONE_PATTERN = Pattern.compile("(?i)(?:\\+92[- ]?3\\d{2}[- ]?\\d{7}\\b|\\b0?3\\d{2}[- ]?\\d{7}\\b)")
-    private val EMAIL_PATTERN = Pattern.compile("\\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}\\b")
+    // Tier 1 Zero-Tolerance Redaction Patterns (lookaround boundaries support underscore filenames like receipt_37405-1234567-1.pdf)
+    private val IBAN_PATTERN = Pattern.compile("(?<![A-Z0-9])[A-Z]{2}\\d{2}[A-Z0-9]{11,30}(?![A-Z0-9])")
+    private val CARD_PATTERN = Pattern.compile("(?<!\\d)(?:\\d{4}[- ]?){3}\\d{4}(?!\\d)")
+    private val CNIC_PATTERN = Pattern.compile("(?<!\\d)\\d{5}-\\d{7}-\\d(?!\\d)")
+    private val PASSPORT_PATTERN = Pattern.compile("(?<![A-Z0-9])[A-PR-WY][1-9]\\d\\s?\\d{4}[1-9](?![A-Z0-9])")
+    private val PHONE_PATTERN = Pattern.compile("(?i)(?:\\+92[- ]?3\\d{2}[- ]?\\d{7}(?!\\d)|(?<!\\d)0?3\\d{2}[- ]?\\d{7}(?!\\d))")
+    private val EMAIL_PATTERN = Pattern.compile("[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}")
     private val CREDENTIALS_PATTERN = Pattern.compile("(?i)(password|passwd|pin|secret|token|api_key)\\s*[:=]\\s*\\S+")
 
     /**

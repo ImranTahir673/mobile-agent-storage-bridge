@@ -53,7 +53,7 @@ class CollisionResolverTest {
     fun testRenameNumericStrategy_AppendsIncrementingNumericCounter() {
         val root = tempFolder.newFolder("target_numeric")
         val existing0 = File(root, "report.pdf").apply { writeText("0") }
-        val existing1 = File(root, "report (1).pdf").apply { writeText("1") }
+        File(root, "report (1).pdf").writeText("1")
 
         val resolved = CollisionResolver.resolve(existing0, CollisionStrategy.RENAME_NUMERIC)
         assertNotNull(resolved)
