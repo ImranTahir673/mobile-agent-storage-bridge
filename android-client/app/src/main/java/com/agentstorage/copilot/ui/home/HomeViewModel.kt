@@ -47,10 +47,14 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     private val database = (application as CopilotApplication).database
 
     init {
-        viewModelScope.launch {
-            val latest = database.batchDao().getLatestCompletedBatch()
-            if (latest != null) {
-                _uiState.value = _uiState.value.copy(lastCompletedBatchId = latest.batchId)
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val latest = database.batchDao().getLatestCompletedBatch()
+                if (latest != null) {
+                    _uiState.value = _uiState.value.copy(lastCompletedBatchId = latest.batchId)
+                }
+            } catch (e: Exception) {
+                // Graceful fallback if database has not been initialized yet
             }
         }
     }
@@ -63,17 +67,31 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         val goal = customGoal ?: _uiState.value.promptText
         if (goal.isBlank()) return
 
+        if (apiKey.isBlank()) {
+            _uiState.value = _uiState.value.copy(
+                errorMessage = "Gemini API key is not configured. Please configure your key in app settings."
+            )
+            return
+        }
+
         _uiState.value = _uiState.value.copy(
             isLoading = true,
             statusMessage = "Performing local reconnaissance...",
             errorMessage = null
         )
 
-        viewModelScope.launch {
+        viewModelScope.launch(Dispatchers.IO) {
             try {
-                val profile = profileRepository.getProfile()
-                val files = withContext(Dispatchers.IO) {
+                val profile = try {
+                    profileRepository.getProfile()
+                } catch (e: Exception) {
+                    com.agentstorage.copilot.data.model.UserProfile()
+                }
+
+                val files = try {
                     storageManager.listFiles("Download")
+                } catch (e: Exception) {
+                    emptyList()
                 }
 
                 val reconnaissanceSummary = buildString {

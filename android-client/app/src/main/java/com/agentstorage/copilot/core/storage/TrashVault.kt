@@ -10,10 +10,18 @@ class TrashVault(private val baseDir: File) {
 
     private val trashDir: File = File(baseDir, ".agent_trash")
 
-    init {
+    /**
+     * Lazily ensures the .agent_trash directory exists on disk only when required.
+     */
+    private fun ensureTrashDirectory(): File {
         if (!trashDir.exists()) {
-            trashDir.mkdirs()
+            try {
+                trashDir.mkdirs()
+            } catch (e: Exception) {
+                // Defer filesystem errors to point of file creation
+            }
         }
+        return trashDir
     }
 
     /**
@@ -25,10 +33,11 @@ class TrashVault(private val baseDir: File) {
             throw NoSuchFileException(sourceFile, reason = "Source file does not exist.")
         }
 
+        val dir = ensureTrashDirectory()
         val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
         val shortUuid = UUID.randomUUID().toString().substring(0, 6)
         val trashFileName = "${timestamp}_${shortUuid}_${sourceFile.name}"
-        val destinationFile = File(trashDir, trashFileName)
+        val destinationFile = File(dir, trashFileName)
 
         if (!sourceFile.renameTo(destinationFile)) {
             // Fallback to copy & delete
@@ -59,5 +68,5 @@ class TrashVault(private val baseDir: File) {
         }
     }
 
-    fun getTrashDirectory(): File = trashDir
+    fun getTrashDirectory(): File = ensureTrashDirectory()
 }

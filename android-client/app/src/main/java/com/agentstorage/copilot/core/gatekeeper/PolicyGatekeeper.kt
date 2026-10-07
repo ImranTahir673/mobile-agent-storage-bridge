@@ -9,7 +9,9 @@ import java.io.File
 
 class PolicyGatekeeper(private val baseDir: File) {
 
-    private val canonicalBaseDir: String = baseDir.canonicalPath
+    private val canonicalBaseDir: String by lazy {
+        runCatching { baseDir.canonicalPath }.getOrDefault(baseDir.absolutePath)
+    }
 
     companion object {
         const val MAX_ACTIONS_PER_BATCH = 20
