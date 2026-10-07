@@ -68,11 +68,11 @@ Transition the client from single-action imperative tool calls to structured bat
 
 ### 2.2 Tasks & Deliverables
 
-- [ ] **2.1 Two-Stage Agent Protocol**
+- [x] **2.1 Two-Stage Agent Protocol**
   - **Stage 1 (Reconnaissance)**: Read-only directory listing, text snippet inspection, and metadata gathering.
   - **Stage 2 (Plan Synthesis)**: Compile all proposed mutations into a single `ActionPlan` submitted to `/execute_plan`.
 
-- [ ] **2.2 Interactive Human-in-the-Loop CLI**
+- [x] **2.2 Interactive Human-in-the-Loop CLI**
   - Render terminal table diffs showing:
     - Target files
     - Source $\to$ Destination paths
