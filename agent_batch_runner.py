@@ -68,6 +68,29 @@ Examples:
         help="Target bridge URL (e.g. http://192.168.1.50:8080 or https://...trycloudflare.com)"
     )
     parser.add_argument(
+        "--find", "-f",
+        type=str,
+        default=None,
+        help="Deterministic ledger historical lookup: search previous moves, renames, or trashed files (bypasses LLM)"
+    )
+    parser.add_argument(
+        "--gather",
+        type=str,
+        default=None,
+        help="Semantic gathering query across directories (e.g. 'Gather all machine learning papers')"
+    )
+    parser.add_argument(
+        "--to",
+        type=str,
+        default="Documents/Gathered",
+        help="Destination folder for gathered files (default: 'Documents/Gathered')"
+    )
+    parser.add_argument(
+        "--copy",
+        action="store_true",
+        help="Formulate 'copy' actions instead of 'move' actions when gathering files"
+    )
+    parser.add_argument(
         "--prompt", "-p",
         type=str,
         default=None,
@@ -106,10 +129,16 @@ Examples:
         help="Spin up an isolated local mock bridge with synthetic fixtures for sandbox testing"
     )
     parser.add_argument(
+        "--profile",
+        type=str,
+        default=None,
+        help="Path to user_profile.json (defaults to local user_profile.json or queries bridge /user_profile)"
+    )
+    parser.add_argument(
         "--max-iterations",
         type=int,
-        default=8,
-        help="Maximum agent reasoning turns before terminating (default: 8)"
+        default=16,
+        help="Maximum agent reasoning turns before terminating (default: 16)"
     )
     return parser.parse_args()
 
@@ -122,9 +151,18 @@ class BridgeClient:
     """Encapsulates HTTP communication with the Mobile Agent Storage Bridge."""
 
     def __init__(self, base_url: str):
-        self.base_url = base_url.rstrip("/")
+        url = (base_url or "").strip().rstrip("/")
+        if url:
+            # Handle possible scheme typos or missing scheme (e.g., https:/domain or plain domain)
+            if url.startswith("https:/") and not url.startswith("https://"):
+                url = "https://" + url[7:].lstrip("/")
+            elif url.startswith("http:/") and not url.startswith("http://"):
+                url = "http://" + url[6:].lstrip("/")
+            elif not url.startswith("http://") and not url.startswith("https://"):
+                url = "https://" + url
+        self.base_url = url
 
-    def health(self, timeout: int = 10) -> Dict[str, Any]:
+    def health(self, timeout: int = 15) -> Dict[str, Any]:
         resp = requests.get(f"{self.base_url}/", timeout=timeout)
         if resp.status_code != 200:
             raise ConnectionError(f"Health check failed (HTTP {resp.status_code}): {resp.text}")
@@ -138,7 +176,7 @@ class BridgeClient:
         resp = requests.post(
             f"{self.base_url}/list_files",
             json={"path": path},
-            timeout=15
+            timeout=30
         )
         if not resp.ok:
             return {"error": f"HTTP {resp.status_code}: {resp.text.strip()}"}
@@ -149,7 +187,7 @@ class BridgeClient:
         resp = requests.post(
             f"{self.base_url}/read_file_snippet",
             json={"path": path, "max_chars": max_chars},
-            timeout=15
+            timeout=30
         )
         if not resp.ok:
             return {"error": f"HTTP {resp.status_code}: {resp.text.strip()}"}
@@ -162,7 +200,7 @@ class BridgeClient:
         resp = requests.post(
             f"{self.base_url}/execute_plan",
             json=payload,
-            timeout=20
+            timeout=45
         )
         try:
             body = resp.json()
@@ -179,7 +217,7 @@ class BridgeClient:
         resp = requests.post(
             f"{self.base_url}/rollback_batch",
             json={"batch_id": batch_id},
-            timeout=20
+            timeout=30
         )
         try:
             body = resp.json()
@@ -190,6 +228,27 @@ class BridgeClient:
             err_msg = body.get("error", resp.text)
             raise RuntimeError(f"Bridge rollback error (HTTP {resp.status_code}): {err_msg}")
         return body
+
+    def lookup_history(self, query: str) -> Dict[str, Any]:
+        """Tool / Endpoint: Deterministic lookup of file mutation history from the SQLite ledger."""
+        resp = requests.post(
+            f"{self.base_url}/lookup_history",
+            json={"query": query},
+            timeout=25
+        )
+        if not resp.ok:
+            return {"error": f"HTTP {resp.status_code}: {resp.text.strip()}", "matches": []}
+        return resp.json()
+
+    def get_user_profile(self) -> Dict[str, Any]:
+        """Tool / Endpoint: Fetches device-local user profile and peer mapping from the bridge."""
+        try:
+            resp = requests.get(f"{self.base_url}/user_profile", timeout=15)
+            if resp.ok:
+                return resp.json().get("profile", {})
+        except Exception:
+            pass
+        return {}
 
 
 # ==============================================================================
@@ -272,15 +331,18 @@ Fail-Safe Privacy Shield & PII Protection:
 - Zero PII Invariants: You must NEVER infer, reconstruct, or output personally identifiable information (PII)—including CNICs/Gov IDs, phone numbers, payment cards, email addresses, or names of specific individuals—in your reasoning steps, chain-of-thought, action descriptions, or destination filenames.
 - Categorical Interpretation: Treat all text snippets purely as semantic category indicators (e.g. 'Fee Voucher', 'Assignment', 'Bank Statement', 'Lecture Slides') without attributing them to specific individuals or account numbers.
 - Zero Raw Image Uploads: Image and multimedia processing is strictly metadata-driven (filenames, modification timestamps, EXIF year/month). Never process or request raw image pixels or video frames.
-
+{user_profile_block}
 Reconnaissance (Stage 1) & Plan Synthesis (Stage 2):
 1. Inspect the target directory '{target_folder}'.
 2. Identify messy, cryptic, uninformative, or unstructured filenames:
    - Academic / Research papers (e.g. arXiv IDs '1508.06576v2.pdf' -> identify topic/title and move to 'Documents/Research/...').
    - Administrative / Academic receipts (e.g. 'DOC-20220503-WA0103.pdf' -> identify topic and move to 'Documents/...').
    - Cryptic hash names, raw download names, and temporary junk files (.tmp, session tokens -> soft-delete via 'trash').
-3. Semantic Search & Gathering: If the user provides a search or gathering directive (e.g. 'Find my OS lab' or 'Gather ML papers into Documents/Research/ML'), locate relevant files matching the query and formulate clean 'copy' or 'move' actions into the designated folder.
-4. Use 'read_file_snippet' to inspect file content whenever a filename does not clearly convey its content.
+3. Semantic Search & Gathering: If the user provides a search or gathering directive (e.g. 'Find my OS lab' or 'Gather ML papers into Documents/Research/ML'), locate relevant files matching the query and formulate clean 'copy' or 'move' actions into the designated target folder. You may inspect multiple directories (e.g. 'Download', 'Documents') using 'list_files' to discover matching candidate files.
+4. Reconnaissance Efficiency & Snippet Budget:
+   - Use filename cues first to filter and identify the most probable candidate files.
+   - Limit 'read_file_snippet' inspections strictly to only the most probable candidate files (maximum 4–5 snippet inspections). Do NOT exhaust reasoning turns inspecting every single file in the directory.
+   - Once candidate files are identified or rule-out is clear, synthesize and emit the vetted Action Plan JSON immediately without exhausting the turn budget.
 {custom_goal_block}
 5. When finished inspecting, output a STRICT JSON Action Plan adhering to docs/SCHEMA_SPEC.md:
 
@@ -456,6 +518,150 @@ def render_diff_table(plan: Dict[str, Any], dry_run_summary: Optional[List[Dict[
     print("=" * 95)
 
 
+def render_history_table(query: str, matches: List[Dict[str, Any]]) -> None:
+    """
+    Prints a clean ASCII table showing the historical trace:
+    Original Path -> Current Path | Timestamp | Plan ID
+    """
+    print("\n" + "=" * 115)
+    print(f" DETERMINISTIC HISTORICAL TRACE: Query = '{query}' (Zero-Cost Ledger Resolution)")
+    print("=" * 115)
+    if not matches:
+        print(f"  No historical mutations or ledger records found matching '{query}'.")
+        print("=" * 115 + "\n")
+        return
+
+    # Header
+    print(f" {'Original Path':<36} -> {'Current / Proposed Path':<42} | {'Timestamp':<19} | {'Plan ID'}")
+    print("-" * 115)
+
+    for item in matches:
+        orig = item.get("source_path") or "-"
+        dest = item.get("destination_path") or "-"
+        act_type = item.get("type", "")
+        ts = item.get("timestamp") or "-"
+        pid = item.get("plan_id") or "-"
+        is_trashed = item.get("is_trashed", False)
+        status = item.get("status", "")
+
+        if is_trashed:
+            dest_str = f"[{dest} (TRASHED)]" if dest else "[.agent_trash (TRASHED)]"
+        elif status == "REVERTED":
+            dest_str = f"{dest} (REVERTED)"
+        elif act_type == "make_dir":
+            dest_str = f"[Created Directory: {dest or orig}]"
+        else:
+            dest_str = dest
+
+        orig_disp = (orig[:33] + "...") if len(orig) > 36 else orig
+        dest_disp = (dest_str[:39] + "...") if len(dest_str) > 42 else dest_str
+        ts_disp = ts[:19]
+        pid_disp = (pid[:12] + "...") if len(pid) > 15 else pid
+
+        print(f" {orig_disp:<36} -> {dest_disp:<42} | {ts_disp:<19} | {pid_disp}")
+
+    print("-" * 115)
+    print(f" Total records found: {len(matches)}")
+    print("=" * 115 + "\n")
+
+
+# ==============================================================================
+# Phase 2.7: Local User Profile & Contextual Routing Resolvers
+# ==============================================================================
+
+def load_user_profile(profile_path: Optional[str] = None, bridge: Optional[BridgeClient] = None) -> Dict[str, Any]:
+    """
+    Loads device-local user profile and peer mapping:
+    1. Explicit CLI argument (--profile <path>)
+    2. Local file 'user_profile.json' in working/script directory
+    3. Remote endpoint on bridge (GET /user_profile)
+    4. Fallback default structure
+    """
+    if profile_path and os.path.exists(profile_path):
+        try:
+            with open(profile_path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            print(f"[*] Warning: Could not read profile from {profile_path}: {e}")
+
+    # Check local default in project root
+    local_p = os.path.join(os.path.dirname(__file__), "user_profile.json")
+    if os.path.exists(local_p):
+        try:
+            with open(local_p, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+
+    # Query bridge
+    if bridge:
+        try:
+            remote_p = bridge.get_user_profile()
+            if remote_p:
+                return remote_p
+        except Exception:
+            pass
+
+    return {
+        "user_identity": {"primary_name": "User", "aliases": [], "identifiers": [], "organization": ""},
+        "known_peers": [],
+        "routing_rules": {
+            "peer_documents_base": "Documents/Peers",
+            "personal_documents_base": "Documents/Personal",
+            "academic_base": "Documents/University"
+        }
+    }
+
+
+def build_user_profile_prompt_block(profile: Optional[Dict[str, Any]]) -> str:
+    """Constructs prompt block defining user identity and strict peer separation rules."""
+    if not profile:
+        return ""
+
+    identity = profile.get("user_identity", {})
+    peers = profile.get("known_peers", [])
+    rules = profile.get("routing_rules", {})
+
+    primary_name = identity.get("primary_name", "User")
+    aliases = ", ".join(identity.get("aliases", [])) or "None"
+    identifiers = ", ".join(identity.get("identifiers", [])) or "None"
+    organization = identity.get("organization", "")
+
+    peer_lines = []
+    for p in peers:
+        p_name = p.get("name", "")
+        p_aliases = ", ".join(p.get("aliases", []))
+        p_folder = p.get("designated_folder", f"Documents/Peers/{p_name}")
+        p_rel = p.get("relation", "Peer")
+        peer_lines.append(f"  - '{p_name}' (aliases: [{p_aliases}], relation: {p_rel}) -> Route to '{p_folder}'")
+    peer_text = "\n".join(peer_lines) if peer_lines else "  - None registered"
+
+    peer_base = rules.get("peer_documents_base", "Documents/Peers")
+    personal_base = rules.get("personal_documents_base", "Documents/Personal")
+    academic_base = rules.get("academic_base", "Documents/University")
+
+    block = (
+        f"\n*** USER IDENTITY & PEER SEPARATION MATRIX (PHASE 2.7) ***\n"
+        f"Primary User Identity (Device Owner):\n"
+        f"- Primary Name: '{primary_name}'\n"
+        f"- Aliases / Nicknames: [{aliases}]\n"
+        f"- Identifiers / Roll Numbers: [{identifiers}]\n"
+        f"- Organization: {organization}\n\n"
+        f"Known Peers & Third-Party Contacts (MANDATORY PEER SEPARATION):\n"
+        f"{peer_text}\n\n"
+        f"Contextual Routing Hierarchy:\n"
+        f"- Personal Documents Base: '{personal_base}' (EXCLUSIVELY for the primary user '{primary_name}')\n"
+        f"- Academic Documents Base: '{academic_base}' (transcripts, assignments, academic results of '{primary_name}')\n"
+        f"- Peer Documents Base: '{peer_base}' (all documents belonging to peers or third parties)\n\n"
+        f"CRITICAL PEER SEPARATION INVARIANTS:\n"
+        f"1. Zero Peer Pollution: NEVER misfile or route third-party or peer documents (e.g. 'fawad fee.pdf', 'Sumbal pass.pdf', 'Ahmed pass.pdf', 'Yousaf Pass.pdf') into '{personal_base}'. '{personal_base}' is strictly reserved for '{primary_name}'.\n"
+        f"2. Peer Routing: When a document contains the name, nickname, or alias of a registered peer, route it to that peer's designated folder (e.g., '{peer_base}/<Peer_Name>') instead of personal folders.\n"
+        f"3. General / Semantic Gathering Requests: When the user asks to gather files (e.g. 'fee vouchers, receipts, and invoices' to '{personal_base}/Receipts'), ONLY gather files that belong to '{primary_name}'. Do NOT move peer receipts into '{personal_base}/Receipts'; either route peer receipts to their designated peer folder or leave them untouched.\n"
+        f"*************************************************************\n"
+    )
+    return block
+
+
 # ==============================================================================
 # Gemini Reasoning Runner (Two-Stage Agent Protocol)
 # ==============================================================================
@@ -488,7 +694,16 @@ class GeminiAgentRunner:
         else:
             return {"error": f"Unknown tool '{name}'"}
 
-    def run(self, target_folder: str, custom_instruction: Optional[str] = None, max_iterations: int = 8) -> Dict[str, Any]:
+    def run(
+        self,
+        target_folder: str,
+        custom_instruction: Optional[str] = None,
+        max_iterations: int = 16,
+        gather_query: Optional[str] = None,
+        gather_target: Optional[str] = None,
+        copy_mode: bool = False,
+        user_profile: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
         """
         Executes the Two-Stage Agent Protocol:
         Stage 1 (Reconnaissance) -> Stage 2 (Plan Synthesis)
@@ -504,30 +719,54 @@ class GeminiAgentRunner:
                 f"*********************************************************"
             )
 
+        user_profile_block = build_user_profile_prompt_block(user_profile)
+
         system_prompt = SYSTEM_PROMPT_TEMPLATE.format(
             target_folder=target_folder,
+            user_profile_block=user_profile_block,
             custom_goal_block=custom_goal_block
         )
 
-        if custom_instruction:
+        if gather_query:
+            target_op = "copy" if copy_mode else "move"
+            dst_folder = gather_target or "Documents/Gathered"
+            initial_prompt = (
+                f"SEMANTIC GATHERING TASK:\n"
+                f"- User Intent / Search Topic: '{gather_query}'\n"
+                f"- Target Destination Folder: '{dst_folder}'\n"
+                f"- Action Type: '{target_op}' (formulate strict '{target_op}' actions)\n\n"
+                f"Reconnaissance & Efficiency Directives:\n"
+                f"1. Use 'list_files' to inspect '{target_folder}' (and any other relevant directories if needed).\n"
+                f"2. Prioritize candidate files using filename cues first. Limit 'read_file_snippet' inspections strictly to only the most probable candidate files (maximum 4-5 snippet inspections).\n"
+                f"3. Do NOT exhaust reasoning turns inspecting every unrelated file.\n"
+                f"4. Once candidate files are identified or rule-out is clear, synthesize and emit the vetted Action Plan JSON immediately containing a 'make_dir' action for '{dst_folder}' and '{target_op}' actions for all matching files.\n"
+                f"5. Leave unrelated files untouched.\n"
+                f"6. Output a strict JSON Action Plan adhering to docs/SCHEMA_SPEC.md."
+            )
+        elif custom_instruction:
             initial_prompt = (
                 f"Please inspect the '{target_folder}' directory on the device storage. "
                 f"The user has specified an explicit custom goal: '{custom_instruction}'. "
-                f"Use 'list_files' to inspect contents, and 'read_file_snippet' to check content of relevant files. "
-                f"Synthesize an organized folder structure fulfilling this criteria and output a strict JSON Action Plan."
+                f"Use 'list_files' to inspect contents, and use 'read_file_snippet' selectively on at most 4-5 key candidate files. "
+                f"Once candidates are identified, synthesize an organized folder structure fulfilling this criteria and output a strict JSON Action Plan immediately."
             )
         else:
             initial_prompt = (
                 f"Please inspect the '{target_folder}' directory on the device storage. "
-                f"Use 'list_files' to inspect contents, and 'read_file_snippet' on any cryptic or unstructured files "
-                f"(such as academic papers, WhatsApp receipts, or temporary cache files). "
-                f"Synthesize an organized folder structure and output a strict JSON Action Plan."
+                f"Use 'list_files' to inspect contents, and selectively use 'read_file_snippet' on at most 4-5 cryptic or unstructured files. "
+                f"Synthesize an organized folder structure and output a strict JSON Action Plan immediately."
             )
 
         print("\n" + "=" * 70)
         print(" [Stage 1: Reconnaissance] Launching Gemini Decision Engine...")
         print(f" Target Folder:   {target_folder}")
-        if custom_instruction:
+        if user_profile and user_profile.get("user_identity", {}).get("primary_name"):
+            owner = user_profile["user_identity"]["primary_name"]
+            peer_count = len(user_profile.get("known_peers", []))
+            print(f" User Profile:    '{owner}' (Peers Tracked: {peer_count})")
+        if gather_query:
+            print(f" Semantic Gather: \"{gather_query}\" -> '{gather_target or 'Documents/Gathered'}' (mode: {'copy' if copy_mode else 'move'})")
+        elif custom_instruction:
             print(f" Custom Goal:     \"{custom_instruction}\"")
         print(f" Reasoning Model: {self.model_name}")
         print(" Inspection Tools: list_files(path), read_file_snippet(path, max_chars)")
@@ -543,7 +782,7 @@ class GeminiAgentRunner:
         # Fallback to direct REST driver
         return self._run_with_rest_client(system_prompt, initial_prompt, max_iterations)
 
-    def _run_with_genai_sdk(self, system_prompt: str, user_prompt: str, max_turns: int) -> Dict[str, Any]:
+    def _run_with_genai_sdk(self, system_prompt: str, user_prompt: str, max_turns: int = 16) -> Dict[str, Any]:
         """Runs the loop using google-genai SDK."""
         client = genai.Client(api_key=self.api_key)
         
@@ -602,7 +841,7 @@ class GeminiAgentRunner:
 
         raise TimeoutError(f"Agent exceeded {max_turns} reasoning turns without emitting Action Plan")
 
-    def _run_with_rest_client(self, system_prompt: str, user_prompt: str, max_turns: int) -> Dict[str, Any]:
+    def _run_with_rest_client(self, system_prompt: str, user_prompt: str, max_turns: int = 16) -> Dict[str, Any]:
         """Runs the loop using direct Gemini REST API."""
         models_to_try = [self.model_name]
         if self.model_name != "gemini-3.5-flash-lite":
@@ -640,7 +879,7 @@ class GeminiAgentRunner:
                 "generationConfig": {"temperature": 0.2}
             }
 
-            resp = requests.post(endpoint, json=payload, timeout=25)
+            resp = requests.post(endpoint, json=payload, timeout=90)
             if not resp.ok:
                 raise RuntimeError(f"Gemini API error (HTTP {resp.status_code}): {resp.text}")
 
@@ -714,12 +953,35 @@ def seed_synthetic_fixtures(storage_dir: str, target_folder: str = "Download") -
             "In fine art, especially painting, humans have mastered the skill to create unique visual experiences "
             "through composing a complex interplay between the content and style of an image..."
         ),
+        f"{target_folder}/1706.03762v7.pdf": (
+            "Attention Is All You Need\n"
+            "Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit\n"
+            "arXiv:1706.03762v7 [cs.CL] 2 Aug 2017\n"
+            "The dominant sequence transduction models are based on complex recurrent or convolutional neural networks. "
+            "We propose the Transformer, a novel model architecture based entirely on attention mechanisms..."
+        ),
         f"{target_folder}/DOC-20220503-WA0103.pdf": (
             "ACME CLOUD HOSTING - OFFICIAL TAX INVOICE\n"
             "Invoice Number: INV-2022-05-9981\n"
             "Billing Period: April 2022\n"
             "Total Amount: $49.00 USD\n"
             "Status: Paid in Full via Credit Card."
+        ),
+        f"{target_folder}/fawad fee.pdf": (
+            "NATIONAL UNIVERSITY OF SCIENCES AND TECHNOLOGY\n"
+            "Student Fee Voucher - Fall Semester\n"
+            "Student Name: Fawad Khan\n"
+            "Roll No: BSAI-201\n"
+            "Total Amount: PKR 145,000\n"
+            "Status: Paid via HBL Online."
+        ),
+        f"{target_folder}/Imran Tahir BSAI-182.pdf": (
+            "NATIONAL UNIVERSITY OF SCIENCES AND TECHNOLOGY\n"
+            "Student Fee Voucher - Fall Semester\n"
+            "Student Name: Imran Tahir\n"
+            "Roll No: BSAI-182\n"
+            "Total Amount: PKR 145,000\n"
+            "Status: Paid via HBL Online."
         ),
         f"{target_folder}/temp_session_cache_09f8a.tmp": (
             "SESSION_ID=9f8a7c2b-expired\n"
@@ -747,72 +1009,106 @@ def main():
     print(" Mobile Agent Storage Bridge: Phase 2 Decision Engine & Runner")
     print("=" * 70)
 
-    # 1. API Key Verification
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        print("\n[FATAL ERROR] GEMINI_API_KEY is not set.")
-        print("Please configure it in your .env file or environment.")
-        sys.exit(1)
-
     local_srv = None
     temp_dir_obj = None
 
-    # 2. Bridge Connection Resolution
-    if args.local:
-        print("[*] Mode: Local mock sandbox (--local specified).")
-        temp_dir_obj = tempfile.TemporaryDirectory(prefix="agent_bridge_test_")
-        storage_dir = os.path.realpath(temp_dir_obj.name)
-        seed_synthetic_fixtures(storage_dir, args.target_folder)
-        local_srv, bridge_url = start_local_mock_bridge(storage_dir)
-        time.sleep(0.4)
-        print(f"[*] Local bridge initialized at {bridge_url} (Sandbox: {storage_dir})")
-    elif args.url:
-        bridge_url = args.url.rstrip("/")
-        print(f"[*] Target Bridge URL: {bridge_url}")
-    else:
-        env_url = os.getenv("PHONE_URL")
-        if env_url:
-            bridge_url = env_url.rstrip("/")
-            print(f"[*] Target Bridge URL (from .env): {bridge_url}")
+    try:
+        # 1. Bridge Connection Resolution
+        if args.local:
+            print("[*] Mode: Local mock sandbox (--local specified).")
+            temp_dir_obj = tempfile.TemporaryDirectory(prefix="agent_bridge_test_")
+            storage_dir = os.path.realpath(temp_dir_obj.name)
+            seed_synthetic_fixtures(storage_dir, args.target_folder)
+            local_srv, bridge_url = start_local_mock_bridge(storage_dir)
+            time.sleep(0.4)
+            print(f"[*] Local bridge initialized at {bridge_url} (Sandbox: {storage_dir})")
+        elif args.url:
+            bridge_url = args.url.rstrip("/")
+            print(f"[*] Target Bridge URL: {bridge_url}")
         else:
-            print("\n[FATAL ERROR] No bridge URL specified.")
-            print("Provide '--url <URL>' or '--local', or set PHONE_URL in your .env file.")
+            env_url = os.getenv("PHONE_URL")
+            if env_url:
+                bridge_url = env_url.rstrip("/")
+                print(f"[*] Target Bridge URL (from .env): {bridge_url}")
+            else:
+                print("\n[FATAL ERROR] No bridge URL specified.")
+                print("Provide '--url <URL>' or '--local', or set PHONE_URL in your .env file.")
+                sys.exit(1)
+
+        bridge = BridgeClient(bridge_url)
+
+        # 2. Health Check
+        print("[*] Checking bridge connectivity...")
+        try:
+            health_info = bridge.health(timeout=15)
+            print(f"  ✓ Bridge Online: engine='{health_info.get('engine')}', base='{health_info.get('base_dir')}'")
+        except Exception as exc:
+            print(f"\n[FATAL ERROR] Could not connect to bridge at {bridge_url}:")
+            print(f"  {exc}")
+            print("\nPlease check that the phone server is running and Cloudflare tunnel / IP is accessible.")
             sys.exit(1)
 
-    bridge = BridgeClient(bridge_url)
+        # 3. Deterministic Historical Lookup (--find / -f)
+        # Bypasses LLM reasoning entirely for instant zero-cost resolution
+        if args.find:
+            print(f"[*] Querying historical ledger on bridge for: '{args.find}'...")
+            res = bridge.lookup_history(args.find)
+            if "error" in res and not res.get("matches"):
+                print(f"[ERROR] Failed querying history: {res.get('error')}")
+                sys.exit(1)
+            matches = res.get("matches", [])
+            render_history_table(args.find, matches)
+            return
 
-    # 3. Health Check
-    print("[*] Checking bridge connectivity...")
-    try:
-        health_info = bridge.health(timeout=10)
-        print(f"  ✓ Bridge Online: engine='{health_info.get('engine')}', base='{health_info.get('base_dir')}'")
-    except Exception as exc:
-        print(f"\n[FATAL ERROR] Could not connect to bridge at {bridge_url}:")
-        print(f"  {exc}")
-        print("\nPlease check that the phone server is running and Cloudflare tunnel / IP is accessible.")
-        if local_srv:
-            local_srv.shutdown()
-        if temp_dir_obj:
-            temp_dir_obj.cleanup()
-        sys.exit(1)
+        # 4. API Key Verification (Only required for LLM reasoning and gathering)
+        api_key = os.getenv("GEMINI_API_KEY")
+        if not api_key:
+            print("\n[FATAL ERROR] GEMINI_API_KEY is not set.")
+            print("Please configure it in your .env file or environment.")
+            sys.exit(1)
 
-    # 4. Resolve Custom Instruction / Goal
-    custom_instruction = args.prompt
-    if not custom_instruction and not args.auto_approve and sys.stdin.isatty():
-        try:
-            user_input = input("\nCustom Goal / Instruction (press Enter for general cleanup): ").strip()
-            if user_input:
-                custom_instruction = user_input
-        except (KeyboardInterrupt, EOFError):
-            pass
+        # 5. Resolve Custom Instruction / Semantic Gathering Directives
+        custom_instruction = args.prompt
+        if args.gather:
+            target_op = "copy" if args.copy else "move"
+            gather_directive = (
+                f"SEMANTIC GATHERING DIRECTIVE:\n"
+                f"- User Intent: {args.gather}\n"
+                f"- Target Destination Folder: '{args.to}'\n"
+                f"- Action Type: '{target_op}' (Formulate strict '{target_op}' actions for all matching files into '{args.to}')\n"
+                f"- Ensure a 'make_dir' action is included for '{args.to}' before moving or copying files into it.\n"
+                f"- Leave all non-matching files untouched in their current directories.\n"
+                f"- Comply strictly with blast radius limit (max 20 actions)."
+            )
+            if custom_instruction:
+                custom_instruction = f"{gather_directive}\n- Additional Instructions: {custom_instruction}"
+            else:
+                custom_instruction = gather_directive
+        elif not custom_instruction and not args.auto_approve and sys.stdin.isatty():
+            try:
+                user_input = input("\nCustom Goal / Instruction (press Enter for general cleanup): ").strip()
+                if user_input:
+                    custom_instruction = user_input
+            except (KeyboardInterrupt, EOFError):
+                pass
 
-    try:
-        # 5. Reconnaissance & Plan Synthesis (Two-Stage Agent Protocol)
+        # 6. Load User Profile & Peer Separation Matrix (Phase 2.7)
+        user_profile = load_user_profile(args.profile, bridge)
+        if user_profile and user_profile.get("user_identity", {}).get("primary_name"):
+            owner = user_profile["user_identity"]["primary_name"]
+            peer_count = len(user_profile.get("known_peers", []))
+            print(f"[*] Loaded User Profile: Owner='{owner}', Registered Peers={peer_count}")
+
+        # 7. Reconnaissance & Plan Synthesis (Two-Stage Agent Protocol)
         runner = GeminiAgentRunner(api_key=api_key, model_name=args.model, bridge=bridge)
         action_plan = runner.run(
             target_folder=args.target_folder,
             custom_instruction=custom_instruction,
-            max_iterations=args.max_iterations
+            max_iterations=args.max_iterations,
+            gather_query=args.gather,
+            gather_target=args.to if args.gather else None,
+            copy_mode=args.copy,
+            user_profile=user_profile
         )
 
         print("\n[Stage 2: Plan Synthesis Complete] Vetted Action Plan:")

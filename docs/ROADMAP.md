@@ -121,23 +121,47 @@ Enhance the Decision Engine with natural-language user guidance and an uncomprom
 
 ---
 
-## 5. Phase 2.6: Deterministic Ledger Lookup & Semantic Gathering [CURRENT FOCUS]
+## 5. Phase 2.6: Deterministic Ledger Lookup & Semantic Gathering [COMPLETED]
 
 Extend the platform from passive cleanup into active information retrieval and structured file gathering.
 
 ### 5.1 Tasks & Deliverables
 
-- [ ] **2.6.1 Deterministic Historical Search (`/lookup_history`)**
+- [x] **2.6.1 Deterministic Historical Search (`/lookup_history`)**
   - Implement SQLite query resolver tracking historical moves, renames, and soft-deletes via `action_ledger` and `trash_index`.
   - Resolve former paths and filenames to their current live disk location or soft-deleted vault target.
 
-- [ ] **2.6.2 Semantic Content Search & Gathering (`--find` / `--gather`)**
+- [x] **2.6.2 Semantic Content Search & Gathering (`--find` / `--gather`)**
   - Enable natural-language content querying (e.g., *"Find my operating systems lab"* or *"Gather all machine learning papers into Documents/Research/ML"*).
   - Synthesize candidate matching files into a standard declarative Action Plan using `move` or `copy` operations.
   - Enforce max 20-action blast radius cap and require explicit human-in-the-loop diff confirmation before executing mutations.
   - Guarantee 1-tap rollback restoration via pre-logged inverted undo vectors in `.ledger.db`.
 
-## 6. Phase 3: Android Daemon Resiliency & Named Tunnels [COMPLETED]
+---
+
+## 6. Phase 2.7: Local User Profile, Peer Separation & Contextual Routing [COMPLETED]
+
+Enforce strict identity boundaries to prevent misfiling classmate, peer, or third-party documents as personal files.
+
+### 6.1 Tasks & Deliverables
+
+- [x] **2.7.1 Device-Local Configuration Template (`user_profile.json` & `user_profile.example.json`)**
+  - Define user identity schema (`primary_name`, `aliases`, `identifiers`, `organization`).
+  - Define known peer mappings (`name`, `aliases`, `relation`, `designated_folder`).
+  - Establish base routing rules (`peer_documents_base`, `personal_documents_base`, `academic_base`).
+
+- [x] **2.7.2 Remote & Local Profile Endpoints (`GET/POST /user_profile`)**
+  - Expose bridge endpoint returning device-local user profile and peer mappings to remote agent runners.
+  - Support cross-mount safe resolution and profile persistence on the device.
+
+- [x] **2.7.3 Contextual Routing & Strict Peer Separation in Agent Decision Engine**
+  - Inject user identity and peer separation directives into agent system prompt.
+  - Enforce zero peer pollution: third-party and peer documents are never moved to `personal_documents_base` even during broad gather directives.
+  - Route recognized peer documents directly into designated peer folders.
+
+---
+
+## 7. Phase 3: Android Daemon Resiliency & Named Tunnels [COMPLETED]
 
 Ensure the phone server runs reliably in the background without being killed by Android's aggressive memory and battery managers. Verified operational on physical hardware (`/storage/emulated/0`).
 

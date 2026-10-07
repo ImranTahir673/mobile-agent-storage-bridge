@@ -1,0 +1,21 @@
+{
+  "user_identity": {
+    "primary_name": "User",
+    "aliases": [],
+    "identifiers": [],
+    "organization": ""
+  },
+  "known_peers": [
+    {
+      "name": "Peer Name",
+      "aliases": ["peer_alias"],
+      "relation": "Friend / Colleague",
+      "designated_folder": "Documents/Peers/Peer_Name"
+    }
+  ],
+  "routing_rules": {
+    "peer_documents_base": "Documents/Peers",
+    "personal_documents_base": "Documents/Personal",
+    "academic_base": "Documents/University"
+  }
+}
