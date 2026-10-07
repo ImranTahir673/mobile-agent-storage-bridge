@@ -2,6 +2,7 @@ package com.agentstorage.copilot.core.gatekeeper
 
 import com.agentstorage.copilot.data.model.CollisionStrategy
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
