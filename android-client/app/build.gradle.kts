@@ -1,3 +1,5 @@
+import java.util.Properties
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
@@ -26,10 +28,11 @@ android {
             arg("room.schemaLocation", "$projectDir/schemas")
         }
 
-        val localProperties = java.util.Properties().apply {
-            val localPropFile = rootProject.file("local.properties")
-            if (localPropFile.exists()) {
-                load(localPropFile.inputStream())
+        val localProperties = Properties()
+        val localPropFile = rootProject.file("local.properties")
+        if (localPropFile.exists()) {
+            localPropFile.inputStream().use { stream ->
+                localProperties.load(stream)
             }
         }
         val defaultApiKey = localProperties.getProperty("GEMINI_API_KEY")
