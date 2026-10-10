@@ -72,7 +72,11 @@
 
 html, body {
   width: 100%;
-  min-height: 100dvh;
+  height: 100dvh;
+  max-height: 100dvh;
+  overflow: hidden;
+  margin: 0;
+  padding: 0;
   background-color: var(--bg-canvas);
   color: var(--text-primary);
   font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
@@ -82,16 +86,17 @@ html, body {
 }
 
 /* ==============================================================================
-   Mobile Viewport Frame (Responsive Mobile Container)
+   Mobile Viewport Frame & Root App Container (Responsive Mobile Container)
    ============================================================================== */
-.mobile-viewport {
-  width: 100%;
-  min-height: 100dvh;
-  height: 100dvh;
-  margin: 0 auto;
-  background-color: var(--bg-viewport);
+.mobile-viewport,
+.app-container {
   display: flex;
   flex-direction: column;
+  height: 100dvh;
+  max-height: 100dvh;
+  width: 100%;
+  margin: 0 auto;
+  background-color: var(--bg-viewport);
   position: relative;
   overflow: hidden;
   box-shadow: 0 0 50px rgba(0, 0, 0, 0.8), 0 0 0 1px var(--border-subtle);
@@ -102,14 +107,13 @@ html, body {
     display: flex;
     align-items: center;
     justify-content: center;
-    min-height: 100dvh;
     background: radial-gradient(circle at 50% 10%, #151C2C 0%, #080C14 100%);
-    padding: 20px 0;
   }
-  .mobile-viewport {
+  .mobile-viewport,
+  .app-container {
     max-width: 600px;
     height: 94dvh;
-    min-height: auto;
+    max-height: 94dvh;
     border-radius: 28px;
     border: 1px solid rgba(255, 255, 255, 0.1);
   }
@@ -321,8 +325,10 @@ html, body {
 /* ==============================================================================
    Main Content Area (Scrollable Timeline)
    ============================================================================== */
-.content-scroll {
-  flex: 1;
+.content-scroll,
+.chat-timeline,
+.chat-feed {
+  flex: 1 1 auto;
   min-height: 0;
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
@@ -1023,8 +1029,10 @@ html, body {
 }
 
 #bottom-dock,
-.bottom-dock {
-  position: sticky;
+.bottom-dock,
+.input-dock {
+  flex: 0 0 auto;
+  position: relative;
   bottom: 0;
   left: 0;
   right: 0;
@@ -1033,24 +1041,26 @@ html, body {
   -webkit-backdrop-filter: blur(20px);
   border-top: 1px solid var(--border-subtle);
   padding: 10px 14px;
-  padding-bottom: env(safe-area-inset-bottom, 12px);
+  padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 10px);
   display: flex;
   flex-direction: column;
   gap: 10px;
-  z-index: 40;
-  flex-shrink: 0;
+  z-index: 50;
 }
 
 /* Horizontal Scrolling Task Chips */
-.chips-container {
+.chips-container,
+.dock-scroll {
   display: flex;
   gap: 8px;
   overflow-x: auto;
   padding-bottom: 2px;
   scrollbar-width: none;
+  -webkit-overflow-scrolling: touch;
 }
 
-.chips-container::-webkit-scrollbar {
+.chips-container::-webkit-scrollbar,
+.dock-scroll::-webkit-scrollbar {
   display: none;
 }
 
