@@ -1041,397 +1041,8 @@ def extract_json_plan(response_text: str) -> dict:
             raise ValueError(f"Could not locate JSON in response:\n{clean_text}")
     return json.loads(json_candidate)
 
-def call_gemini_api(system_prompt: str, user_prompt: str) -> dict:
-    """
-    Sends structured prompt to Gemini API with fallback:
-    1. gemini-2.5-flash
-    2. gemini-3.5-flash-lite
-    3. gemini-3.8-flash
-    """
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        return {}
-
-    models = ["gemini-2.5-flash", "gemini-3.5-flash-lite", "gemini-3.8-flash"]
-    payload = {
-        "system_instruction": {"parts": [{"text": system_prompt}]},
-        "contents": [{"role": "user", "parts": [{"text": user_prompt}]}],
-        "generationConfig": {"temperature": 0.1, "responseMimeType": "application/json"}
-    }
-
-    for model in models:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
-        try:
-            resp = requests.post(url, json=payload, timeout=25)
-            if resp.status_code == 200:
-                data = resp.json()
-                candidates = data.get("candidates", [])
-                if candidates:
-                    parts = candidates[0].get("content", {}).get("parts", [])
-                    if parts:
-                        text = parts[0].get("text", "")
-                        return extract_json_plan(text)
-            elif resp.status_code in (404, 503):
-                continue
-        except Exception:
-            continue
-    return {}
-
-@app.route("/propose_plan", methods=["POST"])
-def propose_plan():
-    """
-    Live Reconnaissance & Gemini Reasoning Endpoint:
-    - Answers casual greetings with conversational guidance.
-    - Scans actual files on disk in the target folder.
-    - Performs in-memory RAM snippet inspection and PII scrubbing.
-    - Calls Gemini API with the live manifest and user profile rules.
-    - Parses structured output into diff actions with visual badges: FILE_MOVE, PEER_MOVE, RENAME, FOLDER_CREATE.
-    - If no eligible files exist on disk, returns clean status message without failing.
-    """
-    data = request.get_json(force=True) or {}
-    raw_prompt = (data.get("prompt") or "").strip()
-    target_folder = data.get("target_folder") or "Download"
-
-    lower_p = raw_prompt.lower()
-
-    # 1. Casual Greetings & Informational queries
-    greeting_patterns = [r"^(hi|hello|hey|yo|greetings|help)(\s+.*)?$", r"^what can you do\??$", r"^who are you\??$"]
-    if any(re.match(p, lower_p) for p in greeting_patterns):
-        return jsonify({
-            "type": "conversation",
-            "message": (
-                "👋 Hello Imran! I am your Mobile Storage Copilot.\n\n"
-                "I analyze unorganized files on your device, separate peer documents from your personal storage, "
-                "sort university fee vouchers, and manage cleanup—with interactive diff reviews and 1-tap rollback.\n\n"
-                "Tap one of the quick task chips below to scan your storage and generate an actionable plan!"
-            ),
-            "quick_chips": [
-                "📋 Sort Student Vouchers",
-                "👥 Separate Peer Documents",
-                "🏷️ Clean Download Names",
-                "🗑️ Cleanup Old Screenshots"
-            ]
-        })
-
-    # 2. Live Disk Reconnaissance: Locate target folder
-    target_dir = None
-    dir_candidates = [
-        target_folder,
-        target_folder.lower(),
-        target_folder.capitalize(),
-        os.path.join(BASE_STORAGE_DIR, target_folder),
-        os.path.join(BASE_STORAGE_DIR, target_folder.lower()),
-    ]
-    for c in dir_candidates:
-        try:
-            p = resolve_safe_path(c) if not os.path.isabs(c) else c
-            if os.path.exists(p) and os.path.isdir(p):
-                target_dir = p
-                break
-        except Exception:
-            continue
-
-    if not target_dir:
-        target_dir = os.path.join(BASE_STORAGE_DIR, target_folder)
-        os.makedirs(target_dir, exist_ok=True)
-
-    # 3. Read actual real files on disk
-    scanned_entries = []
-    if os.path.exists(target_dir) and os.path.isdir(target_dir):
-        for entry in os.scandir(target_dir):
-            if entry.is_file() and not entry.name.startswith("."):
-                scanned_entries.append(entry)
-
-    # Return clean status if no real files exist in the specified target folder
-    if not scanned_entries:
-        return jsonify({
-            "type": "conversation",
-            "message": (
-                f"📂 No eligible documents found in '{target_folder}/'. The directory is currently empty.\n\n"
-                f"Please place documents to organize in your {target_folder}/ folder, or tap 'Seed Fixtures' to populate demo files for testing."
-            ),
-            "quick_chips": [
-                "📋 Sort Student Vouchers",
-                "👥 Separate Peer Documents",
-                "🏷️ Clean Download Names",
-                "🗑️ Cleanup Old Screenshots"
-            ]
-        })
-
-    # 4. In-Memory Snippet Inspection & PII Scrubbing
-    manifest = []
-    for entry in scanned_entries[:20]:
-        name = entry.name
-        ext = os.path.splitext(name)[1].lower()
-        snippet = ""
-        try:
-            if ext == ".pdf":
-                try:
-                    import pypdf
-                    reader = pypdf.PdfReader(entry.path)
-                    parts = [p.extract_text() or "" for p in reader.pages[:2]]
-                    snippet = "\n".join(parts)[:600]
-                except Exception:
-                    snippet = "[PDF document]"
-            elif ext in (".txt", ".md", ".json", ".csv", ".tmp", ".log"):
-                with open(entry.path, "r", encoding="utf-8", errors="replace") as f:
-                    snippet = f.read(600)
-            else:
-                snippet = f"[{ext.upper()} media/file]"
-        except Exception:
-            snippet = ""
-
-        # RAM scrubbing of sensitive PII before transmission
-        sanitized_snippet = sanitize_pii(snippet)
-
-        try:
-            rel_path = os.path.relpath(entry.path, BASE_STORAGE_DIR).replace("\\", "/")
-        except Exception:
-            rel_path = f"{target_folder}/{name}"
-
-        manifest.append({
-            "name": name,
-            "path": rel_path,
-            "size_bytes": entry.stat().st_size,
-            "snippet": sanitized_snippet
-        })
-
-    # 5. Load User Profile & Peer Separation Matrix
-    p_path = get_user_profile_path()
-    profile = {}
-    if os.path.exists(p_path):
-        try:
-            with open(p_path, "r", encoding="utf-8") as pf:
-                profile = json.load(pf)
-        except Exception:
-            pass
-
-    user_id = profile.get("user_identity", {})
-    owner_name = user_id.get("primary_name", "Imran Tahir")
-    identifiers = user_id.get("identifiers", ["BSAI-182", "182"])
-    peers = profile.get("known_peers", [])
-    peer_names = [p.get("name") for p in peers if p.get("name")] or ["Fawad", "Sumbal", "Ahmed", "Yousaf"]
-
-    # 6. Live Gemini API Call
-    peer_matrix_lines = "\n".join(
-        f"- Peer '{p.get('name')}': designated folder '{p.get('designated_folder', f'Documents/Peers/{p.get('name')}')}'"
-        for p in peers
-    )
-    system_prompt = f"""You are the autonomous file organization intelligence for Mobile Agent Storage Bridge.
-Device Owner: '{owner_name}' (Roll/ID: {identifiers}).
-Peer Separation Matrix:
-{peer_matrix_lines}
-
-CRITICAL RULES:
-1. Propose actions ONLY for files present in the provided Manifest. Never invent or hallucinate non-existent filenames.
-2. Peer Separation: Route documents belonging to or naming peers (e.g. Fawad, Sumbal, Ahmed, Yousaf) to their designated peer folder. Never put peer documents in personal folders.
-3. Personal Academic: Route '{owner_name}' documents (e.g. vouchers, grades with {identifiers}) to 'Documents/University/Vouchers' or 'Documents/Personal/Receipts'.
-4. Rename / Clean: Clean up cryptic filenames (e.g. arXiv codes, messy WhatsApp exports) to descriptive titles in structured folders.
-5. Soft-Delete: Trash obsolete screenshots and temp/cache files to '.agent_trash'.
-6. If moving to a new directory, include a 'make_dir' action first.
-7. Output strict JSON action plan adhering to schema:
-{{
-  "plan_id": "<uuid>",
-  "description": "<Human-readable summary>",
-  "collision_strategy": "RENAME_NUMERIC",
-  "actions": [
-    {{"action_id": "step-1", "type": "make_dir", "path": "Documents/..."}},
-    {{"action_id": "step-2", "type": "move", "source": "<exact manifest path>", "destination": "Documents/..."}}
-  ]
-}}
-"""
-
-    user_prompt_text = f"""Operational Request: "{raw_prompt}"
-
-Available Real Files Manifest ({len(manifest)} files on disk):
-{json.dumps(manifest, indent=2)}
-
-Formulate a concise, high-impact Action Plan strictly organizing the matching files from this manifest.
-"""
-
-    gemini_plan = call_gemini_api(system_prompt, user_prompt_text)
-
-    # 7. Extract Actions or fallback to Heuristic Reconnaissance on Real Files
-    plan_actions = []
-    plan_desc = ""
-
-    if gemini_plan and isinstance(gemini_plan.get("actions"), list) and len(gemini_plan["actions"]) > 0:
-        plan_desc = gemini_plan.get("description", f"Organize files per: {raw_prompt}")
-        manifest_paths = {m["path"].lower(): m["path"] for m in manifest}
-        manifest_names = {m["name"].lower(): m["path"] for m in manifest}
-
-        for act in gemini_plan["actions"]:
-            act_type = act.get("type")
-            if act_type == "make_dir":
-                plan_actions.append(act)
-            elif act_type in ("move", "copy", "trash"):
-                src = act.get("source") or act.get("path") or ""
-                matched_src = None
-                if src.lower() in manifest_paths:
-                    matched_src = manifest_paths[src.lower()]
-                elif os.path.basename(src).lower() in manifest_names:
-                    matched_src = manifest_names[os.path.basename(src).lower()]
-
-                if matched_src:
-                    if act_type in ("move", "copy"):
-                        act["source"] = matched_src
-                    else:
-                        act["path"] = matched_src
-                    plan_actions.append(act)
-
-    # Heuristic Reconnaissance Fallback (operates strictly on the real scanned manifest files)
-    if not plan_actions:
-        created_dirs = set()
-        step_idx = 1
-
-        if "voucher" in lower_p or "fee" in lower_p or "challan" in lower_p:
-            plan_desc = "Organize student fee vouchers into academic and peer directories"
-            for item in manifest:
-                fn = item["name"].lower()
-                snip = item["snippet"].lower()
-                is_voucher = any(k in fn or k in snip for k in ("voucher", "fee", "challan", "slip"))
-                if not is_voucher:
-                    continue
-
-                # Check if it belongs to a peer
-                peer_match = None
-                for p_name in peer_names:
-                    if p_name.lower() in fn or p_name.lower() in snip:
-                        peer_match = p_name
-                        break
-
-                if peer_match:
-                    peer_dir = f"Documents/Peers/{peer_match}"
-                    if peer_dir not in created_dirs:
-                        plan_actions.append({"action_id": f"step-{step_idx}", "type": "make_dir", "path": peer_dir})
-                        created_dirs.add(peer_dir)
-                        step_idx += 1
-                    plan_actions.append({
-                        "action_id": f"step-{step_idx}",
-                        "type": "move",
-                        "source": item["path"],
-                        "destination": f"{peer_dir}/{item['name']}",
-                        "peer_name": peer_match,
-                        "rationale": f"Routed to peer folder for {peer_match} to avoid polluting personal storage"
-                    })
-                    step_idx += 1
-                else:
-                    target_d = "Documents/University/Vouchers"
-                    if target_d not in created_dirs:
-                        plan_actions.append({"action_id": f"step-{step_idx}", "type": "make_dir", "path": target_d})
-                        created_dirs.add(target_d)
-                        step_idx += 1
-                    plan_actions.append({
-                        "action_id": f"step-{step_idx}",
-                        "type": "move",
-                        "source": item["path"],
-                        "destination": f"{target_d}/{item['name']}",
-                        "rationale": f"Personal voucher for {owner_name} filed under University Vouchers"
-                    })
-                    step_idx += 1
-
-        elif "peer" in lower_p or "separate" in lower_p:
-            plan_desc = f"Separate peer documents from {owner_name}'s personal storage"
-            for item in manifest:
-                fn = item["name"].lower()
-                snip = item["snippet"].lower()
-                peer_match = None
-                for p_name in peer_names:
-                    if p_name.lower() in fn or p_name.lower() in snip:
-                        peer_match = p_name
-                        break
-
-                if peer_match:
-                    peer_dir = f"Documents/Peers/{peer_match}"
-                    if peer_dir not in created_dirs:
-                        plan_actions.append({"action_id": f"step-{step_idx}", "type": "make_dir", "path": peer_dir})
-                        created_dirs.add(peer_dir)
-                        step_idx += 1
-                    plan_actions.append({
-                        "action_id": f"step-{step_idx}",
-                        "type": "move",
-                        "source": item["path"],
-                        "destination": f"{peer_dir}/{item['name']}",
-                        "peer_name": peer_match,
-                        "rationale": f"Isolated document for peer {peer_match}"
-                    })
-                    step_idx += 1
-
-        elif "clean" in lower_p and ("name" in lower_p or "download" in lower_p):
-            plan_desc = "Standardize cryptic download filenames into structured folders"
-            for item in manifest:
-                fn = item["name"]
-                if fn.endswith((".tmp", ".log")):
-                    continue
-                # Cryptic pattern check
-                if re.search(r"^\d{4}\.\d{4,5}|IMG_|WhatsApp|Screenshot", fn, re.I):
-                    clean_title = re.sub(r"^\d{4}\.\d{4,5}v?\d*_", "Research_Paper_", fn)
-                    target_d = "Documents/Research" if "neural" in fn.lower() or "1508" in fn else "Documents/Organized"
-                    if target_d not in created_dirs:
-                        plan_actions.append({"action_id": f"step-{step_idx}", "type": "make_dir", "path": target_d})
-                        created_dirs.add(target_d)
-                        step_idx += 1
-                    plan_actions.append({
-                        "action_id": f"step-{step_idx}",
-                        "type": "move",
-                        "source": item["path"],
-                        "destination": f"{target_d}/{clean_title}",
-                        "rationale": "Standardized filename into structured folder"
-                    })
-                    step_idx += 1
-
-        elif "screenshot" in lower_p or "cleanup" in lower_p or "trash" in lower_p:
-            plan_desc = "Safely soft-delete obsolete screenshots and sync cache files to .agent_trash"
-            for item in manifest:
-                fn = item["name"].lower()
-                if "screenshot" in fn or fn.endswith((".tmp", ".cache", ".bak")):
-                    plan_actions.append({
-                        "action_id": f"step-{step_idx}",
-                        "type": "trash",
-                        "path": item["path"],
-                        "rationale": "Temporary/screenshot file queued for soft-delete with rollback"
-                    })
-                    step_idx += 1
-
-        else:
-            # Custom prompt matching
-            plan_desc = f"Organize files matching: '{raw_prompt}'"
-            keywords = [w for w in re.split(r"\W+", lower_p) if len(w) > 2 and w not in ("the", "all", "and", "for")]
-            for item in manifest:
-                fn = item["name"].lower()
-                snip = item["snippet"].lower()
-                if any(k in fn or k in snip for k in keywords):
-                    target_d = "Documents/Organized"
-                    if target_d not in created_dirs:
-                        plan_actions.append({"action_id": f"step-{step_idx}", "type": "make_dir", "path": target_d})
-                        created_dirs.add(target_d)
-                        step_idx += 1
-                    plan_actions.append({
-                        "action_id": f"step-{step_idx}",
-                        "type": "move",
-                        "source": item["path"],
-                        "destination": f"{target_d}/{item['name']}",
-                        "rationale": f"Matched criteria for '{raw_prompt}'"
-                    })
-                    step_idx += 1
-
-    # If no files matched after scanning real manifest
-    if not plan_actions:
-        return jsonify({
-            "type": "conversation",
-            "message": (
-                f"ℹ️ No eligible documents found in '{target_folder}/' matching \"{raw_prompt}\".\n\n"
-                f"Inspected {len(manifest)} real files on disk. None required modification under this criteria."
-            ),
-            "quick_chips": [
-                "📋 Sort Student Vouchers",
-                "👥 Separate Peer Documents",
-                "🏷️ Clean Download Names",
-                "🗑️ Cleanup Old Screenshots"
-            ]
-        })
-
-    # 8. Post-Process Badges: FILE_MOVE, PEER_MOVE, RENAME, FOLDER_CREATE, TRASH
+def format_plan_badges(plan_actions: list, peer_names: list) -> list:
+    """Post-processes action steps and annotates visual UI badges."""
     formatted_actions = []
     step_num = 1
     for act in plan_actions:
@@ -1489,6 +1100,447 @@ Formulate a concise, high-impact Action Plan strictly organizing the matching fi
             formatted_actions.append(act_copy)
             step_num += 1
 
+    return formatted_actions
+
+def call_gemini_api(system_prompt: str, user_prompt: str) -> dict:
+    """
+    Sends structured prompt to Gemini API with model fallback:
+    1. gemini-3.5-flash-lite
+    2. gemini-2.5-flash
+    3. gemini-3.8-flash
+    4. gemini-2.0-flash
+    """
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        return {}
+
+    models = ["gemini-3.5-flash-lite", "gemini-2.5-flash", "gemini-3.8-flash", "gemini-2.0-flash", "gemini-1.5-flash"]
+    payload = {
+        "system_instruction": {"parts": [{"text": system_prompt}]},
+        "contents": [{"role": "user", "parts": [{"text": user_prompt}]}],
+        "generationConfig": {"temperature": 0.1, "responseMimeType": "application/json"}
+    }
+
+    for model in models:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+        try:
+            resp = requests.post(url, json=payload, timeout=25)
+            if resp.status_code == 200:
+                data = resp.json()
+                candidates = data.get("candidates", [])
+                if candidates:
+                    parts = candidates[0].get("content", {}).get("parts", [])
+                    if parts:
+                        text = parts[0].get("text", "")
+                        return extract_json_plan(text)
+            elif resp.status_code in (404, 503):
+                continue
+        except Exception:
+            continue
+    return {}
+
+@app.route("/propose_plan", methods=["POST"])
+def propose_plan():
+    """
+    Dynamic Conversational Intent & Live Reconnaissance Endpoint:
+    - Removes hardcoded keyword checks; relies on Gemini for dynamic intent routing.
+    - System Context:
+      * Role: Storage Copilot, running locally on an Android device via Termux.
+      * Active User: Imran Tahir (BSAI-182).
+      * Storage Root: /storage/emulated/0 (Downloads, Documents).
+      * Known Peers: Fawad, Sumbal, Ahmed, Yousaf.
+    - Unified JSON contract:
+      {
+        "type": "conversation" | "plan",
+        "message": "Conversational reply or plan summary",
+        "actions": [ ... ] // empty if type == "conversation"
+      }
+    - Live Disk Reconnaissance: Reads real files on disk with in-memory RAM PII scrubbing.
+    - Badges formatted: FILE_MOVE, PEER_MOVE, RENAME, FOLDER_CREATE, TRASH.
+    """
+    data = request.get_json(force=True) or {}
+    raw_prompt = (data.get("prompt") or "").strip()
+    target_folder = data.get("target_folder") or "Download"
+
+    # 1. Live Disk Reconnaissance: Locate target folder
+    target_dir = None
+    dir_candidates = [
+        target_folder,
+        target_folder.lower(),
+        target_folder.capitalize(),
+        os.path.join(BASE_STORAGE_DIR, target_folder),
+        os.path.join(BASE_STORAGE_DIR, target_folder.lower()),
+    ]
+    for c in dir_candidates:
+        try:
+            p = resolve_safe_path(c) if not os.path.isabs(c) else c
+            if os.path.exists(p) and os.path.isdir(p):
+                target_dir = p
+                break
+        except Exception:
+            continue
+
+    if not target_dir:
+        target_dir = os.path.join(BASE_STORAGE_DIR, target_folder)
+        os.makedirs(target_dir, exist_ok=True)
+
+    # 2. Read actual real files on disk
+    scanned_entries = []
+    if os.path.exists(target_dir) and os.path.isdir(target_dir):
+        for entry in os.scandir(target_dir):
+            if entry.is_file() and not entry.name.startswith("."):
+                scanned_entries.append(entry)
+
+    # 3. In-Memory Snippet Inspection & PII Scrubbing
+    manifest = []
+    for entry in scanned_entries[:20]:
+        name = entry.name
+        ext = os.path.splitext(name)[1].lower()
+        snippet = ""
+        try:
+            if ext == ".pdf":
+                try:
+                    import pypdf
+                    reader = pypdf.PdfReader(entry.path)
+                    parts = [p.extract_text() or "" for p in reader.pages[:2]]
+                    snippet = "\n".join(parts)[:600]
+                except Exception:
+                    snippet = "[PDF document]"
+            elif ext in (".txt", ".md", ".json", ".csv", ".tmp", ".log"):
+                with open(entry.path, "r", encoding="utf-8", errors="replace") as f:
+                    snippet = f.read(600)
+            else:
+                snippet = f"[{ext.upper()} media/file]"
+        except Exception:
+            snippet = ""
+
+        sanitized_snippet = sanitize_pii(snippet)
+
+        try:
+            rel_path = os.path.relpath(entry.path, BASE_STORAGE_DIR).replace("\\", "/")
+        except Exception:
+            rel_path = f"{target_folder}/{name}"
+
+        manifest.append({
+            "name": name,
+            "path": rel_path,
+            "size_bytes": entry.stat().st_size,
+            "snippet": sanitized_snippet
+        })
+
+    # 4. Load User Profile & Peer Separation Matrix
+    p_path = get_user_profile_path()
+    profile = {}
+    if os.path.exists(p_path):
+        try:
+            with open(p_path, "r", encoding="utf-8") as pf:
+                profile = json.load(pf)
+        except Exception:
+            pass
+
+    user_id = profile.get("user_identity", {})
+    owner_name = user_id.get("primary_name", "Imran Tahir")
+    identifiers = user_id.get("identifiers", ["BSAI-182", "182"])
+    peers = profile.get("known_peers", [])
+    peer_names = [p.get("name") for p in peers if p.get("name")] or ["Fawad", "Sumbal", "Ahmed", "Yousaf"]
+
+    peer_matrix_lines = "\n".join(
+        f"- Peer '{p.get('name')}': designated folder '{p.get('designated_folder', f'Documents/Peers/{p.get('name')}')}'"
+        for p in peers
+    ) if peers else "\n".join(f"- Peer '{p}': designated folder 'Documents/Peers/{p}'" for p in peer_names)
+
+    # 5. Formulate Gemini System Prompt with Explicit System Context & JSON Contract
+    system_prompt = f"""You are Storage Copilot, running locally on an Android device via Termux.
+Active User: {owner_name} (Roll/ID: {identifiers}).
+Storage Root: /storage/emulated/0 (Downloads, Documents).
+Known Peers: {", ".join(peer_names)}.
+
+Peer Separation Matrix:
+{peer_matrix_lines}
+
+Define a unified JSON contract for your responses:
+{{
+  "type": "conversation" | "plan",
+  "message": "Conversational reply or plan summary",
+  "actions": [ ... ] // empty if type == "conversation"
+}}
+
+CRITICAL ROUTING & REASONING RULES:
+1. CONVERSATIONAL INTENT ("type": "conversation"):
+   - If the user is greeting you (e.g. hi, hello, hey), asking who you are, asking about your capabilities, or making small talk / general questions:
+     Set "type": "conversation".
+     "message": An intelligent, friendly response as Storage Copilot running locally on Imran Tahir's Android device via Termux. Mention what you can do (e.g. organizing downloads, separating peer files, sorting university fee vouchers, cleaning download names, trashing old screenshots with 1-tap undo).
+     "actions": []
+
+2. OPERATIONAL INTENT ("type": "plan"):
+   - If the user wants to organize, clean, move, sort, or trash files:
+     Analyze the provided Real Files Manifest ({len(manifest)} real files on disk).
+     If matching files exist:
+       Set "type": "plan".
+       "message": A clear, concise summary of the planned storage organization.
+       "actions": A list of discrete file operations strictly operating on real files from the Real Files Manifest:
+         - For directory creation: {{"action_id": "step-1", "type": "make_dir", "path": "Documents/..."}}
+         - For moving or renaming: {{"action_id": "step-2", "type": "move", "source": "<exact manifest path>", "destination": "Documents/...", "rationale": "...", "peer_name": "..." (if peer)}}
+         - For trashing / soft-deleting: {{"action_id": "step-3", "type": "trash", "path": "<exact manifest path>", "rationale": "..."}}
+       CRITICAL RULES FOR ACTIONS:
+       - Propose actions ONLY for files present in the provided Manifest. Never invent or hallucinate non-existent filenames.
+       - Peer Separation: Route documents belonging to or naming peers ({", ".join(peer_names)}) to their designated peer folder (e.g. 'Documents/Peers/<PeerName>'). Never put peer documents in personal folders.
+       - Personal Academic: Route '{owner_name}' academic documents (fee vouchers, roll {identifiers}) to 'Documents/University/Vouchers'.
+       - Renaming / Standardizing: Standardize cryptic filenames (e.g. arXiv codes, messy WhatsApp exports) to descriptive titles in structured folders.
+       - Soft Delete: Route obsolete screenshots (.png) and temporary cache files (.tmp) to '.agent_trash' using "type": "trash".
+       - Always create parent directories with 'make_dir' before moving files into them.
+     If NO files match the operational criteria or manifest is empty:
+       Set "type": "conversation".
+       "message": Informative notice that no eligible documents in '{target_folder}/' matched the criteria.
+       "actions": []
+"""
+
+    user_prompt_text = f"""Operational Request: "{raw_prompt}"
+
+Current Target Directory: "{target_folder}"
+Available Real Files Manifest ({len(manifest)} real files on disk):
+{json.dumps(manifest, indent=2)}
+"""
+
+    gemini_resp = call_gemini_api(system_prompt, user_prompt_text)
+
+    # 6. Evaluate Gemini Output
+    if gemini_resp and isinstance(gemini_resp, dict):
+        resp_type = gemini_resp.get("type", "conversation")
+        resp_message = gemini_resp.get("message", "")
+        raw_actions = gemini_resp.get("actions", [])
+
+        if resp_type == "conversation" or not raw_actions:
+            return jsonify({
+                "type": "conversation",
+                "message": resp_message or f"Hello {owner_name}! I am your Storage Copilot running locally on Android via Termux.",
+                "actions": [],
+                "quick_chips": [
+                    "📋 Sort Student Vouchers",
+                    "👥 Separate Peer Documents",
+                    "🏷️ Clean Download Names",
+                    "🗑️ Cleanup Old Screenshots"
+                ]
+            })
+
+        # Process and validate raw_actions from Gemini plan against manifest
+        manifest_paths = {m["path"].lower(): m["path"] for m in manifest}
+        manifest_names = {m["name"].lower(): m["path"] for m in manifest}
+
+        validated_actions = []
+        for act in raw_actions:
+            act_type = act.get("type")
+            if act_type == "make_dir":
+                validated_actions.append(act)
+            elif act_type in ("move", "copy", "trash"):
+                src = act.get("source") or act.get("path") or ""
+                matched_src = None
+                if src.lower() in manifest_paths:
+                    matched_src = manifest_paths[src.lower()]
+                elif os.path.basename(src).lower() in manifest_names:
+                    matched_src = manifest_names[os.path.basename(src).lower()]
+
+                if matched_src:
+                    if act_type in ("move", "copy"):
+                        act["source"] = matched_src
+                    else:
+                        act["path"] = matched_src
+                    validated_actions.append(act)
+
+        if validated_actions:
+            formatted_actions = format_plan_badges(validated_actions, peer_names)
+            plan_id = str(uuid.uuid4())
+            action_plan = {
+                "plan_id": plan_id,
+                "version": "1.0",
+                "description": resp_message or f"Organize files per: {raw_prompt}",
+                "collision_strategy": "RENAME_NUMERIC",
+                "actions": formatted_actions
+            }
+            return jsonify({
+                "type": "plan",
+                "message": resp_message or f"I've inspected your storage ({len(manifest)} real files on disk) and synthesized an Action Plan.",
+                "actions": formatted_actions,
+                "plan": action_plan
+            })
+
+    # 7. Heuristic Fallback (Active if Gemini API key is missing or offline)
+    lower_p = raw_prompt.lower()
+    operational_keywords = ("voucher", "fee", "challan", "slip", "peer", "separate", "clean", "name", "download", "screenshot", "trash", "delete", "move", "organize", "sort")
+    is_operational = any(k in lower_p for k in operational_keywords)
+
+    if not is_operational:
+        # Conversational fallback
+        return jsonify({
+            "type": "conversation",
+            "message": (
+                f"👋 Hello {owner_name}! I am Storage Copilot, running locally on your Android device via Termux.\n\n"
+                f"Storage Root: /storage/emulated/0 (Downloads, Documents)\n"
+                f"Known Peers: {', '.join(peer_names)}\n\n"
+                "I analyze unorganized files, separate peer documents from personal storage, sort university fee vouchers, "
+                "and clean up downloads—with interactive diff reviews and 1-tap rollback.\n\n"
+                "Tap one of the quick task chips below to scan your storage and formulate an Action Plan!"
+            ),
+            "actions": [],
+            "quick_chips": [
+                "📋 Sort Student Vouchers",
+                "👥 Separate Peer Documents",
+                "🏷️ Clean Download Names",
+                "🗑️ Cleanup Old Screenshots"
+            ]
+        })
+
+    # Heuristic Reconnaissance on Real Files
+    plan_actions = []
+    plan_desc = ""
+    created_dirs = set()
+    step_idx = 1
+
+    if "voucher" in lower_p or "fee" in lower_p or "challan" in lower_p:
+        plan_desc = "Organize student fee vouchers into academic and peer directories"
+        for item in manifest:
+            fn = item["name"].lower()
+            snip = item["snippet"].lower()
+            is_voucher = any(k in fn or k in snip for k in ("voucher", "fee", "challan", "slip"))
+            if not is_voucher:
+                continue
+
+            peer_match = None
+            for p_name in peer_names:
+                if p_name.lower() in fn or p_name.lower() in snip:
+                    peer_match = p_name
+                    break
+
+            if peer_match:
+                peer_dir = f"Documents/Peers/{peer_match}"
+                if peer_dir not in created_dirs:
+                    plan_actions.append({"action_id": f"step-{step_idx}", "type": "make_dir", "path": peer_dir})
+                    created_dirs.add(peer_dir)
+                    step_idx += 1
+                plan_actions.append({
+                    "action_id": f"step-{step_idx}",
+                    "type": "move",
+                    "source": item["path"],
+                    "destination": f"{peer_dir}/{item['name']}",
+                    "peer_name": peer_match,
+                    "rationale": f"Routed to peer folder for {peer_match} to avoid polluting personal storage"
+                })
+                step_idx += 1
+            else:
+                target_d = "Documents/University/Vouchers"
+                if target_d not in created_dirs:
+                    plan_actions.append({"action_id": f"step-{step_idx}", "type": "make_dir", "path": target_d})
+                    created_dirs.add(target_d)
+                    step_idx += 1
+                plan_actions.append({
+                    "action_id": f"step-{step_idx}",
+                    "type": "move",
+                    "source": item["path"],
+                    "destination": f"{target_d}/{item['name']}",
+                    "rationale": f"Personal voucher for {owner_name} filed under University Vouchers"
+                })
+                step_idx += 1
+
+    elif "peer" in lower_p or "separate" in lower_p:
+        plan_desc = f"Separate peer documents from {owner_name}'s personal storage"
+        for item in manifest:
+            fn = item["name"].lower()
+            snip = item["snippet"].lower()
+            peer_match = None
+            for p_name in peer_names:
+                if p_name.lower() in fn or p_name.lower() in snip:
+                    peer_match = p_name
+                    break
+
+            if peer_match:
+                peer_dir = f"Documents/Peers/{peer_match}"
+                if peer_dir not in created_dirs:
+                    plan_actions.append({"action_id": f"step-{step_idx}", "type": "make_dir", "path": peer_dir})
+                    created_dirs.add(peer_dir)
+                    step_idx += 1
+                plan_actions.append({
+                    "action_id": f"step-{step_idx}",
+                    "type": "move",
+                    "source": item["path"],
+                    "destination": f"{peer_dir}/{item['name']}",
+                    "peer_name": peer_match,
+                    "rationale": f"Isolated document for peer {peer_match}"
+                })
+                step_idx += 1
+
+    elif "clean" in lower_p and ("name" in lower_p or "download" in lower_p):
+        plan_desc = "Standardize cryptic download filenames into structured folders"
+        for item in manifest:
+            fn = item["name"]
+            if fn.endswith((".tmp", ".log")):
+                continue
+            if re.search(r"^\d{4}\.\d{4,5}|IMG_|WhatsApp|Screenshot", fn, re.I):
+                clean_title = re.sub(r"^\d{4}\.\d{4,5}v?\d*_", "Research_Paper_", fn)
+                target_d = "Documents/Research" if "neural" in fn.lower() or "1508" in fn else "Documents/Organized"
+                if target_d not in created_dirs:
+                    plan_actions.append({"action_id": f"step-{step_idx}", "type": "make_dir", "path": target_d})
+                    created_dirs.add(target_d)
+                    step_idx += 1
+                plan_actions.append({
+                    "action_id": f"step-{step_idx}",
+                    "type": "move",
+                    "source": item["path"],
+                    "destination": f"{target_d}/{clean_title}",
+                    "rationale": "Standardized filename into structured folder"
+                })
+                step_idx += 1
+
+    elif "screenshot" in lower_p or "cleanup" in lower_p or "trash" in lower_p:
+        plan_desc = "Safely soft-delete obsolete screenshots and sync cache files to .agent_trash"
+        for item in manifest:
+            fn = item["name"].lower()
+            if "screenshot" in fn or fn.endswith((".tmp", ".cache", ".bak")):
+                plan_actions.append({
+                    "action_id": f"step-{step_idx}",
+                    "type": "trash",
+                    "path": item["path"],
+                    "rationale": "Temporary/screenshot file queued for soft-delete with rollback"
+                })
+                step_idx += 1
+
+    else:
+        keywords = [w for w in re.split(r"\W+", lower_p) if len(w) > 2 and w not in ("the", "all", "and", "for")]
+        plan_desc = f"Organize files matching: '{raw_prompt}'"
+        for item in manifest:
+            fn = item["name"].lower()
+            snip = item["snippet"].lower()
+            if any(k in fn or k in snip for k in keywords):
+                target_d = "Documents/Organized"
+                if target_d not in created_dirs:
+                    plan_actions.append({"action_id": f"step-{step_idx}", "type": "make_dir", "path": target_d})
+                    created_dirs.add(target_d)
+                    step_idx += 1
+                plan_actions.append({
+                    "action_id": f"step-{step_idx}",
+                    "type": "move",
+                    "source": item["path"],
+                    "destination": f"{target_d}/{item['name']}",
+                    "rationale": f"Matched criteria for '{raw_prompt}'"
+                })
+                step_idx += 1
+
+    if not plan_actions:
+        return jsonify({
+            "type": "conversation",
+            "message": (
+                f"ℹ️ No eligible documents found in '{target_folder}/' matching \"{raw_prompt}\".\n\n"
+                f"Inspected {len(manifest)} real files on disk. None required modification under this criteria."
+            ),
+            "actions": [],
+            "quick_chips": [
+                "📋 Sort Student Vouchers",
+                "👥 Separate Peer Documents",
+                "🏷️ Clean Download Names",
+                "🗑️ Cleanup Old Screenshots"
+            ]
+        })
+
+    formatted_actions = format_plan_badges(plan_actions, peer_names)
     plan_id = str(uuid.uuid4())
     action_plan = {
         "plan_id": plan_id,
@@ -1501,6 +1553,7 @@ Formulate a concise, high-impact Action Plan strictly organizing the matching fi
     return jsonify({
         "type": "plan",
         "message": f"I've inspected your storage ({len(manifest)} real files on disk) and synthesized an Action Plan for: \"{plan_desc}\"",
+        "actions": formatted_actions,
         "plan": action_plan
     })
 
