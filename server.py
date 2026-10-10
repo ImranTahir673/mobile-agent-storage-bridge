@@ -10,7 +10,7 @@ import requests
 from flask import Flask, request, jsonify, send_from_directory
 
 app = Flask("MobileStorageBridge")
-APP_VERSION = "v0.4-live"
+APP_VERSION = "v0.5-live"
 
 # ==============================================================================
 # Environment Configuration (.env loader)
@@ -389,7 +389,11 @@ def read_file_snippet():
                     break
             snippet = "\n".join(text_parts)[:max_chars]
         except Exception as e:
-            snippet = f"[PDF Preview Error: {e}]"
+            try:
+                with open(target, "r", encoding="utf-8", errors="replace") as f:
+                    snippet = f.read(max_chars)
+            except Exception:
+                snippet = f"[PDF Preview Error: {e}]"
     else:
         # Standard text file extraction
         try:
@@ -641,10 +645,42 @@ def execute_plan():
         )
         conn.commit()
 
+        # Build executed batch audit summary
+        execution_summary = []
+        now_ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+        for step in executed_actions:
+            idx = step["step_index"]
+            act_orig = actions[idx] if idx < len(actions) else {}
+            badge = act_orig.get("badge")
+            src_rel = os.path.relpath(step["src"], BASE_DIR).replace("\\", "/") if step.get("src") else None
+            dst_rel = os.path.relpath(step["dst"], BASE_DIR).replace("\\", "/") if step.get("dst") else None
+
+            if not badge:
+                if step["action_type"] == "trash":
+                    badge = "TRASH"
+                elif step["action_type"] == "make_dir":
+                    badge = "FOLDER_CREATE"
+                elif act_orig.get("peer_name") or (dst_rel and "/Peers/" in dst_rel):
+                    badge = "PEER_MOVE"
+                elif src_rel and dst_rel and os.path.basename(src_rel) != os.path.basename(dst_rel):
+                    badge = "RENAME"
+                else:
+                    badge = "FILE_MOVE"
+
+            execution_summary.append({
+                "step_index": idx,
+                "action_type": step["action_type"],
+                "source": src_rel or act_orig.get("source") or act_orig.get("path") or "",
+                "destination": dst_rel or act_orig.get("destination") or act_orig.get("path") or "",
+                "badge": badge,
+                "timestamp": now_ts
+            })
+
         return jsonify({
             "status": "success",
             "batch_id": plan_id,
-            "executed_actions": len(executed_actions)
+            "executed_actions": len(executed_actions),
+            "execution_summary": execution_summary
         })
 
     except Exception as e:
@@ -986,6 +1022,40 @@ def get_recent_batch():
         row = cursor.fetchone()
         if not row:
             return jsonify({"status": "none", "batch": None})
+
+        # Load execution summary from ledger for audit viewing
+        cursor.execute("""
+            SELECT step_index, action_type, source_path, destination_path, executed_at, status
+            FROM action_ledger
+            WHERE batch_id = ? AND status = 'EXECUTED'
+            ORDER BY step_index ASC
+        """, (row["batch_id"],))
+        action_rows = cursor.fetchall()
+
+        execution_summary = []
+        for a in action_rows:
+            src_rel = os.path.relpath(a["source_path"], BASE_DIR).replace("\\", "/") if a["source_path"] else None
+            dst_rel = os.path.relpath(a["destination_path"], BASE_DIR).replace("\\", "/") if a["destination_path"] else None
+            act_t = a["action_type"]
+            badge = "FILE_MOVE"
+            if act_t == "trash":
+                badge = "TRASH"
+            elif act_t == "make_dir":
+                badge = "FOLDER_CREATE"
+            elif dst_rel and "/Peers/" in dst_rel:
+                badge = "PEER_MOVE"
+            elif src_rel and dst_rel and os.path.basename(src_rel) != os.path.basename(dst_rel):
+                badge = "RENAME"
+
+            execution_summary.append({
+                "step_index": a["step_index"],
+                "action_type": act_t,
+                "source": src_rel or "",
+                "destination": dst_rel or "",
+                "badge": badge,
+                "timestamp": a["executed_at"] or row["completed_at"]
+            })
+
         return jsonify({
             "status": "success",
             "batch": {
@@ -995,7 +1065,8 @@ def get_recent_batch():
                 "executed_actions": row["executed_actions"],
                 "status": row["status"],
                 "completed_at": row["completed_at"],
-                "rolled_back_at": row["rolled_back_at"]
+                "rolled_back_at": row["rolled_back_at"],
+                "execution_summary": execution_summary
             }
         })
     except Exception as e:
@@ -1013,6 +1084,7 @@ def seed_fixtures():
         "fawad fee.pdf": "Student Fee Slip: Name: Fawad, Roll No: BSAI-190, Amount: PKR 45,000, Status: Paid.",
         "Sumbal pass.pdf": "University Entry Pass: Student Name: Sumbal, Department: AI.",
         "1508.06576v2_neural_style.pdf": "A Neural Algorithm of Artistic Style by Leon A. Gatys, Alexander S. Ecker, Matthias Bethge.",
+        "DOC-20250413-WA0017..pdf": "Scanned document export via WhatsApp messenger. Cryptic raw camera export.",
         "Screenshot_20241001-142210.png": "[PNG Image Binary Fixture: Temporary screen capture]",
         "temp_cache_sync.tmp": "[Temporary sync cache file created by updater]",
         "WhatsApp_Doc_Ahmed_Receipt.pdf": "Payment receipt for Ahmed, Department Library Fee."
@@ -1152,7 +1224,7 @@ def propose_plan():
     STAGE 1: Intent Classification via Gemini (BEFORE disk access)
     - If intent is "CONVERSATION" (e.g., greetings like "Hii", "Hello", "who are you?", "what can you do?"):
       Returns:
-      {"type": "conversation", "message": "<Helpful conversational response explaining Storage Copilot capabilities for Imran Tahir>", "version": "v0.4-live"}
+      {"type": "conversation", "message": "<Helpful conversational response explaining Storage Copilot capabilities for Imran Tahir>", "version": "v0.5-live"}
       Does NOT scan the disk or generate any file mutation cards!
       
     STAGE 2: Physical Disk Reconnaissance & Gemini Action Plan Synthesis
@@ -1298,11 +1370,13 @@ Respond STRICTLY with valid JSON adhering to this schema:
             ]
         })
 
-    # 3. In-Memory Snippet Inspection & PII Scrubbing
+    # 3. In-Memory Snippet Inspection & PII Scrubbing (Up to 30 candidate files)
     manifest = []
-    for entry in scanned_entries[:20]:
+    for entry in scanned_entries[:30]:
         name = entry.name
         ext = os.path.splitext(name)[1].lower()
+        size_bytes = entry.stat().st_size
+        mtime_str = datetime.fromtimestamp(entry.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S")
         snippet = ""
         try:
             if ext == ".pdf":
@@ -1312,8 +1386,12 @@ Respond STRICTLY with valid JSON adhering to this schema:
                     parts = [p.extract_text() or "" for p in reader.pages[:2]]
                     snippet = "\n".join(parts)[:600]
                 except Exception:
-                    snippet = "[PDF document]"
-            elif ext in (".txt", ".md", ".json", ".csv", ".tmp", ".log"):
+                    try:
+                        with open(entry.path, "r", encoding="utf-8", errors="replace") as f:
+                            snippet = f.read(600)
+                    except Exception:
+                        snippet = "[PDF document]"
+            elif ext in (".txt", ".md", ".json", ".csv", ".tmp", ".log", ".xml", ".html"):
                 with open(entry.path, "r", encoding="utf-8", errors="replace") as f:
                     snippet = f.read(600)
             else:
@@ -1331,7 +1409,9 @@ Respond STRICTLY with valid JSON adhering to this schema:
         manifest.append({
             "name": name,
             "path": rel_path,
-            "size_bytes": entry.stat().st_size,
+            "extension": ext,
+            "size_bytes": size_bytes,
+            "modified_time": mtime_str,
             "snippet": sanitized_snippet
         })
 
@@ -1351,12 +1431,27 @@ Define a unified JSON contract for your responses:
   "actions": [ ... ] // empty if type == "conversation"
 }}
 
+IMPORTANT: The candidates below are the ACTUAL files currently sitting on disk.
+Do NOT filter candidate files using literal prompt keywords (e.g., do NOT look for the literal words "Clean Download Names" or "Separate Peer Documents" in filenames!).
+Reason SEMANTICALLY over each candidate's filename, extension, size, modified time, and text snippet to decide the appropriate operation:
+
+SEMANTIC TASK GUIDELINES:
+1. "Clean Download Names" (or renaming messy/cryptic downloads):
+   - Identify cryptic, messy, timestamped, WhatsApp-exported, or paper-code filenames (e.g., 'DOC-20250413-WA0017..pdf', '1508.06576v2_neural_style.pdf', raw hash strings, raw camera timestamps).
+   - Propose semantic "type": "move" (RENAME) actions with clean, descriptive human-readable filenames inside appropriate structured folders (e.g., 'Documents/Organized/WhatsApp_Doc_20250413.pdf', 'Documents/Research/Neural_Style_Transfer_Paper.pdf').
+2. "Cleanup Old Screenshots" or "Clean temp" (soft-deleting trash):
+   - Identify image captures / screenshots (e.g., 'Screenshot_*.png') and temporary/cache files ('.tmp', '.cache', '.bak').
+   - Propose "type": "trash" actions to route them to '.agent_trash' with 1-tap undo safety.
+3. "Separate Peer Documents" (peer separation):
+   - Identify documents containing or naming peers ({", ".join(peer_names)}) in their filename or text snippet (e.g., Fawad, Sumbal, Ahmed, Yousaf).
+   - Propose "type": "move" actions to route them into their designated peer folders (e.g. 'Documents/Peers/<PeerName>/...'). Never route peer files to personal folders.
+4. "Sort Student Vouchers" (academic & fee management):
+   - Identify academic fee documents, challans, or vouchers from snippets or filenames.
+   - Route {owner_name}'s personal fee vouchers/slips to 'Documents/University/Vouchers' (or 'Documents/University/').
+   - Route any peer vouchers to their respective peer directory in 'Documents/Peers/<PeerName>/'.
+
 CRITICAL RULES FOR FILE ACTIONS:
 - Propose actions ONLY for files present in the provided Manifest ({len(manifest)} real files on disk). Never invent or hallucinate non-existent filenames.
-- Peer Separation: Route documents belonging to or naming peers ({", ".join(peer_names)}) to their designated peer folder (e.g. 'Documents/Peers/<PeerName>'). Never put peer documents in personal folders.
-- Personal Academic: Route '{owner_name}' academic documents (fee vouchers, roll {identifiers}) to 'Documents/University/Vouchers'.
-- Renaming / Standardizing: Standardize cryptic filenames (e.g. arXiv codes, messy WhatsApp exports) to descriptive titles in structured folders.
-- Soft Delete: Route obsolete screenshots (.png) and temporary cache files (.tmp) to '.agent_trash' using "type": "trash".
 - Always create parent directories with 'make_dir' before moving files into them.
 - Action format:
   {{"action_id": "step-1", "type": "make_dir", "path": "Documents/..."}}
@@ -1521,9 +1616,19 @@ Available Real Files Manifest ({len(manifest)} real files on disk):
             fn = item["name"]
             if fn.endswith((".tmp", ".log")):
                 continue
-            if re.search(r"^\d{4}\.\d{4,5}|IMG_|WhatsApp|Screenshot", fn, re.I):
-                clean_title = re.sub(r"^\d{4}\.\d{4,5}v?\d*_", "Research_Paper_", fn)
-                target_d = "Documents/Research" if "neural" in fn.lower() or "1508" in fn else "Documents/Organized"
+            if re.search(r"^(?:DOC-|\d{4}\.\d{4,5}|IMG_|WhatsApp|Screenshot|[a-f0-9]{16,})", fn, re.I) or ".." in fn or "wa0" in fn.lower():
+                clean_title = fn
+                if "1508" in fn:
+                    clean_title = "Neural_Algorithm_Artistic_Style_Paper.pdf"
+                    target_d = "Documents/Research"
+                elif "doc-" in fn.lower() or "wa" in fn.lower():
+                    clean_title = re.sub(r"\.\.+", ".", fn)
+                    clean_title = re.sub(r"^DOC-\d+-WA\d+", "WhatsApp_Export_Doc", clean_title)
+                    target_d = "Documents/Organized"
+                else:
+                    clean_title = re.sub(r"^\d{4}\.\d{4,5}v?\d*_", "Research_Paper_", fn)
+                    target_d = "Documents/Organized"
+
                 if target_d not in created_dirs:
                     plan_actions.append({"action_id": f"step-{step_idx}", "type": "make_dir", "path": target_d})
                     created_dirs.add(target_d)
@@ -1533,7 +1638,8 @@ Available Real Files Manifest ({len(manifest)} real files on disk):
                     "type": "move",
                     "source": item["path"],
                     "destination": f"{target_d}/{clean_title}",
-                    "rationale": "Standardized filename into structured folder"
+                    "badge": "RENAME",
+                    "rationale": "Standardized cryptic filename into structured folder"
                 })
                 step_idx += 1
 

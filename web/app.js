@@ -13,6 +13,7 @@ document.addEventListener('DOMContentLoaded', () => {
     userProfile: null,
     lastBatchId: null,
     lastBatchActions: 0,
+    lastExecutionSummary: [],
     activePlan: null,
     selectedActionIds: new Set()
   };
@@ -31,7 +32,7 @@ document.addEventListener('DOMContentLoaded', () => {
     seedBtn: document.getElementById('seed-btn'),
     peerPillsList: document.getElementById('peer-pills-list'),
     peerCountBadge: document.getElementById('peer-count-badge'),
-    undoBanner: document.getElementById('undo-banner'),
+    undoBanner: document.getElementById('active-batch-banner') || document.getElementById('undo-banner'),
     undoTitle: document.getElementById('undo-title'),
     undoMeta: document.getElementById('undo-meta'),
     undoBtn: document.getElementById('undo-btn'),
@@ -59,7 +60,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }, duration);
   }
 
-  const EXPECTED_VERSION = 'v0.4-live';
+  const EXPECTED_VERSION = 'v0.5-live';
 
   async function fetchHealth() {
     try {
@@ -144,6 +145,7 @@ document.addEventListener('DOMContentLoaded', () => {
       if (batch && batch.batch_id) {
         state.lastBatchId = batch.batch_id;
         state.lastBatchActions = batch.executed_actions || batch.total_actions || 0;
+        state.lastExecutionSummary = batch.execution_summary || [];
         updateUndoBanner(batch.batch_id, batch.status, state.lastBatchActions);
       }
     } catch (err) {
@@ -531,24 +533,14 @@ document.addEventListener('DOMContentLoaded', () => {
         throw new Error(result.error || 'Batch execution failed');
       }
 
-      // Success Display
-      container.innerHTML = `
-        <div style="padding: 14px; display: flex; flex-direction: column; gap: 8px; text-align: center;">
-          <div style="display: flex; align-items: center; justify-content: center; gap: 8px; color: #34D399; font-weight: 800; font-size: 14px;">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="width:20px;height:20px;">
-              <path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
-            </svg>
-            <span>Batch Executed Successfully</span>
-          </div>
-          <p style="font-size: 12px; color: var(--text-secondary);">
-            Batch <code>#${result.batch_id.substring(0, 8)}</code> applied ${result.executed_actions} atomic changes. Pre-logged to SQLite WAL ledger.
-          </p>
-        </div>
-      `;
-
+      // Store executed batch audit details
       state.lastBatchId = result.batch_id;
       state.lastBatchActions = result.executed_actions;
+      state.lastExecutionSummary = result.execution_summary || [];
       updateUndoBanner(result.batch_id, 'COMPLETED', result.executed_actions);
+
+      // Render interactive Execution Success Card with Before & After Audit View
+      renderExecutionSuccess(container, result);
 
       showToast(`✓ Batch #${result.batch_id.substring(0, 8)} executed! (1-Tap Undo active)`, 'success', 4000);
     } catch (err) {
@@ -558,6 +550,174 @@ document.addEventListener('DOMContentLoaded', () => {
         approveBtn.innerHTML = `<span>Retry Execution</span>`;
       }
       if (rejectBtn) rejectBtn.style.display = 'flex';
+    }
+  }
+
+  // ==============================================================================
+  // Executed Batch Audit View Controller (v0.5-live)
+  // ==============================================================================
+  function createAuditListHtml(summary, batchId) {
+    if (!summary || summary.length === 0) {
+      return `
+        <div class="audit-item" style="text-align: center; color: var(--text-tertiary); font-style: italic;">
+          <span>No granular filesystem mutations recorded for this batch.</span>
+        </div>
+      `;
+    }
+
+    return summary.map(item => {
+      const badge = item.badge || (item.action_type === 'trash' ? 'TRASH' : 'FILE_MOVE');
+      let pathRowsHtml = '';
+
+      if (item.action_type === 'make_dir') {
+        pathRowsHtml = `
+          <div class="audit-path-row dir">
+            <span class="audit-label">DIR:</span>
+            <span class="audit-path" title="${escapeHtml(item.destination)}">${escapeHtml(item.destination)}</span>
+          </div>
+        `;
+      } else if (item.action_type === 'trash') {
+        pathRowsHtml = `
+          <div class="audit-path-row src">
+            <span class="audit-label">SRC:</span>
+            <span class="audit-path" title="${escapeHtml(item.source)}">${escapeHtml(item.source)}</span>
+          </div>
+          <div class="audit-diff-arrow">↳ soft-deleted to:</div>
+          <div class="audit-path-row dst">
+            <span class="audit-label">DST:</span>
+            <span class="audit-path">.agent_trash (Soft Delete Vault)</span>
+          </div>
+        `;
+      } else {
+        pathRowsHtml = `
+          <div class="audit-path-row src">
+            <span class="audit-label">SRC:</span>
+            <span class="audit-path" title="${escapeHtml(item.source)}">${escapeHtml(item.source)}</span>
+          </div>
+          <div class="audit-diff-arrow">↳ moved / renamed to:</div>
+          <div class="audit-path-row dst">
+            <span class="audit-label">DST:</span>
+            <span class="audit-path" title="${escapeHtml(item.destination)}">${escapeHtml(item.destination)}</span>
+          </div>
+        `;
+      }
+
+      return `
+        <div class="audit-item">
+          <div class="audit-item-top">
+            <span class="action-badge badge-${badge}">${badge.replace('_', ' ')}</span>
+            <span class="audit-step-time">${item.timestamp || 'Executed'}</span>
+          </div>
+          <div class="audit-path-diff">
+            ${pathRowsHtml}
+          </div>
+        </div>
+      `;
+    }).join('');
+  }
+
+  function renderExecutionSuccess(container, result) {
+    const summary = result.execution_summary || [];
+    const count = result.executed_actions || summary.length;
+    const batchId = result.batch_id;
+    const shortId = batchId.length > 8 ? batchId.substring(0, 8) : batchId;
+
+    container.innerHTML = `
+      <div class="execution-success-card" id="audit-card-${batchId}">
+        <div class="success-header-row">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="width:20px;height:20px;">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+          </svg>
+          <span>Batch Executed Successfully</span>
+        </div>
+        <p class="success-meta-text">
+          Batch <code>#${shortId}</code> applied ${count} atomic changes. Pre-logged to SQLite WAL ledger.
+        </p>
+
+        <div class="audit-action-center">
+          <button class="audit-toggle-btn" id="audit-toggle-${batchId}" aria-expanded="false" title="Expand Before & After applied changes">
+            <span class="audit-eye-icon">👁️</span>
+            <span>View Applied Changes (${count})</span>
+            <span class="audit-chevron">▼</span>
+          </button>
+        </div>
+
+        <div class="audit-panel" id="audit-panel-${batchId}" style="display: none;">
+          <div class="audit-panel-header">
+            <span class="audit-panel-title">Before &amp; After Audit Trail</span>
+            <span class="audit-panel-count">${count} Operations</span>
+          </div>
+          <div class="audit-list" id="audit-list-${batchId}">
+            ${createAuditListHtml(summary, batchId)}
+          </div>
+        </div>
+      </div>
+    `;
+
+    // Wire up toggle button
+    const toggleBtn = container.querySelector(`#audit-toggle-${batchId}`);
+    const panel = container.querySelector(`#audit-panel-${batchId}`);
+    if (toggleBtn && panel) {
+      toggleBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const isHidden = panel.style.display === 'none';
+        panel.style.display = isHidden ? 'flex' : 'none';
+        toggleBtn.setAttribute('aria-expanded', isHidden ? 'true' : 'false');
+        if (isHidden) {
+          setTimeout(() => {
+            panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+          }, 80);
+        }
+      });
+    }
+
+    scrollToBottom();
+  }
+
+  function openOrScrollToAuditView(batchId) {
+    if (!batchId) return;
+
+    let card = document.getElementById(`audit-card-${batchId}`);
+    let panel = document.getElementById(`audit-panel-${batchId}`);
+    let toggleBtn = document.getElementById(`audit-toggle-${batchId}`);
+
+    if (card && panel) {
+      panel.style.display = 'flex';
+      if (toggleBtn) toggleBtn.setAttribute('aria-expanded', 'true');
+      card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      card.classList.remove('audit-highlight-pulse');
+      void card.offsetWidth; // Trigger DOM reflow
+      card.classList.add('audit-highlight-pulse');
+      setTimeout(() => card.classList.remove('audit-highlight-pulse'), 1800);
+      showToast(`Showing audit trail for Batch #${batchId.substring(0, 8)}`, 'info');
+      return;
+    }
+
+    // Fallback: If page was reloaded and card is not yet in conversation stream, render it
+    if (state.lastExecutionSummary && state.lastExecutionSummary.length > 0) {
+      const wrapper = document.createElement('div');
+      wrapper.className = 'diff-review-container';
+      elements.conversationStream.appendChild(wrapper);
+      renderExecutionSuccess(wrapper, {
+        batch_id: batchId,
+        executed_actions: state.lastBatchActions || state.lastExecutionSummary.length,
+        execution_summary: state.lastExecutionSummary
+      });
+
+      const newPanel = document.getElementById(`audit-panel-${batchId}`);
+      const newToggle = document.getElementById(`audit-toggle-${batchId}`);
+      if (newPanel) newPanel.style.display = 'flex';
+      if (newToggle) newToggle.setAttribute('aria-expanded', 'true');
+
+      const newCard = document.getElementById(`audit-card-${batchId}`);
+      if (newCard) {
+        newCard.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        newCard.classList.add('audit-highlight-pulse');
+        setTimeout(() => newCard.classList.remove('audit-highlight-pulse'), 1800);
+      }
+      showToast(`Restored audit trail for Batch #${batchId.substring(0, 8)}`, 'info');
+    } else {
+      showToast(`Batch #${batchId.substring(0, 8)} is active for 1-Tap Undo`, 'info');
     }
   }
 
@@ -624,6 +784,17 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // 3. Persistent Undo Button
   elements.undoBtn.addEventListener('click', handleRollback);
+
+  // 3b. Active Batch Banner Click (#active-batch-banner) -> Scroll to or open audit view
+  if (elements.undoBanner) {
+    elements.undoBanner.addEventListener('click', (e) => {
+      // Ignore clicks directly targeting the 1-Tap Undo button
+      if (e.target.closest('#undo-btn')) return;
+      if (state.lastBatchId) {
+        openOrScrollToAuditView(state.lastBatchId);
+      }
+    });
+  }
 
   // 4. Seed Fixtures Button
   elements.seedBtn.addEventListener('click', seedDemoFixtures);
