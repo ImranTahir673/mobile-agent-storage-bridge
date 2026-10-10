@@ -59,9 +59,8 @@ document.addEventListener('DOMContentLoaded', () => {
     }, duration);
   }
 
-  // ==============================================================================
-  // API Client Methods
-  // ==============================================================================
+  const EXPECTED_VERSION = 'v0.4-live';
+
   async function fetchHealth() {
     try {
       const resp = await fetch('/health', {
@@ -72,17 +71,31 @@ document.addEventListener('DOMContentLoaded', () => {
       
       state.engineOnline = data.status === 'running';
       state.baseDir = data.base_dir || '';
+      state.version = data.version || '';
+
+      const versionBadge = document.getElementById('bridge-version');
+      if (versionBadge) {
+        versionBadge.textContent = `Android Bridge ${state.version || EXPECTED_VERSION}`;
+      }
+
+      if (data.version && data.version !== EXPECTED_VERSION) {
+        console.warn(`[Version Mismatch] Expected ${EXPECTED_VERSION}, got ${data.version}`);
+      } else {
+        console.log(`[Version Verified] Running ${EXPECTED_VERSION}`);
+      }
 
       elements.engineStatusBadge.className = 'engine-badge online';
       elements.engineStatusText.textContent = 'Engine Online';
       elements.storageBasePath.textContent = state.baseDir || 'Connected Root';
       elements.storageBasePath.title = state.baseDir;
+      return data;
     } catch (err) {
       console.warn('Bridge health check failed:', err);
       state.engineOnline = false;
       elements.engineStatusBadge.className = 'engine-badge offline';
       elements.engineStatusText.textContent = 'Bridge Offline';
       elements.storageBasePath.textContent = 'Offline (Check server)';
+      return null;
     }
   }
 
@@ -639,9 +652,20 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   // ==============================================================================
-  // Startup Initialization
+  // Startup Initialization (initApp)
   // ==============================================================================
-  fetchHealth();
-  fetchUserProfile();
-  fetchRecentBatch();
+  async function initApp() {
+    const healthData = await fetchHealth();
+    if (healthData && healthData.version && healthData.version !== EXPECTED_VERSION) {
+      console.warn(`[initApp] Bridge version mismatch: server reported ${healthData.version}, expected ${EXPECTED_VERSION}`);
+      const versionEl = document.getElementById('bridge-version');
+      if (versionEl) {
+        versionEl.textContent = `Android Bridge ${healthData.version}`;
+      }
+    }
+    await fetchUserProfile();
+    await fetchRecentBatch();
+  }
+
+  initApp();
 });

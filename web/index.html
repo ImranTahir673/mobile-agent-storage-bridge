@@ -16,7 +16,7 @@
 </head>
 <body>
   <!-- Mobile App Frame Container -->
-  <div class="mobile-viewport">
+  <div class="mobile-viewport app-container" id="app-container">
     
     <!-- Top App Bar -->
     <header class="app-bar" id="app-bar">
@@ -28,7 +28,7 @@
         </div>
         <div class="brand-text">
           <span class="brand-title">Storage Copilot</span>
-          <span class="brand-subtitle">Android Bridge v0.3</span>
+          <span id="bridge-version" class="brand-subtitle text-xs text-slate-400">Android Bridge v0.4-live</span>
         </div>
       </div>
 
@@ -140,10 +140,10 @@
     </main>
 
     <!-- Bottom Dock: Quick Chips + Natural Language Input Bar -->
-    <div class="bottom-dock" id="bottom-dock">
+    <div class="bottom-dock input-dock" id="bottom-dock">
       
       <!-- Quick Task Chips (Horizontally Scrollable) -->
-      <div class="chips-container" id="chips-container">
+      <div class="chips-container dock-scroll" id="chips-container">
         <button class="task-chip" data-task="Sort Student Vouchers" id="chip-vouchers">
           <span class="chip-emoji">📋</span>
           <span class="chip-label">Sort Student Vouchers</span>
