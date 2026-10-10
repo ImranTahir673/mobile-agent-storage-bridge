@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <title>Agent Storage Bridge | Mobile Copilot</title>
+  <meta name="description" content="Mobile-first intelligent storage organizer and autonomous file bridging copilot with human-in-the-loop diff review.">
+  <meta name="theme-color" content="#0B0F19">
+  
+  <!-- Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <!-- Mobile App Frame Container -->
+  <div class="mobile-viewport">
+    
+    <!-- Top App Bar -->
+    <header class="app-bar" id="app-bar">
+      <div class="app-branding">
+        <div class="brand-icon-wrapper">
+          <svg class="brand-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M9 3v2m6-2v2M9 19v2m6-2v2M5 9H3m2 6H3m18-6h-2m2 6h-2M7 19h10a2 2 0 002-2V7a2 2 0 00-2-2H7a2 2 0 00-2 2v10a2 2 0 002 2zM9 9h6v6H9V9z" />
+          </svg>
+        </div>
+        <div class="brand-text">
+          <span class="brand-title">Storage Copilot</span>
+          <span class="brand-subtitle">Android Bridge v0.3</span>
+        </div>
+      </div>
+
+      <div class="engine-badge online" id="engine-status-badge" title="Bridge server connection status">
+        <span class="pulse-dot"></span>
+        <span class="badge-text" id="engine-status-text">Engine Online</span>
+      </div>
+    </header>
+
+    <!-- Persistent Undo Banner / Snackbar -->
+    <section class="undo-banner" id="undo-banner" style="display: none;">
+      <div class="undo-content">
+        <div class="undo-indicator">
+          <svg class="undo-icon-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M3 10h10a5 5 0 015 5v2m0 0l-3-3m3 3l3-3M3 10l3 3m-3-3l3-3" />
+          </svg>
+        </div>
+        <div class="undo-details">
+          <div class="undo-title" id="undo-title">Batch Executed</div>
+          <div class="undo-meta" id="undo-meta">Ready for rollback</div>
+        </div>
+      </div>
+      <button class="undo-action-btn" id="undo-btn" title="Revert last batch">
+        <span>Undo</span>
+        <kbd>1-Tap</kbd>
+      </button>
+    </section>
+
+    <!-- Main Scrollable Content Area -->
+    <main class="content-scroll" id="content-scroll">
+      
+      <!-- System Header Card -->
+      <section class="system-card" id="system-header-card">
+        <div class="user-profile-row">
+          <div class="avatar-ring">
+            <div class="avatar-inner">IT</div>
+          </div>
+          <div class="user-meta">
+            <div class="user-name-row">
+              <h1 class="user-name" id="user-display-name">Imran Tahir</h1>
+              <span class="user-tag" id="user-id-tag">BSAI-182</span>
+            </div>
+            <p class="user-sub" id="user-org">BS AI • University Storage Profile</p>
+          </div>
+          <button class="seed-btn" id="seed-btn" title="Seed sample realistic test files in storage">
+            <svg class="seed-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+            </svg>
+            <span>Seed Fixtures</span>
+          </button>
+        </div>
+
+        <div class="storage-path-box">
+          <div class="storage-path-header">
+            <span class="path-label">STORAGE BASE PATH</span>
+            <span class="path-status" id="path-status">Strict Sandbox</span>
+          </div>
+          <div class="path-display-row">
+            <svg class="folder-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
+            </svg>
+            <span class="path-text" id="storage-base-path">Loading storage path...</span>
+            <button class="copy-path-btn" id="copy-path-btn" title="Copy base path">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+              </svg>
+            </button>
+          </div>
+        </div>
+
+        <!-- Peer Separation Matrix Pills -->
+        <div class="peer-matrix-box">
+          <div class="matrix-header">
+            <span class="matrix-title">REGISTERED PEERS (PHASE 2.7 ROUTING)</span>
+            <span class="matrix-count" id="peer-count-badge">4 Peers</span>
+          </div>
+          <div class="peer-pills" id="peer-pills-list">
+            <span class="peer-pill"><span class="peer-avatar">F</span> Fawad</span>
+            <span class="peer-pill"><span class="peer-avatar">S</span> Sumbal</span>
+            <span class="peer-pill"><span class="peer-avatar">A</span> Ahmed</span>
+            <span class="peer-pill"><span class="peer-avatar">Y</span> Yousaf</span>
+          </div>
+        </div>
+      </section>
+
+      <!-- Conversational & Timeline Stream -->
+      <section class="conversation-stream" id="conversation-stream">
+        <!-- Initial Welcome Message -->
+        <div class="message-card assistant welcome-card">
+          <div class="message-header">
+            <div class="assistant-avatar">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z" />
+              </svg>
+            </div>
+            <div class="message-sender">Storage Copilot</div>
+            <span class="message-time">Just now</span>
+          </div>
+          <div class="message-body">
+            <p><strong>👋 Welcome Imran!</strong> I'm your mobile storage organization copilot.</p>
+            <p>I analyze unstructured files on your device, protect your personal documents by routing peer files away, sort university vouchers, and clean up temporary files—with <strong>human-in-the-loop diff approval</strong> and <strong>1-tap rollback</strong>.</p>
+            <p class="hint-text">💡 Tap one of the quick task chips below or type any custom request.</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- Bottom Spacing for Fixed Bar -->
+      <div class="bottom-dock-spacer"></div>
+    </main>
+
+    <!-- Bottom Dock: Quick Chips + Natural Language Input Bar -->
+    <div class="bottom-dock" id="bottom-dock">
+      
+      <!-- Quick Task Chips (Horizontally Scrollable) -->
+      <div class="chips-container" id="chips-container">
+        <button class="task-chip" data-task="Sort Student Vouchers" id="chip-vouchers">
+          <span class="chip-emoji">📋</span>
+          <span class="chip-label">Sort Student Vouchers</span>
+        </button>
+        <button class="task-chip" data-task="Separate Peer Documents" id="chip-peers">
+          <span class="chip-emoji">👥</span>
+          <span class="chip-label">Separate Peer Documents</span>
+        </button>
+        <button class="task-chip" data-task="Clean Download Names" id="chip-names">
+          <span class="chip-emoji">🏷️</span>
+          <span class="chip-label">Clean Download Names</span>
+        </button>
+        <button class="task-chip" data-task="Cleanup Old Screenshots" id="chip-cleanup">
+          <span class="chip-emoji">🗑️</span>
+          <span class="chip-label">Cleanup Old Screenshots</span>
+        </button>
+      </div>
+
+      <!-- Natural Language Input Bar -->
+      <div class="input-bar-wrapper">
+        <form class="input-bar" id="prompt-form" autocomplete="off">
+          <div class="input-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z" />
+            </svg>
+          </div>
+          <input 
+            type="text" 
+            id="prompt-input" 
+            class="prompt-input" 
+            placeholder="Ask copilot or type an instruction..."
+            aria-label="Agent prompt input"
+          />
+          <button type="submit" id="send-btn" class="send-btn" title="Submit instruction">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M5 12h14M12 5l7 7-7 7" />
+            </svg>
+          </button>
+        </form>
+      </div>
+
+    </div>
+
+    <!-- Notification Toast / Snackbar -->
+    <div class="toast-snackbar" id="toast" role="alert" aria-live="polite">
+      <div class="toast-content" id="toast-message">Message</div>
+    </div>
+
+  </div>
+
+  <!-- Scripts -->
+  <script src="app.js"></script>
+</body>
+</html>

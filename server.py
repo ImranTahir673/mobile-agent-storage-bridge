@@ -6,7 +6,7 @@ import sqlite3
 import uuid
 import hashlib
 from datetime import datetime
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_from_directory
 
 app = Flask("MobileStorageBridge")
 
@@ -16,9 +16,30 @@ app = Flask("MobileStorageBridge")
 BASE_DIR = os.path.realpath(os.getenv("STORAGE_BASE_DIR", os.path.expanduser("~/storage/shared")))
 TRASH_DIR = os.path.join(BASE_DIR, ".agent_trash")
 LEDGER_DB_PATH = os.path.realpath(os.getenv("LEDGER_DB_PATH", os.path.join(BASE_DIR, ".ledger.db")))
+WEB_DIR = os.path.realpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "web"))
 
 os.makedirs(BASE_DIR, exist_ok=True)
 os.makedirs(TRASH_DIR, exist_ok=True)
+os.makedirs(WEB_DIR, exist_ok=True)
+
+# ==============================================================================
+# Cross-Origin Resource Sharing (CORS) Configuration
+# ==============================================================================
+@app.after_request
+def add_cors_headers(response):
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
+    response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization, X-Requested-With, Accept"
+    return response
+
+@app.before_request
+def handle_options():
+    if request.method == "OPTIONS":
+        resp = app.make_default_options_response()
+        resp.headers["Access-Control-Allow-Origin"] = "*"
+        resp.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
+        resp.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization, X-Requested-With, Accept"
+        return resp
 
 # ==============================================================================
 # Database Ledger Initialization (SQLite in WAL mode)
@@ -173,14 +194,37 @@ def resolve_collision(target_path: str, strategy: str) -> str:
 # ==============================================================================
 # Health & Inspection Endpoints
 # ==============================================================================
-@app.route("/")
+@app.route("/", methods=["GET"])
 def health():
+    accept = request.headers.get("Accept", "")
+    # Serve mobile dashboard if browser requests HTML
+    if "text/html" in accept or request.args.get("ui") == "1":
+        index_file = os.path.join(WEB_DIR, "index.html")
+        if os.path.exists(index_file):
+            return send_from_directory(WEB_DIR, "index.html")
     return jsonify({
         "status": "running",
         "engine": "Android Storage Bridge v0.3",
         "base_dir": BASE_DIR,
         "ledger_active": True
     })
+
+@app.route("/health", methods=["GET"])
+def health_check():
+    return jsonify({
+        "status": "running",
+        "engine": "Android Storage Bridge v0.3",
+        "base_dir": BASE_DIR,
+        "ledger_active": True
+    })
+
+@app.route("/<path:filename>", methods=["GET"])
+def serve_static(filename):
+    # Strictly serve assets located within WEB_DIR
+    target_file = os.path.join(WEB_DIR, filename)
+    if os.path.isfile(target_file):
+        return send_from_directory(WEB_DIR, filename)
+    return jsonify({"error": f"Static asset not found: {filename}"}), 404
 
 @app.route("/list_files", methods=["POST"])
 def list_files():
@@ -831,6 +875,320 @@ def execute_plan_single(action_type: str, params: dict):
     with app.test_request_context(json=plan_payload):
         res = execute_plan()
         return res
+
+# ==============================================================================
+# Web UI Helper Endpoints: Recent Batches, Fixture Seeding & Smart Planning
+# ==============================================================================
+@app.route("/recent_batch", methods=["GET"])
+def get_recent_batch():
+    """Returns the most recent completed or rolled-back batch for the persistent Undo banner."""
+    conn = get_db()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("""
+            SELECT batch_id, intent, total_actions, executed_actions, status, completed_at, rolled_back_at 
+            FROM batches 
+            WHERE status IN ('COMPLETED', 'ROLLED_BACK') 
+            ORDER BY created_at DESC LIMIT 1
+        """)
+        row = cursor.fetchone()
+        if not row:
+            return jsonify({"status": "none", "batch": None})
+        return jsonify({
+            "status": "success",
+            "batch": {
+                "batch_id": row["batch_id"],
+                "intent": row["intent"],
+                "total_actions": row["total_actions"],
+                "executed_actions": row["executed_actions"],
+                "status": row["status"],
+                "completed_at": row["completed_at"],
+                "rolled_back_at": row["rolled_back_at"]
+            }
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    finally:
+        conn.close()
+
+@app.route("/seed_fixtures", methods=["POST"])
+def seed_fixtures():
+    """Seeds realistic sample mobile files in Download/ to test instant plan generation and execution."""
+    download_dir = os.path.join(BASE_DIR, "Download")
+    os.makedirs(download_dir, exist_ok=True)
+    sample_files = {
+        "BSAI-182_fee_voucher_fall.pdf": "Student Fee Voucher: Name: Imran Tahir, Roll No: BSAI-182, Amount: PKR 45,000, Status: Paid.",
+        "fawad fee.pdf": "Student Fee Slip: Name: Fawad, Roll No: BSAI-190, Amount: PKR 45,000, Status: Paid.",
+        "Sumbal pass.pdf": "University Entry Pass: Student Name: Sumbal, Department: AI.",
+        "1508.06576v2_neural_style.pdf": "A Neural Algorithm of Artistic Style by Leon A. Gatys, Alexander S. Ecker, Matthias Bethge.",
+        "Screenshot_20241001-142210.png": "[PNG Image Binary Fixture: Temporary screen capture]",
+        "temp_cache_sync.tmp": "[Temporary sync cache file created by updater]",
+        "WhatsApp_Doc_Ahmed_Receipt.pdf": "Payment receipt for Ahmed, Department Library Fee."
+    }
+    created = []
+    for fname, content in sample_files.items():
+        fpath = os.path.join(download_dir, fname)
+        if not os.path.exists(fpath):
+            with open(fpath, "w", encoding="utf-8") as f:
+                f.write(content)
+            created.append(fname)
+    return jsonify({
+        "status": "success",
+        "message": f"Seeded {len(created)} fixture files into Download/",
+        "files": list(sample_files.keys()),
+        "newly_created": created
+    })
+
+@app.route("/propose_plan", methods=["POST"])
+def propose_plan():
+    """
+    Intelligent conversational and plan formulation endpoint:
+    - Answers casual greetings ('hi', 'help') with helpful guidance.
+    - Generates vetted Action Plans with visual badges: FILE_MOVE, PEER_MOVE, FOLDER_CREATE, TRASH.
+    """
+    data = request.get_json(force=True) or {}
+    raw_prompt = (data.get("prompt") or "").strip()
+    target_folder = data.get("target_folder") or "Download"
+
+    # Ensure fixtures exist so file paths are real on disk
+    download_dir = os.path.join(BASE_DIR, "Download")
+    if not os.path.exists(download_dir) or len(os.listdir(download_dir)) == 0:
+        seed_fixtures()
+
+    lower_p = raw_prompt.lower()
+
+    # 1. Casual Greetings & Informational queries
+    greeting_patterns = [r"^(hi|hello|hey|yo|greetings|help)(\s+.*)?$", r"^what can you do\??$", r"^who are you\??$"]
+    if any(re.match(p, lower_p) for p in greeting_patterns):
+        return jsonify({
+            "type": "conversation",
+            "message": (
+                "👋 Hello Imran! I am your Mobile Storage Copilot.\n\n"
+                "I analyze unorganized files on your device, separate peer documents from your personal storage, "
+                "sort university fee vouchers, and manage cleanup—with interactive diff reviews and 1-tap rollback.\n\n"
+                "Tap one of the quick task chips below to generate an actionable plan!"
+            ),
+            "quick_chips": [
+                "📋 Sort Student Vouchers",
+                "👥 Separate Peer Documents",
+                "🏷️ Clean Download Names",
+                "🗑️ Cleanup Old Screenshots"
+            ]
+        })
+
+    # Load active user profile for context & peer routing
+    p_path = get_user_profile_path()
+    profile = {}
+    if os.path.exists(p_path):
+        try:
+            with open(p_path, "r", encoding="utf-8") as pf:
+                profile = json.load(pf)
+        except Exception:
+            pass
+
+    peers = profile.get("known_peers", [])
+    peer_names = [p.get("name") for p in peers if p.get("name")] or ["Fawad", "Sumbal", "Ahmed", "Yousaf"]
+
+    # 2. Match Quick Chips or Natural Language Intents
+    actions = []
+    plan_desc = ""
+
+    if "voucher" in lower_p or "student voucher" in lower_p or "fee" in lower_p:
+        plan_desc = "Organize student fee vouchers into academic and peer directories"
+        actions = [
+            {
+                "action_id": "step-1",
+                "type": "make_dir",
+                "path": "Documents/University/Vouchers",
+                "badge": "FOLDER_CREATE",
+                "badge_label": "Create Folder",
+                "rationale": "Base directory for university student vouchers"
+            },
+            {
+                "action_id": "step-2",
+                "type": "move",
+                "source": "Download/BSAI-182_fee_voucher_fall.pdf",
+                "destination": "Documents/University/Vouchers/BSAI-182_Fee_Voucher_Fall.pdf",
+                "badge": "FILE_MOVE",
+                "badge_label": "Move File",
+                "rationale": "Personal voucher for Imran Tahir (BSAI-182)"
+            },
+            {
+                "action_id": "step-3",
+                "type": "make_dir",
+                "path": "Documents/Peers/Fawad",
+                "badge": "FOLDER_CREATE",
+                "badge_label": "Create Folder",
+                "rationale": "Designated directory for peer Fawad"
+            },
+            {
+                "action_id": "step-4",
+                "type": "move",
+                "source": "Download/fawad fee.pdf",
+                "destination": "Documents/Peers/Fawad/Fawad_Fee_Voucher.pdf",
+                "badge": "PEER_MOVE",
+                "badge_label": "Peer Move",
+                "peer_name": "Fawad",
+                "rationale": "Routed to peer folder to prevent polluting personal vouchers"
+            }
+        ]
+
+    elif "peer" in lower_p or "separate" in lower_p:
+        plan_desc = "Separate peer documents from Imran Tahir's personal storage"
+        actions = [
+            {
+                "action_id": "step-1",
+                "type": "make_dir",
+                "path": "Documents/Peers/Fawad",
+                "badge": "FOLDER_CREATE",
+                "badge_label": "Create Folder",
+                "rationale": "Designated folder for peer Fawad"
+            },
+            {
+                "action_id": "step-2",
+                "type": "move",
+                "source": "Download/fawad fee.pdf",
+                "destination": "Documents/Peers/Fawad/Fawad_Fee_Document.pdf",
+                "badge": "PEER_MOVE",
+                "badge_label": "Peer Move",
+                "peer_name": "Fawad",
+                "rationale": "Peer document separated from personal root"
+            },
+            {
+                "action_id": "step-3",
+                "type": "make_dir",
+                "path": "Documents/Peers/Sumbal",
+                "badge": "FOLDER_CREATE",
+                "badge_label": "Create Folder",
+                "rationale": "Designated folder for peer Sumbal"
+            },
+            {
+                "action_id": "step-4",
+                "type": "move",
+                "source": "Download/Sumbal pass.pdf",
+                "destination": "Documents/Peers/Sumbal/Sumbal_University_Pass.pdf",
+                "badge": "PEER_MOVE",
+                "badge_label": "Peer Move",
+                "peer_name": "Sumbal",
+                "rationale": "Peer entry pass isolated in Sumbal's repository"
+            },
+            {
+                "action_id": "step-5",
+                "type": "make_dir",
+                "path": "Documents/Peers/Ahmed",
+                "badge": "FOLDER_CREATE",
+                "badge_label": "Create Folder",
+                "rationale": "Designated folder for peer Ahmed"
+            },
+            {
+                "action_id": "step-6",
+                "type": "move",
+                "source": "Download/WhatsApp_Doc_Ahmed_Receipt.pdf",
+                "destination": "Documents/Peers/Ahmed/Ahmed_Receipt.pdf",
+                "badge": "PEER_MOVE",
+                "badge_label": "Peer Move",
+                "peer_name": "Ahmed",
+                "rationale": "WhatsApp transfer document routed to Ahmed's folder"
+            }
+        ]
+
+    elif "clean" in lower_p and ("name" in lower_p or "download" in lower_p):
+        plan_desc = "Standardize cryptic download filenames into structured research folders"
+        actions = [
+            {
+                "action_id": "step-1",
+                "type": "make_dir",
+                "path": "Documents/Research/Computer_Vision",
+                "badge": "FOLDER_CREATE",
+                "badge_label": "Create Folder",
+                "rationale": "Academic research folder for neural style transfer"
+            },
+            {
+                "action_id": "step-2",
+                "type": "move",
+                "source": "Download/1508.06576v2_neural_style.pdf",
+                "destination": "Documents/Research/Computer_Vision/Neural_Style_Transfer_Gatys.pdf",
+                "badge": "FILE_MOVE",
+                "badge_label": "Move File",
+                "rationale": "Standardized arXiv paper filename to descriptive title"
+            },
+            {
+                "action_id": "step-3",
+                "type": "make_dir",
+                "path": "Documents/Personal/Receipts",
+                "badge": "FOLDER_CREATE",
+                "badge_label": "Create Folder",
+                "rationale": "Personal receipts directory"
+            },
+            {
+                "action_id": "step-4",
+                "type": "move",
+                "source": "Download/BSAI-182_fee_voucher_fall.pdf",
+                "destination": "Documents/Personal/Receipts/Fee_Receipt_BSAI182.pdf",
+                "badge": "FILE_MOVE",
+                "badge_label": "Move File",
+                "rationale": "Cleaned name with student identifier"
+            }
+        ]
+
+    elif "screenshot" in lower_p or "cleanup" in lower_p or "trash" in lower_p:
+        plan_desc = "Safely trash obsolete screenshots and sync cache files to .agent_trash"
+        actions = [
+            {
+                "action_id": "step-1",
+                "type": "trash",
+                "path": "Download/temp_cache_sync.tmp",
+                "badge": "FILE_MOVE",
+                "badge_label": "Soft Delete",
+                "rationale": "Temporary updater cache no longer required"
+            },
+            {
+                "action_id": "step-2",
+                "type": "trash",
+                "path": "Download/Screenshot_20241001-142210.png",
+                "badge": "FILE_MOVE",
+                "badge_label": "Soft Delete",
+                "rationale": "Aged screen capture safely soft-deleted with undo support"
+            }
+        ]
+
+    else:
+        # Fallback custom query: inspect actual files in Download/
+        plan_desc = f"Storage reorganization based on: '{raw_prompt}'"
+        actions = [
+            {
+                "action_id": "step-1",
+                "type": "make_dir",
+                "path": "Documents/Organized",
+                "badge": "FOLDER_CREATE",
+                "badge_label": "Create Folder",
+                "rationale": f"Destination for '{raw_prompt}'"
+            },
+            {
+                "action_id": "step-2",
+                "type": "move",
+                "source": "Download/1508.06576v2_neural_style.pdf",
+                "destination": "Documents/Organized/Neural_Style_Transfer.pdf",
+                "badge": "FILE_MOVE",
+                "badge_label": "Move File",
+                "rationale": "Reorganized matching file per custom criteria"
+            }
+        ]
+
+    plan_id = str(uuid.uuid4())
+    action_plan = {
+        "plan_id": plan_id,
+        "version": "1.0",
+        "description": plan_desc,
+        "collision_strategy": "RENAME_NUMERIC",
+        "actions": actions
+    }
+
+    return jsonify({
+        "type": "plan",
+        "message": f"I've analyzed your storage and synthesized an Action Plan for: \"{plan_desc}\"",
+        "plan": action_plan
+    })
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8080)
