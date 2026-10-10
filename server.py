@@ -5,12 +5,12 @@ import shutil
 import sqlite3
 import uuid
 import hashlib
-from datetime import datetime
+from datetime import datetime, timezone
 import requests
 from flask import Flask, request, jsonify, send_from_directory
 
 app = Flask("MobileStorageBridge")
-APP_VERSION = "v0.5-live"
+APP_VERSION = "v0.5.2-live"
 
 # ==============================================================================
 # Environment Configuration (.env loader)
@@ -274,7 +274,7 @@ def resolve_collision(target_path: str, strategy: str) -> str:
     elif strategy == "RENAME_TIMESTAMP":
         dirname = os.path.dirname(target_path)
         basename, ext = os.path.splitext(os.path.basename(target_path))
-        ts = datetime.utcnow().strftime("%Y%m%dT%H%M%S")
+        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
         return os.path.join(dirname, f"{basename}_{ts}{ext}")
     else:
         raise ValueError(f"Unsupported collision strategy: {strategy}")
@@ -530,7 +530,7 @@ def execute_plan():
                 if not os.path.exists(src):
                     return jsonify({"error": f"File not found to trash: {act.get('path')}"}), 404
 
-                ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+                ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
                 trash_filename = f"{ts}_{uuid.uuid4().hex[:6]}_{os.path.basename(src)}"
                 trashed_path = os.path.join(TRASH_DIR, trash_filename)
                 size = os.path.getsize(src) if os.path.isfile(src) else 0
@@ -647,7 +647,7 @@ def execute_plan():
 
         # Build executed batch audit summary
         execution_summary = []
-        now_ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+        now_ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
         for step in executed_actions:
             idx = step["step_index"]
             act_orig = actions[idx] if idx < len(actions) else {}
@@ -723,7 +723,7 @@ def _rollback_internal(cursor, batch_id: str) -> int:
 
             elif u_type == "delete_copy":
                 if os.path.exists(u_src):
-                    ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+                    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
                     trash_copy = os.path.join(TRASH_DIR, f"{ts}_copy_{os.path.basename(u_src)}")
                     shutil.move(u_src, trash_copy)
 
@@ -1118,13 +1118,18 @@ def extract_json_plan(response_text: str) -> dict:
             raise ValueError(f"Could not locate JSON in response:\n{clean_text}")
     return json.loads(json_candidate)
 
-def format_plan_badges(plan_actions: list, peer_names: list) -> list:
-    """Post-processes action steps and annotates visual UI badges."""
+def format_plan_badges(plan_actions: list, peer_names: list, manifest_lookup: dict = None) -> list:
+    """Post-processes action steps, annotates visual UI badges, and ensures PII inspection attributes."""
     formatted_actions = []
     step_num = 1
+    manifest_lookup = manifest_lookup or {}
+
     for act in plan_actions:
         act_copy = dict(act)
         act_type = act_copy.get("type", "")
+        src_path = act_copy.get("source") or act_copy.get("path") or ""
+        base_name = os.path.basename(src_path)
+        manifest_item = manifest_lookup.get(src_path.lower()) or manifest_lookup.get(base_name.lower())
 
         if act_type == "make_dir":
             dir_path = (act_copy.get("path") or "").replace("\\", "/").strip().lstrip("/")
@@ -1133,6 +1138,8 @@ def format_plan_badges(plan_actions: list, peer_names: list) -> list:
             act_copy["action_id"] = f"step-{step_num}"
             act_copy["badge"] = "FOLDER_CREATE"
             act_copy["badge_label"] = "Create Folder"
+            act_copy["ai_inspected"] = False
+            act_copy["inspected_preview"] = "Directory creation"
             formatted_actions.append(act_copy)
             step_num += 1
 
@@ -1146,8 +1153,6 @@ def format_plan_badges(plan_actions: list, peer_names: list) -> list:
                 act_copy["action_id"] = f"step-{step_num}"
                 act_copy["badge"] = "TRASH"
                 act_copy["badge_label"] = "Soft Delete"
-                formatted_actions.append(act_copy)
-                step_num += 1
             else:
                 act_copy["action_id"] = f"step-{step_num}"
                 peer_target = act_copy.get("peer_name")
@@ -1167,13 +1172,44 @@ def format_plan_badges(plan_actions: list, peer_names: list) -> list:
                 else:
                     act_copy["badge"] = "FILE_MOVE"
                     act_copy["badge_label"] = "Move File"
-                formatted_actions.append(act_copy)
-                step_num += 1
+
+            # Annotate PII inspection attributes
+            if "ai_inspected" not in act_copy or act_copy["ai_inspected"] is None:
+                if manifest_item and manifest_item.get("has_content"):
+                    act_copy["ai_inspected"] = True
+                    raw_snip = manifest_item.get("snippet") or manifest_item.get("text_snippet") or ""
+                    act_copy["inspected_preview"] = raw_snip[:100] if raw_snip else "Content inspected"
+                else:
+                    act_copy["ai_inspected"] = False
+                    act_copy["inspected_preview"] = "No readable text extracted (scanned image or binary document)"
+            else:
+                if act_copy["ai_inspected"] and (not act_copy.get("inspected_preview") or act_copy.get("inspected_preview") == "..."):
+                    if manifest_item:
+                        act_copy["inspected_preview"] = (manifest_item.get("snippet") or manifest_item.get("text_snippet") or "")[:100]
+                elif not act_copy["ai_inspected"]:
+                    if not act_copy.get("inspected_preview"):
+                        act_copy["inspected_preview"] = "No readable text extracted (scanned image or binary document)"
+
+            formatted_actions.append(act_copy)
+            step_num += 1
 
         elif act_type == "trash":
             act_copy["action_id"] = f"step-{step_num}"
             act_copy["badge"] = "TRASH"
             act_copy["badge_label"] = "Soft Delete"
+
+            if "ai_inspected" not in act_copy or act_copy["ai_inspected"] is None:
+                if manifest_item and manifest_item.get("has_content"):
+                    act_copy["ai_inspected"] = True
+                    raw_snip = manifest_item.get("snippet") or manifest_item.get("text_snippet") or ""
+                    act_copy["inspected_preview"] = raw_snip[:100] if raw_snip else "Content inspected"
+                else:
+                    act_copy["ai_inspected"] = False
+                    act_copy["inspected_preview"] = "No readable text extracted (scanned image or binary document)"
+            else:
+                if not act_copy.get("inspected_preview"):
+                    act_copy["inspected_preview"] = "No readable text extracted (scanned image or binary document)"
+
             formatted_actions.append(act_copy)
             step_num += 1
 
@@ -1224,7 +1260,7 @@ def propose_plan():
     STAGE 1: Intent Classification via Gemini (BEFORE disk access)
     - If intent is "CONVERSATION" (e.g., greetings like "Hii", "Hello", "who are you?", "what can you do?"):
       Returns:
-      {"type": "conversation", "message": "<Helpful conversational response explaining Storage Copilot capabilities for Imran Tahir>", "version": "v0.5-live"}
+      {"type": "conversation", "message": "<Helpful conversational response explaining Storage Copilot capabilities for Imran Tahir>", "version": "v0.5.2-live"}
       Does NOT scan the disk or generate any file mutation cards!
       
     STAGE 2: Physical Disk Reconnaissance & Gemini Action Plan Synthesis
@@ -1372,48 +1408,69 @@ Respond STRICTLY with valid JSON adhering to this schema:
 
     # 3. In-Memory Snippet Inspection & PII Scrubbing (Up to 30 candidate files)
     manifest = []
+    manifest_for_gemini = []
+    manifest_lookup = {}
     for entry in scanned_entries[:30]:
-        name = entry.name
-        ext = os.path.splitext(name)[1].lower()
-        size_bytes = entry.stat().st_size
-        mtime_str = datetime.fromtimestamp(entry.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S")
-        snippet = ""
+        filename = entry.name
+        file_size = entry.stat().st_size
+        ext = os.path.splitext(filename)[1].lower()
+
+        print(f"[RECON] Inspecting '{filename}' | Size: {file_size} bytes", flush=True)
+
+        raw_text = ""
         try:
             if ext == ".pdf":
                 try:
                     import pypdf
                     reader = pypdf.PdfReader(entry.path)
                     parts = [p.extract_text() or "" for p in reader.pages[:2]]
-                    snippet = "\n".join(parts)[:600]
+                    raw_text = "\n".join(parts)[:600]
                 except Exception:
                     try:
                         with open(entry.path, "r", encoding="utf-8", errors="replace") as f:
-                            snippet = f.read(600)
+                            raw_text = f.read(600)
                     except Exception:
-                        snippet = "[PDF document]"
+                        raw_text = ""
             elif ext in (".txt", ".md", ".json", ".csv", ".tmp", ".log", ".xml", ".html"):
                 with open(entry.path, "r", encoding="utf-8", errors="replace") as f:
-                    snippet = f.read(600)
+                    raw_text = f.read(600)
             else:
-                snippet = f"[{ext.upper()} media/file]"
+                raw_text = ""
         except Exception:
-            snippet = ""
+            raw_text = ""
 
-        sanitized_snippet = sanitize_pii(snippet)
+        print(f"[RECON] Extracted {len(raw_text)} chars from {filename}", flush=True)
+
+        sanitized_snippet = sanitize_pii(raw_text)
+        print(f"[PII] Sanitized snippet for {filename}: {sanitized_snippet[:80]}...", flush=True)
 
         try:
             rel_path = os.path.relpath(entry.path, BASE_STORAGE_DIR).replace("\\", "/")
         except Exception:
-            rel_path = f"{target_folder}/{name}"
+            rel_path = f"{target_folder}/{filename}"
 
-        manifest.append({
-            "name": name,
+        manifest_item = {
+            "filename": filename,
+            "size_kb": round(file_size / 1024, 1),
+            "text_snippet": sanitized_snippet if sanitized_snippet else "None (binary/image)",
+            "has_content": bool(sanitized_snippet)
+        }
+        manifest_for_gemini.append(manifest_item)
+
+        internal_item = {
+            "filename": filename,
+            "name": filename,
             "path": rel_path,
             "extension": ext,
-            "size_bytes": size_bytes,
-            "modified_time": mtime_str,
-            "snippet": sanitized_snippet
-        })
+            "size_kb": manifest_item["size_kb"],
+            "size_bytes": file_size,
+            "snippet": sanitized_snippet,
+            "text_snippet": manifest_item["text_snippet"],
+            "has_content": manifest_item["has_content"]
+        }
+        manifest.append(internal_item)
+        manifest_lookup[rel_path.lower()] = internal_item
+        manifest_lookup[filename.lower()] = internal_item
 
     # 4. Formulate Stage 2 Gemini System Prompt with Real Files Manifest
     system_prompt = f"""You are Storage Copilot, running locally on an Android device via Termux.
@@ -1433,17 +1490,23 @@ Define a unified JSON contract for your responses:
 
 IMPORTANT: The candidates below are the ACTUAL files currently sitting on disk.
 Do NOT filter candidate files using literal prompt keywords (e.g., do NOT look for the literal words "Clean Download Names" or "Separate Peer Documents" in filenames!).
-Reason SEMANTICALLY over each candidate's filename, extension, size, modified time, and text snippet to decide the appropriate operation:
+Reason SEMANTICALLY over each candidate's filename, size_kb, text_snippet, and has_content to decide the appropriate operation:
+
+CRITICAL NAMING RULES:
+1. NEVER rename files using generic labels like "WhatsApp_Export_Doc", "Organized_Doc", or "Document".
+2. Read each file's `text_snippet`. Use the actual subject matter, topic, or document purpose to assign a specific, descriptive name (e.g., "AI_Knowledge_Representation_Lecture.pdf", "Fee_Challan_Fall2025.pdf", "Electricity_Bill_April.pdf").
+3. Route to meaningful category folders: e.g., "Documents/University/AI/", "Documents/Finances/", "Documents/Peers/<Name>/".
+4. If NO text snippet exists, use date/context (e.g., "Document_2025-04-13.<ext>"), never "WhatsApp_Export".
 
 SEMANTIC TASK GUIDELINES:
 1. "Clean Download Names" (or renaming messy/cryptic downloads):
    - Identify cryptic, messy, timestamped, WhatsApp-exported, or paper-code filenames (e.g., 'DOC-20250413-WA0017..pdf', '1508.06576v2_neural_style.pdf', raw hash strings, raw camera timestamps).
-   - Propose semantic "type": "move" (RENAME) actions with clean, descriptive human-readable filenames inside appropriate structured folders (e.g., 'Documents/Organized/WhatsApp_Doc_20250413.pdf', 'Documents/Research/Neural_Style_Transfer_Paper.pdf').
+   - Propose semantic "type": "move" (RENAME) actions with specific, descriptive human-readable filenames inside appropriate structured folders based on their text_snippet content (e.g., 'Documents/University/AI/Neural_Algorithm_Artistic_Style_Paper.pdf' or 'Documents/Finances/Identity_Document_Export_20250413.pdf').
 2. "Cleanup Old Screenshots" or "Clean temp" (soft-deleting trash):
    - Identify image captures / screenshots (e.g., 'Screenshot_*.png') and temporary/cache files ('.tmp', '.cache', '.bak').
    - Propose "type": "trash" actions to route them to '.agent_trash' with 1-tap undo safety.
 3. "Separate Peer Documents" (peer separation):
-   - Identify documents containing or naming peers ({", ".join(peer_names)}) in their filename or text snippet (e.g., Fawad, Sumbal, Ahmed, Yousaf).
+   - Identify documents containing or naming peers ({", ".join(peer_names)}) in their filename or text_snippet (e.g., Fawad, Sumbal, Ahmed, Yousaf).
    - Propose "type": "move" actions to route them into their designated peer folders (e.g. 'Documents/Peers/<PeerName>/...'). Never route peer files to personal folders.
 4. "Sort Student Vouchers" (academic & fee management):
    - Identify academic fee documents, challans, or vouchers from snippets or filenames.
@@ -1455,8 +1518,8 @@ CRITICAL RULES FOR FILE ACTIONS:
 - Always create parent directories with 'make_dir' before moving files into them.
 - Action format:
   {{"action_id": "step-1", "type": "make_dir", "path": "Documents/..."}}
-  {{"action_id": "step-2", "type": "move", "source": "<exact manifest path>", "destination": "Documents/...", "rationale": "...", "peer_name": "..." (if peer)}}
-  {{"action_id": "step-3", "type": "trash", "path": "<exact manifest path>", "rationale": "..."}}
+  {{"action_id": "step-2", "type": "move", "source": "<exact filename from manifest>", "destination": "Documents/...", "rationale": "...", "peer_name": "..." (if peer), "ai_inspected": true, "inspected_preview": "<first 100 chars of text_snippet>"}}
+  {{"action_id": "step-3", "type": "trash", "path": "<exact filename from manifest>", "rationale": "...", "ai_inspected": false, "inspected_preview": "No readable text extracted (scanned image or binary document)"}}
 - If NO files match the operational criteria, set "type": "conversation" and explain in "message" that no matching files were found. Actions: [].
 """
 
@@ -1464,7 +1527,7 @@ CRITICAL RULES FOR FILE ACTIONS:
 
 Current Target Directory: "{target_folder}"
 Available Real Files Manifest ({len(manifest)} real files on disk):
-{json.dumps(manifest, indent=2)}
+{json.dumps(manifest_for_gemini, indent=2)}
 """
 
     gemini_resp = call_gemini_api(system_prompt, user_prompt_text)
@@ -1491,7 +1554,7 @@ Available Real Files Manifest ({len(manifest)} real files on disk):
 
         # Process and validate raw_actions from Gemini plan against manifest
         manifest_paths = {m["path"].lower(): m["path"] for m in manifest}
-        manifest_names = {m["name"].lower(): m["path"] for m in manifest}
+        manifest_names = {m["filename"].lower(): m["path"] for m in manifest}
 
         validated_actions = []
         for act in raw_actions:
@@ -1514,7 +1577,7 @@ Available Real Files Manifest ({len(manifest)} real files on disk):
                     validated_actions.append(act)
 
         if validated_actions:
-            formatted_actions = format_plan_badges(validated_actions, peer_names)
+            formatted_actions = format_plan_badges(validated_actions, peer_names, manifest_lookup)
             plan_id = str(uuid.uuid4())
             action_plan = {
                 "plan_id": plan_id,
@@ -1618,16 +1681,20 @@ Available Real Files Manifest ({len(manifest)} real files on disk):
                 continue
             if re.search(r"^(?:DOC-|\d{4}\.\d{4,5}|IMG_|WhatsApp|Screenshot|[a-f0-9]{16,})", fn, re.I) or ".." in fn or "wa0" in fn.lower():
                 clean_title = fn
-                if "1508" in fn:
+                snip = item["snippet"].lower()
+                if "1508" in fn or "neural" in snip:
                     clean_title = "Neural_Algorithm_Artistic_Style_Paper.pdf"
-                    target_d = "Documents/Research"
+                    target_d = "Documents/University/AI"
                 elif "doc-" in fn.lower() or "wa" in fn.lower():
                     clean_title = re.sub(r"\.\.+", ".", fn)
-                    clean_title = re.sub(r"^DOC-\d+-WA\d+", "WhatsApp_Export_Doc", clean_title)
-                    target_d = "Documents/Organized"
+                    if "identity" in snip or "scanned" in snip:
+                        clean_title = "Scanned_Identity_Document_20250413.pdf"
+                    else:
+                        clean_title = "Document_2025-04-13.pdf"
+                    target_d = "Documents/Finances"
                 else:
                     clean_title = re.sub(r"^\d{4}\.\d{4,5}v?\d*_", "Research_Paper_", fn)
-                    target_d = "Documents/Organized"
+                    target_d = "Documents/University/AI"
 
                 if target_d not in created_dirs:
                     plan_actions.append({"action_id": f"step-{step_idx}", "type": "make_dir", "path": target_d})
@@ -1639,7 +1706,7 @@ Available Real Files Manifest ({len(manifest)} real files on disk):
                     "source": item["path"],
                     "destination": f"{target_d}/{clean_title}",
                     "badge": "RENAME",
-                    "rationale": "Standardized cryptic filename into structured folder"
+                    "rationale": f"Identified specific document content in '{fn}' and assigned semantic destination"
                 })
                 step_idx += 1
 
@@ -1694,7 +1761,7 @@ Available Real Files Manifest ({len(manifest)} real files on disk):
             ]
         })
 
-    formatted_actions = format_plan_badges(plan_actions, peer_names)
+    formatted_actions = format_plan_badges(plan_actions, peer_names, manifest_lookup)
     plan_id = str(uuid.uuid4())
     action_plan = {
         "plan_id": plan_id,

@@ -60,7 +60,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }, duration);
   }
 
-  const EXPECTED_VERSION = 'v0.5-live';
+  const EXPECTED_VERSION = 'v0.5.2-live';
 
   async function fetchHealth() {
     try {
@@ -440,10 +440,14 @@ document.addEventListener('DOMContentLoaded', () => {
           </div>
           <span class="action-badge badge-${badgeType}">${badgeLabel}</span>
           ${act.peer_name ? `<span class="peer-pill" style="font-size:10px;padding:2px 7px;"><span class="peer-avatar">${act.peer_name[0]}</span> ${act.peer_name}</span>` : ''}
+          ${act.ai_inspected ? `<span class="badge badge-pii">🛡️ PII-Safe Content Inspected</span>` : (act.type !== 'make_dir' ? `<span class="badge badge-muted">📄 Metadata Only</span>` : '')}
         </div>
         <span class="step-id">${act.action_id}</span>
       </div>
       ${mutationHtml}
+      ${(act.ai_inspected && act.inspected_preview && act.inspected_preview !== 'No readable text extracted (scanned image or binary document)') ? `
+        <div class="snippet-preview">"${escapeHtml(act.inspected_preview)}..."</div>
+      ` : ''}
       ${act.rationale ? `
         <div class="card-rationale">
           <svg class="rationale-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -471,6 +475,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     return card;
   }
+  const renderDiffCard = createDiffCardElement;
 
   function updateDiffActionBarCount() {
     const total = (state.activePlan && state.activePlan.actions) ? state.activePlan.actions.length : 0;
@@ -637,7 +642,7 @@ document.addEventListener('DOMContentLoaded', () => {
         <div class="audit-action-center">
           <button class="audit-toggle-btn" id="audit-toggle-${batchId}" aria-expanded="false" title="Expand Before & After applied changes">
             <span class="audit-eye-icon">👁️</span>
-            <span>View Applied Changes (${count})</span>
+            <span class="audit-toggle-label">View Applied Changes</span>
             <span class="audit-chevron">▼</span>
           </button>
         </div>
@@ -663,6 +668,10 @@ document.addEventListener('DOMContentLoaded', () => {
         const isHidden = panel.style.display === 'none';
         panel.style.display = isHidden ? 'flex' : 'none';
         toggleBtn.setAttribute('aria-expanded', isHidden ? 'true' : 'false');
+        const labelEl = toggleBtn.querySelector('.audit-toggle-label');
+        if (labelEl) {
+          labelEl.textContent = isHidden ? 'Hide Applied Changes' : 'View Applied Changes';
+        }
         if (isHidden) {
           setTimeout(() => {
             panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
