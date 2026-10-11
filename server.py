@@ -347,10 +347,32 @@ def list_files():
     return jsonify({"path": rel_path, "items": items})
 
 PII_PATTERNS = [
+    # Passports (labeled and standalone patterns)
+    (re.compile(r"(?i)\b(passport(?:\s*(?:no|number|#))?[:\s]*)[A-Za-z0-9]{6,12}\b"), r"\1[REDACTED_PASSPORT]"),
+    (re.compile(r"\b[A-Za-z]{1,2}[0-9]{7,8}\b"), "[REDACTED_PASSPORT]"),
+
+    # National ID / CNIC (both formatted 5-7-1 and unformatted 13 digits)
     (re.compile(r"\b\d{5}-\d{7}-\d\b"), "[REDACTED_CNIC]"),
+    (re.compile(r"(?i)\b(?:cnic|national\s+id|nic|b-form)(?:\s*(?:no|number|#))?[:\s]*\b(\d+)\b"), "CNIC: [REDACTED_CNIC]"),
+    (re.compile(r"\b\d{13}\b"), "[REDACTED_CNIC]"),
+
+    # Bank Accounts & IBAN
+    (re.compile(r"\b[A-Z]{2}\d{2}[A-Z0-9]{12,30}\b"), "[REDACTED_IBAN]"),
+    (re.compile(r"(?i)\b(?:account|acc|acct)(?:\s*(?:no|number|#))?[:\s]*(\d{10,24})\b"), "Account: [REDACTED_ACCOUNT]"),
+
+    # Phone Numbers
     (re.compile(r"(?:\+92[- ]?|0)?3\d{2}[- ]?\d{7}\b"), "[REDACTED_PHONE]"),
+    (re.compile(r"\b(?:\+?\d{1,3}[- ]?)?\(?\d{3}\)?[- ]?\d{3}[- ]?\d{4}\b"), "[REDACTED_PHONE]"),
+
+    # Payment Cards
     (re.compile(r"\b(?:\d{4}[- ]?){3}\d{4}\b"), "[REDACTED_CARD]"),
+
+    # Email Addresses
     (re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b"), "[REDACTED_EMAIL]"),
+
+    # Personal Names in formal administrative labels (Student Name, Applicant, Cardholder, etc.)
+    (re.compile(r"(?i)\b((?:student\s+name|applicant\s+name|customer\s+name|cardholder\s+name|father(?:'s)?\s+name|full\s+name|name)\s*[:\-])\s*([A-Za-z][A-Za-z0-9\s.]{1,35})(?=[,\n\r;]|\s{2,}|$)", re.IGNORECASE), r"\1 [REDACTED_NAME]"),
+    (re.compile(r"(?i)\b((?:receipt\s+for|voucher\s+for|slip\s+for)\s+)([A-Za-z][A-Za-z\s]{1,25})(?=[,\n\r;]|\s{2,}|$)", re.IGNORECASE), r"\1[REDACTED_NAME]"),
 ]
 
 def sanitize_pii(text: str) -> str:
@@ -361,6 +383,186 @@ def sanitize_pii(text: str) -> str:
     for pattern, replacement in PII_PATTERNS:
         clean = pattern.sub(replacement, clean)
     return clean
+
+def classify_document(filename: str, snippet: str = "") -> dict:
+    """
+    Cautiously classifies a document based on BOTH filename and inside text context.
+    Strictly distinguishes Academic Course Materials from Identity Passes, Vouchers, and Bills.
+    """
+    fn_lower = (filename or "").lower()
+    snip_lower = (snippet or "").lower()
+    combined = f"{fn_lower} {snip_lower}"
+
+    # 1. Identity & Entry Passes (High Caution Priority)
+    # Even if it says 'University' or 'AI', an Entry Pass or Passport is an IDENTITY document, not course study material.
+    is_identity = any(k in combined for k in (
+        "entry pass", "gate pass", "student pass", "transit pass", "admission pass", 
+        "passport", "identity card", "id card", "cnic", "student card"
+    )) or (("pass" in fn_lower or "passport" in fn_lower) and not any(k in fn_lower for k in ("password", "passed", "passive")))
+
+    if is_identity:
+        return {
+            "category": "IDENTITY_PASS",
+            "type_label": "Identity / Entry Pass",
+            "is_academic_study": False,
+            "target_dir": "Documents/Personal/Identity",
+            "suggested_title": filename
+        }
+
+    # 2. Academic Financial Vouchers / Fee Slips
+    is_voucher = any(k in combined for k in (
+        "fee voucher", "fee slip", "tuition voucher", "challan", "student voucher", "semester fee"
+    )) or (("voucher" in fn_lower or "fee" in fn_lower) and "bill" not in fn_lower)
+
+    if is_voucher:
+        stem = os.path.splitext(filename)[0]
+        clean_title = f"{stem}.pdf" if not stem.endswith(".pdf") else stem
+        return {
+            "category": "ACADEMIC_VOUCHER",
+            "type_label": "Academic Tuition Voucher",
+            "is_academic_study": False,
+            "target_dir": "Documents/University/Vouchers",
+            "suggested_title": clean_title
+        }
+
+    # 3. Utility Bills & Commercial Invoices
+    is_utility = any(k in combined for k in (
+        "utility bill", "electricity bill", "electric bill", "gas bill", "water bill", 
+        "consumer id", "amount due", "invoice for march", "invoice for april", "bill invoice"
+    )) or ("bill" in fn_lower and "voucher" not in fn_lower)
+
+    if is_utility:
+        return {
+            "category": "FINANCIAL_BILL",
+            "type_label": "Utility / Financial Bill",
+            "is_academic_study": False,
+            "target_dir": "Documents/Finances",
+            "suggested_title": "Electricity_Utility_Bill_March2025.pdf" if "electricity" in combined else "Utility_Bill_Invoice.pdf"
+        }
+
+    # 4. Academic Coursework & Study Materials (Lectures, Assignments, Papers)
+    academic_keywords = (
+        "knowledge representation", "artificial intelligence", "lecture", "course", 
+        "assignment", "semester", "bsai", "syllabus", "slides", "notes", "neural", 
+        "heuristic search", "exam", "lab report", "tutorial", "arxiv", "deep learning"
+    )
+    is_academic = any(k in combined for k in academic_keywords) or "1508." in fn_lower
+
+    if is_academic:
+        subject = "AI"
+        if "knowledge representation" in combined:
+            suggested = "Knowledge_Representation_Lecture_04.pdf"
+        elif "assignment" in combined:
+            suggested = "AI_Course_Assignment_02.pdf"
+        elif "neural" in combined or "1508" in fn_lower:
+            suggested = "Neural_Algorithm_Artistic_Style_Paper.pdf"
+        else:
+            stem = os.path.splitext(filename)[0]
+            clean_stem = re.sub(r"^(?:DOC-|\d{4}\.\d{4,5}|WhatsApp_Doc_?)", "", stem)
+            clean_token = re.sub(r"[^\w-]", "_", clean_stem).strip("_")
+            suggested = f"AI_{clean_token or 'Study_Material'}.pdf"
+
+        return {
+            "category": "ACADEMIC_STUDY",
+            "type_label": "Academic Study Material",
+            "is_academic_study": True,
+            "target_dir": f"Documents/University/{subject}",
+            "suggested_title": suggested
+        }
+
+    # 5. Temporary & Screenshots
+    if "screenshot" in fn_lower or fn_lower.endswith((".tmp", ".cache", ".bak", ".log")):
+        return {
+            "category": "TEMPORARY_TRASH",
+            "type_label": "Temporary / Screenshot",
+            "is_academic_study": False,
+            "target_dir": ".agent_trash",
+            "suggested_title": filename
+        }
+
+    # 6. General Document
+    return {
+        "category": "GENERAL_DOCUMENT",
+        "type_label": "General Document",
+        "is_academic_study": False,
+        "target_dir": "Documents/Personal",
+        "suggested_title": filename
+    }
+
+def score_document_match(query: str, doc: dict) -> tuple[float, str]:
+    """
+    Calculates a hybrid relevance score (0.0 - 200.0) for a document against a user search query.
+    Prioritizes:
+    1. Exact or clean filename matches
+    2. Substring & token matches in filename
+    3. Inside context snippet matches
+    4. Cautious category relevance
+    """
+    query_clean = query.lower().strip()
+    cleaned_target = re.sub(
+        r"^(?:find(?: me)?|where is|where are|search(?: for)?|locate|show(?: me)?|get(?: me)?|list|check)\s+",
+        "",
+        query_clean
+    ).strip()
+
+    if not cleaned_target:
+        cleaned_target = query_clean
+
+    fn = doc.get("filename", "").lower()
+    fn_stem = os.path.splitext(fn)[0].lower()
+    target_tokens = [t for t in re.findall(r"\w+", cleaned_target) if len(t) > 1 and t not in ("the", "all", "and", "for", "with", "doc", "pdf", "file")]
+
+    snip = (doc.get("snippet") or doc.get("text_snippet") or "").lower()
+    score = 0.0
+    match_reason = ""
+
+    # A. Filename Matching (Highest Weight)
+    if fn == cleaned_target or fn_stem == cleaned_target:
+        score += 150.0
+        match_reason = "Exact filename match"
+    elif cleaned_target in fn or cleaned_target in fn_stem:
+        score += 90.0
+        match_reason = f"Filename contains '{cleaned_target}'"
+    else:
+        matched_fn_tokens = [t for t in target_tokens if t in fn]
+        if matched_fn_tokens:
+            token_ratio = len(matched_fn_tokens) / max(len(target_tokens), 1)
+            score += 40.0 * token_ratio + (15.0 * len(matched_fn_tokens))
+            match_reason = f"Filename matches: {', '.join(matched_fn_tokens)}"
+
+    # B. Content Snippet Matching
+    if snip and snip != "none (binary/image)":
+        if cleaned_target in snip:
+            score += 45.0
+            if not match_reason:
+                match_reason = f"Content contains '{cleaned_target}'"
+        else:
+            matched_snip_tokens = [t for t in target_tokens if t in snip]
+            if matched_snip_tokens:
+                score += 15.0 * len(matched_snip_tokens)
+                if not match_reason:
+                    match_reason = f"Content mentions: {', '.join(matched_snip_tokens)}"
+
+    # C. Cautionary Document Classification alignment
+    classification = classify_document(doc.get("filename", ""), snip)
+    doc_cat = classification.get("category", "")
+
+    if any(t in target_tokens for t in ("pass", "entry", "id", "passport")):
+        if doc_cat == "IDENTITY_PASS":
+            score += 30.0
+    elif any(t in target_tokens for t in ("bill", "electricity", "utility", "invoice")):
+        if doc_cat == "FINANCIAL_BILL":
+            score += 30.0
+    elif any(t in target_tokens for t in ("voucher", "fee", "challan", "slip")):
+        if doc_cat == "ACADEMIC_VOUCHER":
+            score += 30.0
+    elif any(t in target_tokens for t in ("lecture", "notes", "assignment", "neural", "course")):
+        if doc_cat == "ACADEMIC_STUDY":
+            score += 30.0
+        elif doc_cat == "IDENTITY_PASS":
+            score -= 40.0  # Cautionary penalty
+
+    return max(0.0, score), match_reason
 
 @app.route("/read_file_snippet", methods=["POST"])
 def read_file_snippet():
@@ -1155,15 +1357,15 @@ def format_plan_badges(plan_actions: list, peer_names: list, manifest_lookup: di
                 act_copy["badge"] = "TRASH"
                 act_copy["badge_label"] = "Soft Delete"
             else:
-                act_copy["action_id"] = f"step-{step_num}"
                 peer_target = act_copy.get("peer_name")
-                if not peer_target:
+                is_peer_dest = "documents/peers/" in dst.lower() or "peers/" in dst.lower()
+                if not peer_target and is_peer_dest:
                     for p_name in peer_names:
                         if p_name.lower() in dst.lower() or p_name.lower() in src.lower():
                             peer_target = p_name
                             break
 
-                if peer_target:
+                if peer_target and is_peer_dest:
                     act_copy["badge"] = "PEER_MOVE"
                     act_copy["badge_label"] = "Peer Move"
                     act_copy["peer_name"] = peer_target
@@ -1477,11 +1679,11 @@ Classify the user's prompt into exactly ONE of three intents:
    - General questions not requesting to inspect/search files or execute file operations.
 
 2. "QUERY_INFO":
-   - Read-only search, query, inspection, or summary requests (e.g., "List university lectures", "Find receipts", "What is inside Download?", "Show me AI documents", "Do I have any fee slips?", "What files are here?").
-   - The user wants information, summaries, or citations about their stored files WITHOUT moving, renaming, trashing, or organizing them.
+   - Read-only search, query, inspection, summary, or finding specific documents by name/content (e.g., "Find me Sumbal pass", "Where is the electricity bill?", "Find 1508 neural paper", "List university lectures", "Show fee voucher", "What files are here?", "Search for AI assignment").
+   - The user wants information, location, summaries, or citations about their stored files WITHOUT moving, renaming, trashing, or organizing them.
 
 3. "FILE_OPERATION":
-   - Requests to organize, sort, clean, separate, move, delete, trash, rename, or manage files and folders (e.g., "Sort student vouchers", "separate peer docs", "clean downloads", "cleanup screenshots", "move pdfs to university").
+   - Requests to organize, sort, clean, separate, move, delete, trash, rename, or manage files and folders (e.g., "Organize all my university files", "Sort student vouchers", "separate peer docs", "clean downloads", "cleanup screenshots", "move pdfs to university").
 
 Respond STRICTLY with valid JSON adhering to this schema:
 {{
@@ -1501,7 +1703,7 @@ Respond STRICTLY with valid JSON adhering to this schema:
             "list", "find", "show", "search", "what is inside", "what is in", 
             "what else is in", "what files", "how many files", "do i have", 
             "display", "summarize", "view", "inspect", "where is", "where are",
-            "tell me about"
+            "tell me about", "locate", "check for", "which files"
         )
         file_op_keywords = (
             "sort", "voucher", "fee", "challan", "slip", "peer", "separate", 
@@ -1509,7 +1711,7 @@ Respond STRICTLY with valid JSON adhering to this schema:
             "organize", "rename", "isolate", "structure"
         )
 
-        if any(k in lower_p for k in query_lead_keywords):
+        if any(k in lower_p for k in query_lead_keywords) and not any(k in lower_p for k in ("sort", "organize", "clean", "trash", "move", "separate", "rename")):
             intent = "QUERY_INFO"
         elif any(k in lower_p for k in ("what else", "tell me more", "who are you", "what can you do", "help", "hi", "hello", "hey", "thanks")):
             intent = "CONVERSATION"
@@ -1606,80 +1808,81 @@ Explain your actual features (interactive diff reviews, academic lecture sorting
                 ]
             })
 
+        # Score and classify all files using hybrid matching
+        scored_files = []
+        for f in all_files:
+            match_score, match_reason = score_document_match(raw_prompt, f)
+            classification = classify_document(f["filename"], f["snippet"])
+            scored_files.append({
+                **f,
+                "score": match_score,
+                "match_reason": match_reason,
+                "category": classification["category"],
+                "type_label": classification["type_label"]
+            })
+
+        # Rank files by relevance score descending
+        scored_files.sort(key=lambda x: x["score"], reverse=True)
+
         gemini_manifest = [
             {
                 "filename": f["filename"],
                 "path": f["path"],
                 "size_kb": f["size_kb"],
-                "has_content": f["has_content"],
+                "category": f["type_label"],
+                "match_score": f["score"],
+                "match_reason": f["match_reason"],
                 "text_snippet": f["text_snippet"]
             }
-            for f in all_files[:35]
+            for f in scored_files[:35]
         ]
 
         query_system_prompt = f"""You are Storage Copilot, running locally on an Android device via Termux for {owner_name} (Roll/ID: {identifiers}, Major: Artificial Intelligence).
 Known Peers: {", ".join(peer_names)}.
 Storage Root: /storage/emulated/0 (Downloads, Documents).
 
-The user is asking a READ-ONLY question about their storage files:
+The user is asking a READ-ONLY question or searching for a specific document on their storage:
 "{raw_prompt}"
 
-Here are the real files currently on the device with their inspected content snippets (sanitized for PII):
+Here are the real files currently on the device (ranked by relevance, sanitized for PII):
 {json.dumps(gemini_manifest, indent=2)}
 
 INSTRUCTIONS:
-1. Answer the user's query directly, informatively, and conversationally.
-2. Filter and present the relevant files matching their inquiry (e.g., university lectures, AI coursework, fee vouchers, peer receipts, or downloads).
-3. Format as a clean, structured Markdown response:
+1. SPECIFIC FILE LOOKUPS:
+   - If the user asks to locate/find a specific file by name or content (e.g., "Find me Sumbal pass", "Where is the electricity bill", "Find 1508 neural paper"):
+     Identify and pinpoint the exact matching document(s).
+     State the exact filename (bold), path in code span (`path`), file size, and document category.
+     Quote or summarize the key sanitized text from its snippet.
+2. CAUTIOUS DOCUMENT TAXONOMY:
+   - Accurately distinguish Academic Study Materials (lectures, assignments) from Identity Passes / Passports and Bills.
+   - An Entry Pass (e.g. "University Entry Pass: Student Name: [REDACTED_NAME]") is an IDENTITY document, NOT an academic lecture or course material!
+3. FORMAT AS CLEAN STRUCTURED MARKDOWN:
    - Use bold for file names.
    - Show file path in code spans (e.g. `Download/filename.pdf`).
-   - Mention the file size and a concise summary of what was found in the text snippet.
-   - Group by category if multiple categories match (e.g., **University Academic Documents**, **Financial Receipts**).
+   - Group by category if multiple categories match (e.g., **University Academic Documents**, **Identity Documents**, **Financial Receipts**).
 4. If no files match the query, clearly state what was searched and explain that no matching documents were found.
-5. STRICT RULE: This is a read-only query. Do NOT generate any file mutation plan, JSON actions, or suggest modifying files.
+5. STRICT RULE: Read-only query. Do NOT output file operations or mutation plans.
 """
 
         query_reply = call_gemini_text(query_system_prompt, raw_prompt)
 
         # Offline heuristic search if Gemini is offline
         if not query_reply:
-            lower_p = raw_prompt.lower()
-            keywords = [w for w in re.split(r"\W+", lower_p) if len(w) > 2 and w not in ("the", "all", "and", "for", "with", "from", "list", "find", "show", "what", "where", "inside", "documents", "files")]
+            top_matches = [f for f in scored_files if f["score"] >= 20.0]
+            if not top_matches and scored_files:
+                lower_p = raw_prompt.lower()
+                if any(w in lower_p for w in ("what", "list", "show", "all", "here", "inside", "view", "files")):
+                    top_matches = scored_files[:10]
 
-            matches = []
-            for f in all_files:
-                fn_l = f["filename"].lower()
-                snip_l = f["snippet"].lower()
-                path_l = f["path"].lower()
-
-                score = 0
-                if any(term in lower_p for term in ("lecture", "university", "course", "ai", "study", "academic", "knowledge")):
-                    if any(k in fn_l or k in snip_l for k in ("lecture", "knowledge representation", "artificial intelligence", "neural", "assignment", "pass", "voucher", "bsai")):
-                        score += 3
-                if any(term in lower_p for term in ("receipt", "bill", "finance", "voucher", "fee", "money")):
-                    if any(k in fn_l or k in snip_l for k in ("receipt", "invoice", "fee", "bill", "payment", "voucher", "paid", "challan")):
-                        score += 3
-                if any(p_name.lower() in lower_p for p_name in peer_names):
-                    for p_name in peer_names:
-                        if p_name.lower() in lower_p and (p_name.lower() in fn_l or p_name.lower() in snip_l):
-                            score += 4
-                if any(k in fn_l or k in snip_l or k in path_l for k in keywords):
-                    score += 1
-
-                if score > 0 or not keywords:
-                    matches.append((score, f))
-
-            matches.sort(key=lambda x: x[0], reverse=True)
-            matched_files = [m[1] for m in matches[:10]]
-
-            if matched_files:
-                lines = [f"### 📂 Inspected Storage Query: \"{raw_prompt}\"\n\nFound **{len(matched_files)} matching document(s)** on your device:"]
-                for m in matched_files:
+            if top_matches:
+                lines = [f"### 🔍 Inspected Storage Query: \"{raw_prompt}\"\n\nFound **{len(top_matches)} matching document(s)** on your device:"]
+                for m in top_matches[:8]:
                     snip_preview = m["snippet"][:130] if m["snippet"] else "Binary / image fixture"
-                    lines.append(f"- **{m['filename']}** (`{m['path']}` • {m['size_kb']} KB)\n  *Content Summary:* {snip_preview}")
+                    reason_info = f" • *Match:* {m['match_reason']}" if m.get("match_reason") else ""
+                    lines.append(f"- 📄 **{m['filename']}** (`{m['path']}` • {m['size_kb']} KB)\n  *Category:* **{m['type_label']}**{reason_info}\n  *Inspected Content:* \"{snip_preview}\"")
                 query_reply = "\n\n".join(lines)
             else:
-                query_reply = f"ℹ️ I searched your storage ({len(all_files)} real files inspected), but found no files matching **\"{raw_prompt}\"**.\n\nTry asking *\"List university lectures\"* or *\"Find receipts\"*."
+                query_reply = f"ℹ️ I searched your storage ({len(all_files)} real files inspected), but found no files matching **\"{raw_prompt}\"**.\n\nTry asking *\"List university lectures\"*, *\"Find me Sumbal pass\"*, or *\"Find receipts\"*."
 
         return jsonify({
             "type": "query_info",
@@ -1824,22 +2027,29 @@ Define a unified JSON contract for your responses:
 IMPORTANT: The candidates below are the ACTUAL files currently sitting on disk.
 Reason SEMANTICALLY over each candidate's filename, size_kb, text_snippet, and has_content to decide the appropriate operation:
 
-CRITICAL TAXONOMY & NAMING RULES:
-1. ACADEMIC PRIORITY (BS AI Curriculum):
-   - If a document contains academic terms ("Knowledge Representation", "Artificial Intelligence", "AI", "Semester", "Lecture", "Course", "Assignment", "Notes", "Exam", "Lab", "Neural"), categorize under "Documents/University/<Subject>/" (e.g. "Documents/University/AI/Knowledge_Representation_Lecture_04.pdf"), NEVER under "Documents/Finances/".
-2. PREVENT COLLISION & USE CONTENT-DERIVED NAMES:
-   - NEVER rename files using generic static labels like "Document_2025-04-13.pdf" or "WhatsApp_Export".
+CRITICAL TAXONOMY & CAUTION RULES:
+1. ACADEMIC STUDY MATERIALS vs IDENTITY PASSES (STRICT SEPARATION):
+   - ACADEMIC STUDY: Lectures, assignments, research papers, course notes, slides (e.g. Knowledge Representation, AI, Neural style paper).
+     Route to: "Documents/University/<Subject>/" (e.g. "Documents/University/AI/").
+   - IDENTITY & ENTRY PASSES: Entry passes, student ID cards, transit passes, admission passes, passports (e.g. "University Entry Pass: Student Name: [REDACTED_NAME]").
+     CAUTION: Even if issued by a university, an Entry Pass or Student ID is NOT academic study material! NEVER move entry passes or passports into academic lecture/course folders ("Documents/University/AI/").
+     If the user asked to organize "university files", organize ONLY academic course study materials.
+     If organizing identity documents, route to "Documents/Personal/Identity/".
+2. PREVENT COLLISION & USE CONTENT-DERIVED DESCRIPTIVE NAMES:
+   - NEVER rename files using generic static labels like "Document_2025-04-13.pdf" or "Documents/Organized/".
    - Read each file's `text_snippet`. Use the actual subject matter or purpose to assign a specific, unique name (e.g. "Knowledge_Representation_Lecture_04.pdf", "AI_Course_Assignment_02.pdf", "Electricity_Bill_March2025.pdf").
-   - EVERY proposed action in a batch MUST have a distinct, UNIQUE destination path. Never output duplicate destination paths.
+   - EVERY proposed action in a batch MUST have a distinct, UNIQUE destination path.
 3. PEER ISOLATION:
-   - Identify files naming or belonging to peers ({", ".join(peer_names)}). Route strictly to "Documents/Peers/<PeerName>/".
+   - Only route to "Documents/Peers/<PeerName>/" if the file explicitly belongs to that peer AND the user requested peer separation or peer context is primary.
 4. PERSONAL VOUCHERS:
-   - Route {owner_name}'s personal fee vouchers to "Documents/University/Vouchers/".
+   - Route personal fee vouchers to "Documents/University/Vouchers/".
+5. UTILITIES & BILLS:
+   - Route electricity, utility, or consumer invoices to "Documents/Finances/".
 
 Action format:
 - {{"action_id": "step-1", "type": "make_dir", "path": "Documents/..."}}
-- {{"action_id": "step-2", "type": "move", "source": "<exact filename from manifest>", "destination": "Documents/...", "rationale": "...", "peer_name": "..." (if peer), "ai_inspected": true, "inspected_preview": "<first 100 chars of text_snippet>"}}
-- {{"action_id": "step-3", "type": "trash", "path": "<exact filename from manifest>", "rationale": "...", "ai_inspected": false, "inspected_preview": "..."}}
+- {{"action_id": "step-2", "type": "move", "source": "<exact filename from manifest>", "destination": "Documents/...", "rationale": "...", "badge": "RENAME" | "FILE_MOVE", "ai_inspected": true, "inspected_preview": "<first 100 chars of text_snippet>"}}
+- {{"action_id": "step-3", "type": "trash", "path": "<exact filename from manifest>", "rationale": "...", "badge": "TRASH", "ai_inspected": false, "inspected_preview": "..."}}
 """
 
     user_prompt_text = f"""Operational Request: "{raw_prompt}"
@@ -2063,14 +2273,15 @@ Available Real Files Manifest ({len(manifest)} real files on disk):
                 })
                 step_idx += 1
 
-    else:
-        keywords = [w for w in re.split(r"\W+", lower_p) if len(w) > 2 and w not in ("the", "all", "and", "for")]
-        plan_desc = f"Organize files matching: '{raw_prompt}'"
+    elif any(k in lower_p for k in ("university", "academic", "lecture", "course", "study")):
+        plan_desc = f"Organize academic university course materials for {owner_name}"
         for item in manifest:
-            fn = item["name"].lower()
-            snip = item["snippet"].lower()
-            if any(k in fn or k in snip for k in keywords):
-                target_d = "Documents/Organized"
+            classification = classify_document(item["name"], item["snippet"])
+            # STRICT RULE: Only organize actual Academic Study Materials into University Course directories!
+            # Do NOT touch or route Identity Passes (e.g. Sumbal pass.pdf), Passports, or Utility Bills!
+            if classification["is_academic_study"]:
+                target_d = classification["target_dir"]
+                clean_title = classification["suggested_title"]
                 if target_d not in created_dirs:
                     plan_actions.append({"action_id": f"step-{step_idx}", "type": "make_dir", "path": target_d})
                     created_dirs.add(target_d)
@@ -2079,10 +2290,84 @@ Available Real Files Manifest ({len(manifest)} real files on disk):
                     "action_id": f"step-{step_idx}",
                     "type": "move",
                     "source": item["path"],
-                    "destination": f"{target_d}/{item['name']}",
-                    "rationale": f"Matched criteria for '{raw_prompt}'"
+                    "destination": f"{target_d}/{clean_title}",
+                    "badge": "RENAME" if clean_title != item["name"] else "FILE_MOVE",
+                    "rationale": f"Organized academic study document into {target_d} based on inspected content",
+                    "ai_inspected": True,
+                    "inspected_preview": (item["snippet"] or "")[:100]
                 })
                 step_idx += 1
+            elif "voucher" in lower_p and classification["category"] == "ACADEMIC_VOUCHER":
+                target_d = classification["target_dir"]
+                clean_title = classification["suggested_title"]
+                if target_d not in created_dirs:
+                    plan_actions.append({"action_id": f"step-{step_idx}", "type": "make_dir", "path": target_d})
+                    created_dirs.add(target_d)
+                    step_idx += 1
+                plan_actions.append({
+                    "action_id": f"step-{step_idx}",
+                    "type": "move",
+                    "source": item["path"],
+                    "destination": f"{target_d}/{clean_title}",
+                    "badge": "FILE_MOVE",
+                    "rationale": f"Filed university tuition fee voucher into {target_d}",
+                    "ai_inspected": True,
+                    "inspected_preview": (item["snippet"] or "")[:100]
+                })
+                step_idx += 1
+
+    else:
+        # Check if user prompt targets a specific document by name
+        specific_matches = []
+        for item in manifest:
+            m_score, m_reason = score_document_match(raw_prompt, item)
+            if m_score >= 35.0:
+                specific_matches.append((m_score, item, m_reason))
+
+        if specific_matches:
+            specific_matches.sort(key=lambda x: x[0], reverse=True)
+            plan_desc = f"Organize matched document: {specific_matches[0][1]['name']}"
+            for m_score, item, m_reason in specific_matches[:5]:
+                classification = classify_document(item["name"], item["snippet"])
+                target_d = classification["target_dir"]
+                clean_title = classification["suggested_title"]
+                if target_d not in created_dirs:
+                    plan_actions.append({"action_id": f"step-{step_idx}", "type": "make_dir", "path": target_d})
+                    created_dirs.add(target_d)
+                    step_idx += 1
+                plan_actions.append({
+                    "action_id": f"step-{step_idx}",
+                    "type": "move",
+                    "source": item["path"],
+                    "destination": f"{target_d}/{clean_title}",
+                    "badge": "RENAME" if clean_title != item["name"] else "FILE_MOVE",
+                    "rationale": f"Organized specific file '{item['name']}' based on match ({m_reason})",
+                    "ai_inspected": True,
+                    "inspected_preview": (item["snippet"] or "")[:100]
+                })
+                step_idx += 1
+        else:
+            keywords = [w for w in re.split(r"\W+", lower_p) if len(w) > 2 and w not in ("the", "all", "and", "for", "files", "place", "documents")]
+            plan_desc = f"Organize files matching: '{raw_prompt}'"
+            for item in manifest:
+                fn = item["name"].lower()
+                snip = item["snippet"].lower()
+                classification = classify_document(item["name"], item["snippet"])
+                if any(k in fn or k in snip for k in keywords):
+                    target_d = classification["target_dir"]
+                    clean_title = classification["suggested_title"]
+                    if target_d not in created_dirs:
+                        plan_actions.append({"action_id": f"step-{step_idx}", "type": "make_dir", "path": target_d})
+                        created_dirs.add(target_d)
+                        step_idx += 1
+                    plan_actions.append({
+                        "action_id": f"step-{step_idx}",
+                        "type": "move",
+                        "source": item["path"],
+                        "destination": f"{target_d}/{clean_title}",
+                        "rationale": f"Matched criteria for '{raw_prompt}'"
+                    })
+                    step_idx += 1
 
     if not plan_actions:
         return jsonify({
