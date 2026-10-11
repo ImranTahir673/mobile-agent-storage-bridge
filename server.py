@@ -471,7 +471,21 @@ def classify_document(filename: str, snippet: str = "") -> dict:
             "suggested_title": suggested
         }
 
-    # 5. Temporary & Screenshots
+    # 5. Career & Professional Resumes (CV, Resume, Portfolio)
+    is_career = any(k in combined for k in (
+        "curriculum vitae", "resume", " cv ", "cv.", "cv_", "cv-", "cover letter", 
+        "portfolio", "job application", "recommendation letter"
+    )) or fn_lower.startswith("cv") or "resume" in fn_lower
+    if is_career and not is_academic and not is_voucher:
+        return {
+            "category": "CAREER_DOCUMENT",
+            "type_label": "Career / Resume",
+            "is_academic_study": False,
+            "target_dir": "Documents/Personal/Career",
+            "suggested_title": filename
+        }
+
+    # 6. Temporary & Screenshots
     if "screenshot" in fn_lower or fn_lower.endswith((".tmp", ".cache", ".bak", ".log")):
         return {
             "category": "TEMPORARY_TRASH",
@@ -481,7 +495,7 @@ def classify_document(filename: str, snippet: str = "") -> dict:
             "suggested_title": filename
         }
 
-    # 6. General Document
+    # 7. General Document
     return {
         "category": "GENERAL_DOCUMENT",
         "type_label": "General Document",
@@ -1458,12 +1472,10 @@ def call_gemini_json(system_prompt: str, user_prompt: str) -> dict:
     Sends structured JSON prompt to Gemini API with robust model fallback:
     1. gemini-3.5-flash-lite (fast, high throughput, active)
     2. gemini-3.5-flash
-    3. gemini-3.8-flash
-    4. gemini-flash-latest
-    5. gemini-2.5-flash
     """
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
+        print("[Storage Copilot] GEMINI_API_KEY not configured. Running in Local Offline Intelligence mode.")
         return {}
 
     payload = {
@@ -1484,12 +1496,17 @@ def call_gemini_json(system_prompt: str, user_prompt: str) -> dict:
                     if parts:
                         text = parts[0].get("text", "")
                         try:
-                            return extract_json_plan(text)
+                            parsed = extract_json_plan(text)
+                            if parsed:
+                                print(f"[Storage Copilot Gemini] Successfully received response via model '{model}'.")
+                                return parsed
                         except Exception:
                             continue
             else:
+                print(f"[Storage Copilot Gemini] Model '{model}' returned HTTP {resp.status_code}.")
                 continue
-        except Exception:
+        except Exception as e:
+            print(f"[Storage Copilot Gemini] Model '{model}' request failed: {e}")
             continue
     return {}
 
@@ -1499,6 +1516,7 @@ def call_gemini_text(system_prompt: str, user_prompt: str) -> str:
     """
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
+        print("[Storage Copilot] GEMINI_API_KEY not configured. Running in Local Offline Intelligence mode.")
         return ""
 
     payload = {
@@ -1519,10 +1537,13 @@ def call_gemini_text(system_prompt: str, user_prompt: str) -> str:
                     if parts:
                         text = parts[0].get("text", "")
                         if text and text.strip():
+                            print(f"[Storage Copilot Gemini] Successfully received conversational text via model '{model}'.")
                             return text.strip()
             else:
+                print(f"[Storage Copilot Gemini] Model '{model}' returned HTTP {resp.status_code}.")
                 continue
-        except Exception:
+        except Exception as e:
+            print(f"[Storage Copilot Gemini] Model '{model}' request failed: {e}")
             continue
     return ""
 
@@ -1659,6 +1680,25 @@ def ensure_unique_plan_destinations(actions: list) -> list:
         cleaned_actions.append(act_copy)
     return cleaned_actions
 
+def normalize_user_prompt(text: str) -> str:
+    """
+    Normalizes common mobile typos, abbreviations, and colloquialisms for robust intent understanding:
+    - 'fikes' -> 'files'
+    - 'vest' -> 'best'
+    - 'oragnize' -> 'organize'
+    - 'doenload' -> 'download'
+    - 'reciept' -> 'receipt'
+    """
+    if not text:
+        return ""
+    t = text.strip()
+    t = re.sub(r"\bfikes\b", "files", t, flags=re.I)
+    t = re.sub(r"\bvest\b", "best", t, flags=re.I)
+    t = re.sub(r"\boragnize\b", "organize", t, flags=re.I)
+    t = re.sub(r"\bdoenload\b", "download", t, flags=re.I)
+    t = re.sub(r"\breciept\b", "receipt", t, flags=re.I)
+    return t
+
 @app.route("/propose_plan", methods=["POST"])
 def propose_plan():
     """
@@ -1684,6 +1724,7 @@ def propose_plan():
     data = request.get_json(force=True) or {}
     raw_prompt = (data.get("prompt") or "").strip()
     target_folder = data.get("target_folder") or "Download"
+    normalized_prompt = normalize_user_prompt(raw_prompt)
 
     # Load User Profile & Peer Separation Matrix for system context
     p_path = get_user_profile_path()
@@ -1731,7 +1772,7 @@ YOUR AGENT PERSONA & BOUNDARIES:
 CLASSIFY THE USER'S PROMPT INTO EXACTLY ONE OF THREE INTENTS:
 
 1. "CONVERSATION":
-   - Suggestions, advice, ideas, recommendations, or questions on how to organize/clean storage (e.g. "Some suggestions for my files to organize", "What do you suggest?", "How should I organize my university materials?", "Give me ideas to clean up my downloads", "What should I do?"). NOTE: Even if words like 'organize', 'sort', or 'files' appear in the prompt, if the user is asking for advice/suggestions/recommendations, classify as CONVERSATION! The user wants an intelligent conversational RESPONSE first, NOT an immediate mutation plan.
+   - Suggestions, advice, ideas, recommendations, or questions on how to organize/clean storage (e.g. "What can we do to the files on my phone to organize in the best way possible", "Some suggestions for my files to organize", "What do you suggest?", "How should I organize my university materials?", "Give me ideas to clean up my downloads", "What should I do?"). NOTE: Even if words like 'organize', 'sort', or 'files' appear in the prompt, if the user is asking for advice/suggestions/recommendations, classify as CONVERSATION! The user wants an intelligent conversational RESPONSE first, NOT an immediate mutation plan.
    - Greetings, casual chat, check-ins ("Hi", "Hello", "Hey", "Good morning", "Salam")
    - Questions about your identity, capabilities, or how you work ("Who are you?", "What can you do?", "Help", "What are your boundaries?")
    - Open conversational follow-ups ("What else?", "Tell me more", "Thanks")
@@ -1742,7 +1783,17 @@ CLASSIFY THE USER'S PROMPT INTO EXACTLY ONE OF THREE INTENTS:
    - ZERO file moves, renames, or deletions.
 
 3. "FILE_OPERATION":
-   - Explicit commands or instructions to take action, execute, or stage file moves/renames/deletions right now (e.g., "Organize all my university files", "Sort student vouchers", "Separate peer documents", "Clean download names", "Cleanup old screenshots", "Move my CV to Personal", "Yes, create an organization plan").
+   - Explicit commands, instructions, or confirmations to take action, execute, or stage file moves/renames/deletions right now.
+   - Examples:
+     * "Yes organize all my uni files" (Slang: 'uni' = university / college courseware)
+     * "Sort all the other files like docs and pdfs in the download to their best suited places"
+     * "Organize all my university files"
+     * "Sort student vouchers"
+     * "Separate peer documents"
+     * "Clean download names"
+     * "Cleanup old screenshots"
+     * "Move my CV to Personal"
+     * "Organize all files in download"
 
 Respond STRICTLY with valid JSON adhering to this schema:
 {{
@@ -1757,12 +1808,22 @@ Respond STRICTLY with valid JSON adhering to this schema:
 
     # Offline / Heuristic Fallback for Stage 1:
     if not intent:
-        lower_p = raw_prompt.lower()
+        lower_p = normalized_prompt.lower()
+        
+        # Action command starters / imperative prefixes
+        action_command_starts = (
+            "yes ", "yeah ", "sure ", "ok ", "okay ", "please ", "go ahead ", "proceed ",
+            "sort ", "organize ", "clean ", "move ", "put ", "trash ", "delete ", "tidy ", "structure "
+        )
+        is_action_command = any(lower_p.startswith(p) for p in action_command_starts)
+
         advice_lead_keywords = (
             "suggestion", "suggestions", "suggest", "recommend", "recommendation",
             "recommendations", "idea", "ideas", "advice", "tip", "tips", "how to",
             "how should", "how can", "what do you think", "what should i", "guide me",
-            "options", "propose some ideas", "any ideas"
+            "options", "propose some ideas", "any ideas", "what can we do", "what can i do",
+            "what could we do", "what should we do", "what to do", "best way", "best ways",
+            "best way possible"
         )
         query_lead_keywords = (
             "list", "find", "show", "search", "what is inside", "what is in", 
@@ -1774,10 +1835,12 @@ Respond STRICTLY with valid JSON adhering to this schema:
         file_op_keywords = (
             "sort", "voucher", "fee", "challan", "slip", "peer", "separate", 
             "clean", "download", "screenshot", "trash", "delete", "move", 
-            "organize", "rename", "isolate", "structure"
+            "organize", "rename", "isolate", "structure", "tidy", "place"
         )
 
-        if any(k in lower_p for k in advice_lead_keywords):
+        if is_action_command and any(k in lower_p for k in file_op_keywords):
+            intent = "FILE_OPERATION"
+        elif any(k in lower_p for k in advice_lead_keywords):
             intent = "CONVERSATION"
         elif any(k in lower_p for k in query_lead_keywords) and not any(k in lower_p for k in ("sort", "organize", "clean", "trash", "move", "separate", "rename")):
             intent = "QUERY_INFO"
@@ -1838,9 +1901,8 @@ Keep your response well-structured using clean Markdown formatting (bullet point
             conv_reply = call_gemini_text(conv_sys, raw_prompt)
 
         if not conv_reply:
-            # Dynamic contextual offline fallback tailored directly to prompt
-            lp = raw_prompt.lower()
-            if any(w in lp for w in ("suggestion", "suggest", "recommend", "idea", "how should i", "how to organize", "advice", "tip", "options", "fikes")):
+            lp = normalized_prompt.lower()
+            if any(w in lp for w in ("suggestion", "suggest", "recommend", "idea", "how should i", "how to organize", "advice", "tip", "options", "best way", "what can we do", "what can i do", "fikes", "vest")):
                 conv_reply = (
                     f"Here are my top recommendations for organizing your storage, {owner_name}:\n\n"
                     f"1. 📚 **Academic Courseware**: Consolidate university lecture slides, assignments, and AI notes into `Documents/University/<Subject>/` (e.g. `Documents/University/AI/`).\n"
@@ -2470,7 +2532,7 @@ Available Real Files Manifest ({len(manifest)} real files on disk):
                 })
                 step_idx += 1
 
-    elif any(k in lower_p for k in ("university", "academic", "lecture", "course", "study")):
+    elif any(re.search(rf"\b{re.escape(k)}\b", lower_p) for k in ("university", "academic", "lecture", "course", "study", "uni", "college", "campus", "school", "varsity", "homework", "hw", "slides", "notes", "assignment")):
         plan_desc = f"Organize academic university course materials for {owner_name}"
         for item in manifest:
             classification = classify_document(item["name"], item["snippet"])
@@ -2494,7 +2556,7 @@ Available Real Files Manifest ({len(manifest)} real files on disk):
                     "inspected_preview": (item["snippet"] or "")[:100]
                 })
                 step_idx += 1
-            elif "voucher" in lower_p and classification["category"] == "ACADEMIC_VOUCHER":
+            elif ("voucher" in lower_p or "fee" in lower_p or "all" in lower_p) and classification["category"] == "ACADEMIC_VOUCHER":
                 target_d = classification["target_dir"]
                 clean_title = classification["suggested_title"]
                 if target_d not in created_dirs:
@@ -2512,6 +2574,64 @@ Available Real Files Manifest ({len(manifest)} real files on disk):
                     "inspected_preview": (item["snippet"] or "")[:100]
                 })
                 step_idx += 1
+
+    elif any(term in lower_p for term in ("best suited", "best place", "proper place", "proper folder", "where they belong", "all the other files", "all other files", "other files", "rest of the files", "remaining files", "all files", "everything", "all docs", "all pdfs", "docs and pdfs", "sort download", "organize download", "sort files", "organize files", "tidy up")) or (any(v in lower_p for v in ("sort", "organize", "structure", "categorize", "tidy")) and any(d in lower_p for d in ("file", "files", "doc", "docs", "pdf", "pdfs", "download", "downloads", "everything", "all"))):
+        plan_desc = f"Sort and organize candidate documents in '{target_folder}' into structured taxonomy"
+        for item in manifest:
+            fn = item["name"]
+            snip = item["snippet"] or ""
+            fn_lower = fn.lower()
+            snip_lower = snip.lower()
+
+            if fn.startswith("."):
+                continue
+
+            # 1. Peer isolation check
+            matched_peer = None
+            for p_name in peer_names:
+                if p_name.lower() in fn_lower or p_name.lower() in snip_lower:
+                    matched_peer = p_name
+                    break
+
+            if matched_peer:
+                target_d = f"Documents/Peers/{matched_peer}"
+                clean_title = fn
+                rationale = f"Routed to peer folder for {matched_peer} to protect personal storage"
+            else:
+                classification = classify_document(fn, snip)
+                target_d = classification["target_dir"]
+                clean_title = classification["suggested_title"]
+                cat = classification["category"]
+
+                if cat == "TEMPORARY_TRASH":
+                    plan_actions.append({
+                        "action_id": f"step-{step_idx}",
+                        "type": "trash",
+                        "path": item["path"],
+                        "badge": "TRASH",
+                        "rationale": "Temporary/screenshot file queued for soft-delete with rollback"
+                    })
+                    step_idx += 1
+                    continue
+                else:
+                    rationale = f"Semantically categorized as {classification['type_label']} into {target_d}"
+
+            if target_d not in created_dirs:
+                plan_actions.append({"action_id": f"step-{step_idx}", "type": "make_dir", "path": target_d})
+                created_dirs.add(target_d)
+                step_idx += 1
+
+            plan_actions.append({
+                "action_id": f"step-{step_idx}",
+                "type": "move",
+                "source": item["path"],
+                "destination": f"{target_d}/{clean_title}",
+                "badge": "RENAME" if clean_title != fn else "FILE_MOVE",
+                "rationale": rationale,
+                "ai_inspected": True,
+                "inspected_preview": (snip or "")[:100]
+            })
+            step_idx += 1
 
     else:
         # Check if user prompt targets a specific document by name with an action verb
