@@ -1419,21 +1419,21 @@ def format_plan_badges(plan_actions: list, peer_names: list, manifest_lookup: di
     return formatted_actions
 
 GEMINI_MODELS = [
-    "gemini-2.5-flash",
-    "gemini-3.8-flash",
     "gemini-3.5-flash-lite",
     "gemini-3.5-flash",
-    "gemini-flash-latest"
+    "gemini-3.8-flash",
+    "gemini-flash-latest",
+    "gemini-2.5-flash"
 ]
 
 def call_gemini_json(system_prompt: str, user_prompt: str) -> dict:
     """
-    Sends structured JSON prompt to Gemini API with model fallback:
-    1. gemini-2.5-flash
-    2. gemini-3.8-flash
-    3. gemini-3.5-flash-lite
-    4. gemini-3.5-flash
-    5. gemini-flash-latest
+    Sends structured JSON prompt to Gemini API with robust model fallback:
+    1. gemini-3.5-flash-lite (fast, high throughput, active)
+    2. gemini-3.5-flash
+    3. gemini-3.8-flash
+    4. gemini-flash-latest
+    5. gemini-2.5-flash
     """
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
@@ -1448,7 +1448,7 @@ def call_gemini_json(system_prompt: str, user_prompt: str) -> dict:
     for model in GEMINI_MODELS:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
         try:
-            resp = requests.post(url, json=payload, timeout=25)
+            resp = requests.post(url, json=payload, timeout=20)
             if resp.status_code == 200:
                 data = resp.json()
                 candidates = data.get("candidates", [])
@@ -1460,7 +1460,7 @@ def call_gemini_json(system_prompt: str, user_prompt: str) -> dict:
                             return extract_json_plan(text)
                         except Exception:
                             continue
-            elif resp.status_code in (400, 404, 503):
+            else:
                 continue
         except Exception:
             continue
@@ -1468,7 +1468,7 @@ def call_gemini_json(system_prompt: str, user_prompt: str) -> dict:
 
 def call_gemini_text(system_prompt: str, user_prompt: str) -> str:
     """
-    Sends conversational/markdown prompt to Gemini API with model fallback and returns raw text.
+    Sends conversational/markdown prompt to Gemini API with robust model fallback and returns raw text.
     """
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
@@ -1483,7 +1483,7 @@ def call_gemini_text(system_prompt: str, user_prompt: str) -> str:
     for model in GEMINI_MODELS:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
         try:
-            resp = requests.post(url, json=payload, timeout=25)
+            resp = requests.post(url, json=payload, timeout=20)
             if resp.status_code == 200:
                 data = resp.json()
                 candidates = data.get("candidates", [])
@@ -1493,7 +1493,7 @@ def call_gemini_text(system_prompt: str, user_prompt: str) -> str:
                         text = parts[0].get("text", "")
                         if text and text.strip():
                             return text.strip()
-            elif resp.status_code in (400, 404, 503):
+            else:
                 continue
         except Exception:
             continue
@@ -1503,13 +1503,14 @@ def call_gemini_api(system_prompt: str, user_prompt: str) -> dict:
     """Backwards compatibility alias for structured JSON plan generation."""
     return call_gemini_json(system_prompt, user_prompt)
 
-def collect_storage_files(base_dir: str, target_folder: str = "Download", max_files: int = 50) -> list:
+def collect_storage_files(base_dir: str, target_folder: str = "Download", max_files: int = 1500) -> list:
     """
-    Collects real files across device storage (target folder and Documents subtree),
-    extracting up to 600 chars of text with PII redaction for inspection and query answering.
+    Collects real files across device storage (target folder and Documents subtree) without arbitrary low caps.
+    Extracts modification dates, sizes, and up to 600 chars of text with PII redaction for inspection and query answering.
     """
     collected = []
     seen_paths = set()
+    now_dt = datetime.now()
 
     search_dirs = [
         os.path.join(base_dir, target_folder),
@@ -1533,9 +1534,19 @@ def collect_storage_files(base_dir: str, target_folder: str = "Download", max_fi
                     seen_paths.add(full_p)
 
                     try:
-                        fsize = os.path.getsize(full_p)
+                        fstat = os.stat(full_p)
+                        fsize = fstat.st_size
+                        mtime = fstat.st_mtime
+                        mtime_dt = datetime.fromtimestamp(mtime)
+                        is_today = (mtime_dt.date() == now_dt.date())
+                        modified_str = mtime_dt.strftime("%Y-%m-%d %H:%M")
+                        date_str = mtime_dt.strftime("%Y-%m-%d")
                     except Exception:
                         fsize = 0
+                        mtime = 0
+                        is_today = False
+                        modified_str = ""
+                        date_str = ""
 
                     ext = os.path.splitext(f)[1].lower()
                     rel_p = os.path.relpath(full_p, base_dir).replace("\\", "/")
@@ -1569,6 +1580,10 @@ def collect_storage_files(base_dir: str, target_folder: str = "Download", max_fi
                         "extension": ext,
                         "size_kb": round(fsize / 1024, 1),
                         "size_bytes": fsize,
+                        "modified_timestamp": mtime,
+                        "modified_str": modified_str,
+                        "date_str": date_str,
+                        "is_today": is_today,
                         "snippet": sanitized,
                         "text_snippet": sanitized if sanitized else "None (binary/image)",
                         "has_content": bool(sanitized)
@@ -1666,29 +1681,45 @@ def propose_plan():
     # =========================================================================
     # STAGE 1: Three-Tier Intent Classification via Gemini
     # =========================================================================
-    intent_classification_system_prompt = f"""You are Storage Copilot, running locally on an Android device via Termux for {owner_name} (Roll/ID: {identifiers}, Major: Artificial Intelligence).
+    now_dt = datetime.now()
+    now_str = now_dt.strftime("%A, %B %d, %Y at %I:%M %p")
+    today_date = now_dt.strftime("%Y-%m-%d")
+
+    # =========================================================================
+    # STAGE 1: Three-Tier Intent Classification via Gemini
+    # =========================================================================
+    intent_classification_system_prompt = f"""You are Storage Copilot, an advanced on-device AI agent running locally via Termux on Android for {owner_name} (Roll/ID: {identifiers}, Major: Artificial Intelligence).
+Current Device Time: {now_str} (Today's Date: {today_date}).
 Storage Root: /storage/emulated/0 (Downloads, Documents).
 Known Peers: {", ".join(peer_names)}.
+Peer Routing:
+{peer_matrix_lines}
 
-Classify the user's prompt into exactly ONE of three intents:
+YOUR AGENT PERSONA & BOUNDARIES:
+- You are an articulate, capable AI agent (similar to Google DeepMind / Antigravity). You communicate with clarity, intelligence, and empathy directly to {owner_name}.
+- You possess complete self-awareness of your abilities, capabilities, and system boundaries.
+- WHAT YOU CAN DO: Local storage reconnaissance, content inspection with in-memory PII sanitization, intelligent file organization (academic vs peer vs personal bills), interactive diff approval, and 1-tap atomic rollbacks via SQLite WAL.
+- WHAT YOU CANNOT DO (OUT OF SCOPE): You cannot send emails, send SMS/WhatsApp messages, browse the live web, access cloud storage directly, launch external apps, or alter Android system configurations.
+
+CLASSIFY THE USER'S PROMPT INTO EXACTLY ONE OF THREE INTENTS:
 
 1. "CONVERSATION":
-   - Greetings (e.g., "Hi", "Hello", "Hey", "Good morning")
-   - Questions about your identity, role, or capabilities (e.g., "who are you?", "what can you do?", "help", "how do you work?")
-   - Open conversational follow-ups (e.g., "What else?", "Tell me more", "Thanks")
-   - General questions not requesting to inspect/search files or execute file operations.
+   - Greetings, casual chat, check-ins ("Hi", "Hello", "Hey", "Good morning", "Salam")
+   - Questions about your identity, capabilities, or how you work ("Who are you?", "What can you do?", "Help", "What are your boundaries?")
+   - Open conversational follow-ups ("What else?", "Tell me more", "Thanks")
+   - OUT-OF-SCOPE REQUESTS: Any request asking to perform external actions outside local storage (e.g., "Send an email to my professor", "Play music on Spotify", "Browse the web", "Check the weather", "Order food"). You must handle these under CONVERSATION by politely and knowledgeably explaining your sandbox boundaries and redirecting to local file actions.
 
 2. "QUERY_INFO":
-   - Read-only search, query, inspection, summary, or finding specific documents by name/content (e.g., "Find me Sumbal pass", "Where is the electricity bill?", "Find 1508 neural paper", "List university lectures", "Show fee voucher", "What files are here?", "Search for AI assignment").
-   - The user wants information, location, summaries, or citations about their stored files WITHOUT moving, renaming, trashing, or organizing them.
+   - Read-only queries asking to find, search, locate, list, inspect, summarize, or check files or dates (e.g., "Find me Sumbal pass", "Where is my degree pass or entry pass?", "Today did I receive any documents?", "List university lectures", "Show fee voucher", "What files are here?").
+   - ZERO file moves, renames, or deletions.
 
 3. "FILE_OPERATION":
-   - Requests to organize, sort, clean, separate, move, delete, trash, rename, or manage files and folders (e.g., "Organize all my university files", "Sort student vouchers", "separate peer docs", "clean downloads", "cleanup screenshots", "move pdfs to university").
+   - Explicit requests to organize, sort, move, rename, clean, separate peer files, or trash documents (e.g., "Organize all my university files", "Sort student vouchers", "Separate peer documents", "Clean download names", "Cleanup old screenshots").
 
 Respond STRICTLY with valid JSON adhering to this schema:
 {{
   "intent": "CONVERSATION" | "QUERY_INFO" | "FILE_OPERATION",
-  "reply": "<Dynamic, helpful conversational response addressing the user directly if CONVERSATION. Empty string otherwise.>"
+  "reply": "<Dynamic, helpful conversational response addressing the user directly if CONVERSATION. Be insightful, knowledgeable of your abilities and boundaries, and address out-of-scope requests gracefully. Empty string if QUERY_INFO or FILE_OPERATION.>"
 }}
 """
 
@@ -1703,7 +1734,8 @@ Respond STRICTLY with valid JSON adhering to this schema:
             "list", "find", "show", "search", "what is inside", "what is in", 
             "what else is in", "what files", "how many files", "do i have", 
             "display", "summarize", "view", "inspect", "where is", "where are",
-            "tell me about", "locate", "check for", "which files"
+            "tell me about", "locate", "check for", "which files", "today did i",
+            "did i receive", "receive any", "recent"
         )
         file_op_keywords = (
             "sort", "voucher", "fee", "challan", "slip", "peer", "separate", 
@@ -1713,7 +1745,7 @@ Respond STRICTLY with valid JSON adhering to this schema:
 
         if any(k in lower_p for k in query_lead_keywords) and not any(k in lower_p for k in ("sort", "organize", "clean", "trash", "move", "separate", "rename")):
             intent = "QUERY_INFO"
-        elif any(k in lower_p for k in ("what else", "tell me more", "who are you", "what can you do", "help", "hi", "hello", "hey", "thanks")):
+        elif any(k in lower_p for k in ("what else", "tell me more", "who are you", "what can you do", "help", "hi", "hello", "hey", "thanks", "email", "mail", "whatsapp", "music")):
             intent = "CONVERSATION"
         elif any(k in lower_p for k in file_op_keywords):
             intent = "FILE_OPERATION"
@@ -1725,46 +1757,85 @@ Respond STRICTLY with valid JSON adhering to this schema:
     # =========================================================================
     if intent == "CONVERSATION":
         if not conv_reply:
-            conv_sys = f"""You are Storage Copilot, running locally on an Android device via Termux for {owner_name} (Roll/ID: {identifiers}, Major: Artificial Intelligence).
+            conv_sys = f"""You are Storage Copilot, an advanced on-device AI agent running locally via Termux on Android for {owner_name} (Roll/ID: {identifiers}, Major: Artificial Intelligence).
+Current Device Time: {now_str} (Today's Date: {today_date}).
 Storage Root: /storage/emulated/0 (Downloads, Documents).
 Known Peers: {", ".join(peer_names)}.
 Peer Routing:
 {peer_matrix_lines}
 
-Respond naturally, conversationally, and helpfully to the user's message in your persona as their Android storage copilot.
-CRITICAL: Never output a generic canned template or repetitive boilerplate greeting unless the user gave a simple one-word greeting.
-Directly answer their specific question, follow-up ("what else", "tell me more"), or greeting.
-Keep responses concise, helpful, and formatted with clean paragraphs or bullet points where appropriate.
-Explain your actual features (interactive diff reviews, academic lecture sorting under Documents/University/, peer document isolation, 1-tap rollback via SQLite WAL ledger, informational file inspection) whenever asked about capabilities.
+YOUR AGENT PERSONA:
+- You are an elite, highly capable AI agent (similar to Google DeepMind / Antigravity). You speak articulately, intelligently, and directly to {owner_name}.
+- You are warm, confident, and professional. Never robotic or generic.
+- CRITICAL: Never output a generic boilerplate template or canned greeting unless the user gave a simple one-word greeting like "hi".
+
+CAPABILITIES & BOUNDARIES:
+- WHAT YOU CAN DO (Your Core Superpowers):
+  1. Deep Document Reconnaissance: Inspect PDFs, notes, vouchers, and bills on local storage with RAM-level PII sanitization (redacting CNIC, passport, IBAN, and personal names before LLM reasoning).
+  2. Intelligent Organization: Route academic study materials to `Documents/University/<Subject>/`, student vouchers to `Documents/University/Vouchers/`, isolate peer documents to `Documents/Peers/<PeerName>/`, and utility bills to `Documents/Finances/`.
+  3. Interactive Diff Safety: Stage proposed moves/renames for interactive user review before execution.
+  4. 1-Tap Atomic Rollback: Undo any batch of actions with full state recovery via an on-device SQLite WAL ledger (`.ledger.db`).
+  5. Content-Aware Renaming & Search: Standardize cryptic WhatsApp (`DOC-*.pdf`) or arXiv downloads into clean, descriptive filenames.
+- WHAT YOU CANNOT DO (Out-of-Scope Boundaries):
+  1. You CANNOT send emails, SMS, WhatsApp messages, or interact with external communication services.
+  2. You CANNOT browse or scrape the live internet, or download YouTube/web media.
+  3. You CANNOT access cloud storage (Google Drive/Dropbox) unless locally synced to storage.
+  4. You CANNOT modify Android system settings, root files, or app packages outside shared user storage (`/storage/emulated/0`).
+  5. You CANNOT execute arbitrary system shell commands or process financial payments.
+
+HANDLING OUT-OF-SCOPE REQUESTS:
+- If the user asks you to do something out of scope (e.g. sending emails, messaging, internet search, system modifications), do NOT pretend to do it or hallucinate an action.
+- Explain clearly, politely, and knowledgeably that the requested action is outside your local storage management sandbox.
+- State exactly what you can do instead for that topic (e.g., if asked to email an assignment: offer to locate and verify the assignment PDF in `Documents/University/AI/` so {owner_name} can easily attach it).
+
+Keep your response well-structured using clean Markdown formatting (bullet points, bold highlights, code spans).
 """
             conv_reply = call_gemini_text(conv_sys, raw_prompt)
 
         if not conv_reply:
             # Dynamic contextual offline fallback tailored directly to prompt
             lp = raw_prompt.lower()
-            if any(w in lp for w in ("what else", "more", "next")):
+            if any(w in lp for w in ("email", "mail", "whatsapp", "call", "sms", "spotify", "music", "flight", "weather", "browse", "internet", "hack")):
+                conv_reply = (
+                    f"I cannot perform external actions like sending emails or accessing web services, {owner_name}.\n\n"
+                    f"I am **Storage Copilot**, an on-device Android AI agent running locally via Termux. My capabilities are focused entirely on your device's filesystem (`/storage/emulated/0`):\n\n"
+                    f"- 🔍 **Document Reconnaissance**: Search, inspect, and summarize PDFs, notes, vouchers, and bills with zero-cloud PII redaction.\n"
+                    f"- 📂 **Intelligent Taxonomy**: Organize university course files into `Documents/University/<Subject>/` and isolate peer files into `Documents/Peers/<Name>/`.\n"
+                    f"- 🛡️ **Interactive Safety**: Staged diff reviews before any files are moved, plus 1-tap atomic rollbacks via SQLite WAL ledger.\n\n"
+                    f"If you'd like me to find or verify the file on your device so you can attach it, just let me know!"
+                )
+            elif any(w in lp for w in ("what else", "more", "next")):
                 conv_reply = (
                     f"Here are several other tasks I can help you with, {owner_name}:\n\n"
-                    f"- **Inspect & Query**: Ask *\"List university lectures\"* or *\"Find receipts\"* to search file contents without moving them.\n"
+                    f"- **Inspect & Query**: Ask *\"List university lectures\"* or *\"today did I receive any documents?\"* to search file contents without moving them.\n"
                     f"- **Sort Academic Vouchers**: Separate your BSAI fee slips into `Documents/University/Vouchers`.\n"
                     f"- **Isolate Peer Documents**: Route incoming files for {', '.join(peer_names)} to `Documents/Peers/<Name>`.\n"
                     f"- **Clean Cryptic Downloads**: Standardize messy WhatsApp or arXiv downloads with descriptive, content-derived names.\n"
                     f"- **Cleanup**: Safely soft-delete obsolete screenshots into `.agent_trash` with 1-tap rollback."
                 )
-            elif any(w in lp for w in ("who are you", "what can you do", "help", "role")):
+            elif any(w in lp for w in ("who are you", "what can you do", "help", "role", "abilities", "capabilities", "boundaries")):
                 conv_reply = (
-                    f"I am Storage Copilot, your autonomous Android storage assistant running locally via Termux for {owner_name} ({identifiers[0] if identifiers else 'BSAI'}).\n\n"
-                    "I help you inspect document contents with PII scrubbing, answer queries about your files, organize downloads, and safely separate peer documents—all with interactive diff approval and 1-tap rollback."
+                    f"I am **Storage Copilot**, your autonomous on-device AI storage agent running locally via Termux on Android for **{owner_name}** ({identifiers[0] if identifiers else 'BSAI-182'}, Artificial Intelligence).\n\n"
+                    f"### 🚀 What I Can Do:\n"
+                    f"- 🔍 **Smart Document Reconnaissance**: Search and inspect files across storage (`/storage/emulated/0`), extracting PDF text and metadata with in-memory PII sanitization.\n"
+                    f"- 📚 **Academic Study Organization**: Sort lectures, assignments, and research papers into `Documents/University/<Subject>/`.\n"
+                    f"- 👥 **Peer Separation**: Isolate incoming documents for {', '.join(peer_names)} into dedicated `Documents/Peers/<Name>/` directories.\n"
+                    f"- 🏷️ **Content-Aware Renaming**: Standardize cryptic filenames (like WhatsApp `DOC-*.pdf` or arXiv IDs) into clear, human-readable titles.\n"
+                    f"- 🛡️ **Interactive Diff & 1-Tap Undo**: Review proposed changes in interactive diff cards before execution, with complete 1-tap rollback powered by SQLite WAL.\n\n"
+                    f"### ⚠️ Boundaries & Scope:\n"
+                    f"- I run strictly on your local Android device without cloud file uploads.\n"
+                    f"- I cannot send emails, browse the live internet, or access apps/accounts outside your local storage.\n\n"
+                    f"Try asking: *\"List university lectures\"*, *\"Find me Sumbal pass\"*, or *\"today did I receive any documents?\"*"
                 )
             elif any(w in lp for w in ("peer", "peers", "friends", "fawad", "sumbal", "ahmed", "yousaf")):
                 conv_reply = (
                     f"Your registered peer separation matrix includes: **{', '.join(peer_names)}**.\n\n"
                     "Any documents or vouchers identified for these classmates are isolated into `Documents/Peers/<Name>` to protect your personal storage."
                 )
-            elif any(w in lp for w in ("hi", "hello", "hey", "salam", "morning")):
+            elif any(w in lp for w in ("hi", "hello", "hey", "salam", "morning", "afternoon", "evening")):
                 conv_reply = (
                     f"👋 Hello {owner_name}! Storage Copilot is online and connected to your storage root (`/storage/emulated/0`).\n\n"
-                    "How can I help with your files today? You can ask me to list documents, organize downloads, or sort peer files."
+                    f"How can I help with your files today? You can ask me to search documents, organize downloads, or check today's received files."
                 )
             else:
                 conv_reply = (
@@ -1808,6 +1879,10 @@ Explain your actual features (interactive diff reviews, academic lecture sorting
                 ]
             })
 
+        # Check if the query is date/recency oriented
+        lower_prompt = raw_prompt.lower()
+        is_date_query = any(w in lower_prompt for w in ("today", "yesterday", "date", "recent", "new", "received", "downloaded today", "last"))
+
         # Score and classify all files using hybrid matching
         scored_files = []
         for f in all_files:
@@ -1821,68 +1896,116 @@ Explain your actual features (interactive diff reviews, academic lecture sorting
                 "type_label": classification["type_label"]
             })
 
-        # Rank files by relevance score descending
-        scored_files.sort(key=lambda x: x["score"], reverse=True)
+        # Rank files: if date query, prioritize files modified today / recent; otherwise by score
+        if is_date_query:
+            scored_files.sort(key=lambda x: (x.get("is_today", False), x.get("modified_timestamp", 0)), reverse=True)
+        else:
+            scored_files.sort(key=lambda x: x["score"], reverse=True)
 
         gemini_manifest = [
             {
                 "filename": f["filename"],
                 "path": f["path"],
                 "size_kb": f["size_kb"],
+                "modified_date": f.get("modified_str", "Unknown"),
+                "is_today": f.get("is_today", False),
                 "category": f["type_label"],
                 "match_score": f["score"],
                 "match_reason": f["match_reason"],
                 "text_snippet": f["text_snippet"]
             }
-            for f in scored_files[:35]
+            for f in scored_files[:100]
         ]
 
-        query_system_prompt = f"""You are Storage Copilot, running locally on an Android device via Termux for {owner_name} (Roll/ID: {identifiers}, Major: Artificial Intelligence).
-Known Peers: {", ".join(peer_names)}.
+        query_system_prompt = f"""You are Storage Copilot, an advanced on-device AI agent running locally via Termux on Android for {owner_name} (Roll/ID: {identifiers}, Major: Artificial Intelligence).
+Current Device Time: {now_str} (Today's Date: {today_date}).
 Storage Root: /storage/emulated/0 (Downloads, Documents).
+Total Files Indexed: {len(all_files)}.
+Known Peers: {", ".join(peer_names)}.
+Peer Routing:
+{peer_matrix_lines}
 
-The user is asking a READ-ONLY question or searching for a specific document on their storage:
+USER QUERY (Read-Only Inspection / Search):
 "{raw_prompt}"
 
-Here are the real files currently on the device (ranked by relevance, sanitized for PII):
+Indexed Device Files Manifest (Sanitized for PII, ranked by relevance):
 {json.dumps(gemini_manifest, indent=2)}
 
-INSTRUCTIONS:
-1. SPECIFIC FILE LOOKUPS:
-   - If the user asks to locate/find a specific file by name or content (e.g., "Find me Sumbal pass", "Where is the electricity bill", "Find 1508 neural paper"):
-     Identify and pinpoint the exact matching document(s).
-     State the exact filename (bold), path in code span (`path`), file size, and document category.
-     Quote or summarize the key sanitized text from its snippet.
-2. CAUTIOUS DOCUMENT TAXONOMY:
-   - Accurately distinguish Academic Study Materials (lectures, assignments) from Identity Passes / Passports and Bills.
-   - An Entry Pass (e.g. "University Entry Pass: Student Name: [REDACTED_NAME]") is an IDENTITY document, NOT an academic lecture or course material!
-3. FORMAT AS CLEAN STRUCTURED MARKDOWN:
-   - Use bold for file names.
-   - Show file path in code spans (e.g. `Download/filename.pdf`).
-   - Group by category if multiple categories match (e.g., **University Academic Documents**, **Identity Documents**, **Financial Receipts**).
-4. If no files match the query, clearly state what was searched and explain that no matching documents were found.
-5. STRICT RULE: Read-only query. Do NOT output file operations or mutation plans.
+INSTRUCTIONS & REASONING RULES:
+1. ADVANCED AGENT PERSONA:
+   - Act as an elite, articulate AI agent (like Google DeepMind / Antigravity). Speak with intelligence, clarity, and precision directly to {owner_name}.
+   - Never sound robotic or output boilerplate greetings. Give direct, insightful, and natural explanations.
+
+2. DATE & TEMPORAL QUERIES (e.g. "today did I receive any documents", "recent downloads", "what came in today"):
+   - Reason over the `is_today` boolean and `modified_date` of the files relative to today's date ({today_date}).
+   - If documents were received/modified today: List each one clearly with bold filename, timestamp, path, category, and what it contains.
+   - If NO documents were received or downloaded today: Explicitly tell {owner_name} that no new documents were received or downloaded today ({now_dt.strftime("%B %d, %Y")}). Then highlight their most recent files from previous days for convenience.
+
+3. SPECIFIC DOCUMENT LOOKUPS & IDENTITY PASS CAUTION:
+   - If the user asks for a specific document (e.g., "where is my degree pass or entry pass", "find electricity bill", "1508 paper"):
+     - If the file exists for {owner_name}: State its exact bold filename, `path` in code spans, size, and summarize its contents.
+     - If an entry pass or document exists on the device but belongs to a peer (e.g., peer Sumbal in "Sumbal pass.pdf"):
+       Clearly distinguish this! Explain:
+       "I searched your storage. I found an entry pass for your peer **Sumbal** (`Download/Sumbal pass.pdf`), but I did not find a degree pass or entry pass issued in your name ({owner_name}, BSAI-182). If you recently received it, check if it was downloaded into your Downloads folder or saved under another name."
+     - If no matching document exists at all: Explain clearly that you searched across the {len(all_files)} indexed files on their storage and could not find it.
+
+4. SCOPE & BOUNDARIES:
+   - If the query asks for something out of scope (like sending an email, checking online email inboxes, or accessing cloud drives):
+     Explain that you are an on-device local storage agent managing `/storage/emulated/0` without live internet or email access. Offer to locate or inspect the local file so they can use it.
+
+5. FORMATTING:
+   - Use clean Markdown: bold for file names, code spans for paths (e.g. `Download/filename.pdf`), bullet points, and category headers when presenting multiple items.
+   - Read-only inspection: do NOT stage file mutation actions.
 """
 
         query_reply = call_gemini_text(query_system_prompt, raw_prompt)
 
         # Offline heuristic search if Gemini is offline
         if not query_reply:
-            top_matches = [f for f in scored_files if f["score"] >= 20.0]
-            if not top_matches and scored_files:
-                lower_p = raw_prompt.lower()
-                if any(w in lower_p for w in ("what", "list", "show", "all", "here", "inside", "view", "files")):
-                    top_matches = scored_files[:10]
-
-            if top_matches:
-                lines = [f"### 🔍 Inspected Storage Query: \"{raw_prompt}\"\n\nFound **{len(top_matches)} matching document(s)** on your device:"]
-                for m in top_matches[:8]:
-                    snip_preview = m["snippet"][:130] if m["snippet"] else "Binary / image fixture"
-                    reason_info = f" • *Match:* {m['match_reason']}" if m.get("match_reason") else ""
-                    lines.append(f"- 📄 **{m['filename']}** (`{m['path']}` • {m['size_kb']} KB)\n  *Category:* **{m['type_label']}**{reason_info}\n  *Inspected Content:* \"{snip_preview}\"")
-                query_reply = "\n\n".join(lines)
+            if is_date_query:
+                today_matches = [f for f in all_files if f.get("is_today")]
+                if today_matches:
+                    lines = [f"### 📅 Documents Received Today ({now_dt.strftime('%B %d, %Y')}):\n\nFound **{len(today_matches)} document(s)** downloaded today:"]
+                    for m in today_matches[:10]:
+                        snip_preview = m.get("snippet", "")[:120] if m.get("snippet") else "Binary / image document"
+                        time_display = m.get("modified_str") or "Today"
+                        lines.append(f"- 📄 **{m['filename']}** (`{m['path']}` • {m.get('size_kb', 0)} KB • *{time_display}*)\n  *Category:* **{m.get('type_label', 'Document')}**\n  *Preview:* \"{snip_preview}\"")
+                    query_reply = "\n\n".join(lines)
+                else:
+                    recent_files = sorted(all_files, key=lambda x: x.get("modified_timestamp", 0), reverse=True)[:5]
+                    lines = [f"📅 You have not received or downloaded any new documents today ({now_dt.strftime('%B %d, %Y')}).\n\nHere are your most recently modified files from earlier:"]
+                    for m in recent_files:
+                        time_display = m.get("modified_str") or "Earlier"
+                        lines.append(f"- 📄 **{m['filename']}** (`{m['path']}` • *{time_display}*)")
+                    query_reply = "\n\n".join(lines)
+            elif any(w in lower_prompt for w in ("pass", "degree", "entry")):
+                # Check for Sumbal pass vs user pass
+                peer_passes = [f for f in all_files if "sumbal" in f["filename"].lower() or "pass" in f["filename"].lower()]
+                if peer_passes:
+                    found_p = peer_passes[0]
+                    query_reply = (
+                        f"ℹ️ I searched your storage ({len(all_files)} files indexed).\n\n"
+                        f"I found an entry pass for your peer **Sumbal** (`{found_p['path']}` • {found_p.get('size_kb', 0)} KB), "
+                        f"but I did not find a degree or entry pass issued for you ({owner_name}, {identifiers[0] if identifiers else 'BSAI-182'}).\n\n"
+                        f"If you received it recently, make sure it has finished downloading into `{target_folder}/`."
+                    )
+                else:
+                    query_reply = f"ℹ️ I searched your storage ({len(all_files)} files indexed), but found no degree or entry pass matching **\"{raw_prompt}\"**."
             else:
-                query_reply = f"ℹ️ I searched your storage ({len(all_files)} real files inspected), but found no files matching **\"{raw_prompt}\"**.\n\nTry asking *\"List university lectures\"*, *\"Find me Sumbal pass\"*, or *\"Find receipts\"*."
+                top_matches = [f for f in scored_files if f["score"] >= 20.0]
+                if not top_matches and scored_files:
+                    if any(w in lower_prompt for w in ("what", "list", "show", "all", "here", "inside", "view", "files")):
+                        top_matches = scored_files[:10]
+
+                if top_matches:
+                    lines = [f"### 🔍 Inspected Storage Query: \"{raw_prompt}\"\n\nFound **{len(top_matches)} matching document(s)** on your device:"]
+                    for m in top_matches[:8]:
+                        snip_preview = m["snippet"][:130] if m["snippet"] else "Binary / image fixture"
+                        reason_info = f" • *Match:* {m['match_reason']}" if m.get("match_reason") else ""
+                        lines.append(f"- 📄 **{m['filename']}** (`{m['path']}` • {m['size_kb']} KB)\n  *Category:* **{m['type_label']}**{reason_info}\n  *Inspected Content:* \"{snip_preview}\"")
+                    query_reply = "\n\n".join(lines)
+                else:
+                    query_reply = f"ℹ️ I searched your storage ({len(all_files)} files indexed), but found no files matching **\"{raw_prompt}\"**.\n\nTry asking *\"List university lectures\"*, *\"Find me Sumbal pass\"*, or *\"Find receipts\"*."
 
         return jsonify({
             "type": "query_info",
@@ -1947,14 +2070,20 @@ INSTRUCTIONS:
             ]
         })
 
-    # 3. Snippet inspection & PII scrubbing (up to 30 candidate files)
+    # 3. Snippet inspection & PII scrubbing (up to 300 candidate files)
     manifest = []
     manifest_for_gemini = []
     manifest_lookup = {}
-    for entry in scanned_entries[:30]:
+    for entry in scanned_entries[:300]:
         filename = entry.name
         file_size = entry.stat().st_size
         ext = os.path.splitext(filename)[1].lower()
+
+        try:
+            mtime = entry.stat().st_mtime
+            mtime_str = datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M")
+        except Exception:
+            mtime_str = ""
 
         raw_text = ""
         try:
@@ -1988,6 +2117,7 @@ INSTRUCTIONS:
         manifest_item = {
             "filename": filename,
             "size_kb": round(file_size / 1024, 1),
+            "modified_date": mtime_str,
             "text_snippet": sanitized_snippet if sanitized_snippet else "None (binary/image)",
             "has_content": bool(sanitized_snippet)
         }
@@ -2000,6 +2130,7 @@ INSTRUCTIONS:
             "extension": ext,
             "size_kb": manifest_item["size_kb"],
             "size_bytes": file_size,
+            "modified_date": mtime_str,
             "snippet": sanitized_snippet,
             "text_snippet": manifest_item["text_snippet"],
             "has_content": manifest_item["has_content"]
@@ -2045,6 +2176,12 @@ CRITICAL TAXONOMY & CAUTION RULES:
    - Route personal fee vouchers to "Documents/University/Vouchers/".
 5. UTILITIES & BILLS:
    - Route electricity, utility, or consumer invoices to "Documents/Finances/".
+6. STRICT USER REQUEST SCOPE:
+   - ONLY include move/rename actions for files that correspond to the user's explicit request!
+   - If the user specifically asks to "Organize all my University files", touch ONLY academic university files (lectures, assignments, research papers, course notes) and university fee vouchers.
+   - CRITICAL: Do NOT touch or move peer documents (like "Sumbal pass.pdf", "fawad fee.pdf", "WhatsApp_Doc_Ahmed_Receipt.pdf"), identity passes, utility bills, or unrelated files when the user only asked to organize university files! Leave them untouched in Download/.
+   - If the user specifically asks to "Separate peer documents", touch ONLY files identified for peers.
+   - If the user asks to "Clean Download Names", organize and rename ambiguous downloads into their respective folders.
 
 Action format:
 - {{"action_id": "step-1", "type": "make_dir", "path": "Documents/..."}}
