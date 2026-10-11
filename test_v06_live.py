@@ -23,11 +23,11 @@ os.makedirs(os.path.join(server.BASE_DIR, "Download"), exist_ok=True)
 os.makedirs(os.path.join(server.BASE_DIR, "Documents"), exist_ok=True)
 server.init_db()
 
-# Start test server
-srv = make_server("127.0.0.1", 8989, server.app)
+# Start test server on dynamic free port
+srv = make_server("127.0.0.1", 0, server.app)
 thread = threading.Thread(target=srv.serve_forever, daemon=True)
 thread.start()
-BASE_URL = "http://127.0.0.1:8989"
+BASE_URL = f"http://127.0.0.1:{srv.server_port}"
 
 def test_suite():
     passed = 0

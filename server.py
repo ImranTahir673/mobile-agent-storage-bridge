@@ -511,7 +511,14 @@ def score_document_match(query: str, doc: dict) -> tuple[float, str]:
 
     fn = doc.get("filename", "").lower()
     fn_stem = os.path.splitext(fn)[0].lower()
-    target_tokens = [t for t in re.findall(r"\w+", cleaned_target) if len(t) > 1 and t not in ("the", "all", "and", "for", "with", "doc", "pdf", "file")]
+    query_stopwords = {
+        "the", "all", "and", "for", "with", "doc", "pdf", "file", "files", "to", "in", "on", 
+        "at", "by", "from", "some", "suggestions", "suggestion", "my", "me", "your", "our", 
+        "fikes", "organize", "organization", "clean", "sort", "please", "would", "could", 
+        "should", "want", "like", "any", "this", "that", "these", "those", "how", "what", 
+        "which", "where", "can", "tell", "give", "ideas", "recommend", "recommendation"
+    }
+    target_tokens = [t for t in re.findall(r"\w+", cleaned_target) if len(t) > 1 and t not in query_stopwords]
 
     snip = (doc.get("snippet") or doc.get("text_snippet") or "").lower()
     score = 0.0
@@ -1468,7 +1475,7 @@ def call_gemini_json(system_prompt: str, user_prompt: str) -> dict:
     for model in GEMINI_MODELS:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
         try:
-            resp = requests.post(url, json=payload, timeout=20)
+            resp = requests.post(url, json=payload, timeout=30)
             if resp.status_code == 200:
                 data = resp.json()
                 candidates = data.get("candidates", [])
@@ -1503,7 +1510,7 @@ def call_gemini_text(system_prompt: str, user_prompt: str) -> str:
     for model in GEMINI_MODELS:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
         try:
-            resp = requests.post(url, json=payload, timeout=20)
+            resp = requests.post(url, json=payload, timeout=30)
             if resp.status_code == 200:
                 data = resp.json()
                 candidates = data.get("candidates", [])
@@ -1724,6 +1731,7 @@ YOUR AGENT PERSONA & BOUNDARIES:
 CLASSIFY THE USER'S PROMPT INTO EXACTLY ONE OF THREE INTENTS:
 
 1. "CONVERSATION":
+   - Suggestions, advice, ideas, recommendations, or questions on how to organize/clean storage (e.g. "Some suggestions for my files to organize", "What do you suggest?", "How should I organize my university materials?", "Give me ideas to clean up my downloads", "What should I do?"). NOTE: Even if words like 'organize', 'sort', or 'files' appear in the prompt, if the user is asking for advice/suggestions/recommendations, classify as CONVERSATION! The user wants an intelligent conversational RESPONSE first, NOT an immediate mutation plan.
    - Greetings, casual chat, check-ins ("Hi", "Hello", "Hey", "Good morning", "Salam")
    - Questions about your identity, capabilities, or how you work ("Who are you?", "What can you do?", "Help", "What are your boundaries?")
    - Open conversational follow-ups ("What else?", "Tell me more", "Thanks")
@@ -1734,12 +1742,12 @@ CLASSIFY THE USER'S PROMPT INTO EXACTLY ONE OF THREE INTENTS:
    - ZERO file moves, renames, or deletions.
 
 3. "FILE_OPERATION":
-   - Explicit requests to organize, sort, move, rename, clean, separate peer files, or trash documents (e.g., "Organize all my university files", "Sort student vouchers", "Separate peer documents", "Clean download names", "Cleanup old screenshots").
+   - Explicit commands or instructions to take action, execute, or stage file moves/renames/deletions right now (e.g., "Organize all my university files", "Sort student vouchers", "Separate peer documents", "Clean download names", "Cleanup old screenshots", "Move my CV to Personal", "Yes, create an organization plan").
 
 Respond STRICTLY with valid JSON adhering to this schema:
 {{
   "intent": "CONVERSATION" | "QUERY_INFO" | "FILE_OPERATION",
-  "reply": "<Dynamic, helpful conversational response addressing the user directly if CONVERSATION. Be insightful, knowledgeable of your abilities and boundaries, and address out-of-scope requests gracefully. Empty string if QUERY_INFO or FILE_OPERATION.>"
+  "reply": "<Dynamic, helpful conversational response addressing the user directly if CONVERSATION. If the user asked for suggestions/advice, provide a structured, intelligent recommendation tailored to Imran Tahir (BSAI student). Be insightful, knowledgeable of your abilities and boundaries, and address out-of-scope requests gracefully. Empty string if QUERY_INFO or FILE_OPERATION.>"
 }}
 """
 
@@ -1750,6 +1758,12 @@ Respond STRICTLY with valid JSON adhering to this schema:
     # Offline / Heuristic Fallback for Stage 1:
     if not intent:
         lower_p = raw_prompt.lower()
+        advice_lead_keywords = (
+            "suggestion", "suggestions", "suggest", "recommend", "recommendation",
+            "recommendations", "idea", "ideas", "advice", "tip", "tips", "how to",
+            "how should", "how can", "what do you think", "what should i", "guide me",
+            "options", "propose some ideas", "any ideas"
+        )
         query_lead_keywords = (
             "list", "find", "show", "search", "what is inside", "what is in", 
             "what else is in", "what files", "how many files", "do i have", 
@@ -1763,7 +1777,9 @@ Respond STRICTLY with valid JSON adhering to this schema:
             "organize", "rename", "isolate", "structure"
         )
 
-        if any(k in lower_p for k in query_lead_keywords) and not any(k in lower_p for k in ("sort", "organize", "clean", "trash", "move", "separate", "rename")):
+        if any(k in lower_p for k in advice_lead_keywords):
+            intent = "CONVERSATION"
+        elif any(k in lower_p for k in query_lead_keywords) and not any(k in lower_p for k in ("sort", "organize", "clean", "trash", "move", "separate", "rename")):
             intent = "QUERY_INFO"
         elif any(k in lower_p for k in ("what else", "tell me more", "who are you", "what can you do", "help", "hi", "hello", "hey", "thanks", "email", "mail", "whatsapp", "music")):
             intent = "CONVERSATION"
@@ -1803,6 +1819,15 @@ CAPABILITIES & BOUNDARIES:
   4. You CANNOT modify Android system settings, root files, or app packages outside shared user storage (`/storage/emulated/0`).
   5. You CANNOT execute arbitrary system shell commands or process financial payments.
 
+ADVICE & RECOMMENDATIONS:
+- If {owner_name} is asking for suggestions, ideas, or recommendations on how to organize his files:
+  Provide an articulate, structured recommendation explaining 4 key areas:
+  1. Academic Courseware -> Documents/University/<Subject>/
+  2. Tuition & Vouchers -> Documents/University/Vouchers/
+  3. Peer Separation -> Documents/Peers/<Name>/ (for {", ".join(peer_names)})
+  4. Cryptic WhatsApp & Generic Downloads -> Clean content-derived naming.
+  Explain each clearly and invite him to pick which one to execute (e.g., "Organize all my university files" or "Sort student vouchers").
+
 HANDLING OUT-OF-SCOPE REQUESTS:
 - If the user asks you to do something out of scope (e.g. sending emails, messaging, internet search, system modifications), do NOT pretend to do it or hallucinate an action.
 - Explain clearly, politely, and knowledgeably that the requested action is outside your local storage management sandbox.
@@ -1815,7 +1840,17 @@ Keep your response well-structured using clean Markdown formatting (bullet point
         if not conv_reply:
             # Dynamic contextual offline fallback tailored directly to prompt
             lp = raw_prompt.lower()
-            if any(w in lp for w in ("email", "mail", "whatsapp", "call", "sms", "spotify", "music", "flight", "weather", "browse", "internet", "hack")):
+            if any(w in lp for w in ("suggestion", "suggest", "recommend", "idea", "how should i", "how to organize", "advice", "tip", "options", "fikes")):
+                conv_reply = (
+                    f"Here are my top recommendations for organizing your storage, {owner_name}:\n\n"
+                    f"1. 📚 **Academic Courseware**: Consolidate university lecture slides, assignments, and AI notes into `Documents/University/<Subject>/` (e.g. `Documents/University/AI/`).\n"
+                    f"2. 🧾 **Tuition & Vouchers**: Consolidate semester fee vouchers into `Documents/University/Vouchers/`.\n"
+                    f"3. 👥 **Peer Separation**: Automatically isolate shared classmate documents ({', '.join(peer_names)}) into `Documents/Peers/<PeerName>/` so they don't clutter your personal files.\n"
+                    f"4. 🏷️ **Clean WhatsApp & Generic Downloads**: Rename cryptic `DOC-*.pdf` files with descriptive, content-derived titles.\n"
+                    f"5. 🗑️ **Storage Cleanup**: Soft-delete temporary cache files and obsolete screenshots into `.agent_trash` with 1-tap rollback.\n\n"
+                    f"Whenever you'd like to proceed with any of these, just let me know (for example: *\"Organize all my university files\"* or *\"Sort student vouchers\"*), and I will generate an Action Plan for your review!"
+                )
+            elif any(w in lp for w in ("email", "mail", "whatsapp", "call", "sms", "spotify", "music", "flight", "weather", "browse", "internet", "hack")):
                 conv_reply = (
                     f"I cannot perform external actions like sending emails or accessing web services, {owner_name}.\n\n"
                     f"I am **Storage Copilot**, an on-device Android AI agent running locally via Termux. My capabilities are focused entirely on your device's filesystem (`/storage/emulated/0`):\n\n"
@@ -2112,16 +2147,16 @@ INSTRUCTIONS & REASONING RULES:
                     import pypdf
                     reader = pypdf.PdfReader(entry.path)
                     parts = [p.extract_text() or "" for p in reader.pages[:2]]
-                    raw_text = "\n".join(parts)[:600]
+                    raw_text = "\n".join(parts)[:250]
                 except Exception:
                     try:
                         with open(entry.path, "r", encoding="utf-8", errors="replace") as f:
-                            raw_text = f.read(600)
+                            raw_text = f.read(250)
                     except Exception:
                         raw_text = ""
             elif ext in (".txt", ".md", ".json", ".csv", ".tmp", ".log", ".xml", ".html"):
                 with open(entry.path, "r", encoding="utf-8", errors="replace") as f:
-                    raw_text = f.read(600)
+                    raw_text = f.read(250)
             else:
                 raw_text = ""
         except Exception:
@@ -2174,6 +2209,11 @@ Define a unified JSON contract for your responses:
   "message": "Conversational reply or plan summary",
   "actions": [ ... ] // empty if type == "conversation"
 }}
+
+CRITICAL INTENT HANDLING:
+- If the user is asking for suggestions, ideas, advice, recommendations, or options (e.g., "Some suggestions for my files to organize", "What do you suggest?", "How should I organize?"):
+  DO NOT CREATE ACTIONS! Return "type": "conversation", "actions": [], and provide articulate, thoughtful recommendations in "message" explaining how they can organize their files.
+- ONLY return "type": "plan" with move/rename actions if the user gives an explicit command or instruction to organize or modify files (e.g. "Organize all my university files", "Sort student vouchers").
 
 IMPORTANT: The candidates below are the ACTUAL files currently sitting on disk.
 Reason SEMANTICALLY over each candidate's filename, size_kb, text_snippet, and has_content to decide the appropriate operation:
@@ -2474,12 +2514,16 @@ Available Real Files Manifest ({len(manifest)} real files on disk):
                 step_idx += 1
 
     else:
-        # Check if user prompt targets a specific document by name
+        # Check if user prompt targets a specific document by name with an action verb
+        action_verbs = ("move", "rename", "put", "transfer", "trash", "delete", "file", "place")
+        has_action_intent = any(v in lower_p for v in action_verbs) or "." in raw_prompt
+
         specific_matches = []
-        for item in manifest:
-            m_score, m_reason = score_document_match(raw_prompt, item)
-            if m_score >= 35.0:
-                specific_matches.append((m_score, item, m_reason))
+        if has_action_intent:
+            for item in manifest:
+                m_score, m_reason = score_document_match(raw_prompt, item)
+                if m_score >= 75.0:
+                    specific_matches.append((m_score, item, m_reason))
 
         if specific_matches:
             specific_matches.sort(key=lambda x: x[0], reverse=True)
@@ -2504,27 +2548,28 @@ Available Real Files Manifest ({len(manifest)} real files on disk):
                 })
                 step_idx += 1
         else:
-            keywords = [w for w in re.split(r"\W+", lower_p) if len(w) > 2 and w not in ("the", "all", "and", "for", "files", "place", "documents")]
-            plan_desc = f"Organize files matching: '{raw_prompt}'"
-            for item in manifest:
-                fn = item["name"].lower()
-                snip = item["snippet"].lower()
-                classification = classify_document(item["name"], item["snippet"])
-                if any(k in fn or k in snip for k in keywords):
-                    target_d = classification["target_dir"]
-                    clean_title = classification["suggested_title"]
-                    if target_d not in created_dirs:
-                        plan_actions.append({"action_id": f"step-{step_idx}", "type": "make_dir", "path": target_d})
-                        created_dirs.add(target_d)
-                        step_idx += 1
-                    plan_actions.append({
-                        "action_id": f"step-{step_idx}",
-                        "type": "move",
-                        "source": item["path"],
-                        "destination": f"{target_d}/{clean_title}",
-                        "rationale": f"Matched criteria for '{raw_prompt}'"
-                    })
-                    step_idx += 1
+            # Prompt is general or advice-seeking: provide articulate guidance response, ZERO unneeded file mutations
+            return jsonify({
+                "type": "conversation",
+                "message": (
+                    f"I've inspected your storage in '{target_folder}/' ({len(manifest)} real files detected).\n\n"
+                    f"Here are tailored suggestions to organize your storage, {owner_name}:\n\n"
+                    f"- 📚 **University Courseware**: Consolidate AI lectures and coursework into `Documents/University/<Subject>/`.\n"
+                    f"- 🧾 **Fee Vouchers**: Sort your tuition challans into `Documents/University/Vouchers/`.\n"
+                    f"- 👥 **Peer Separation**: Isolate files belonging to {', '.join(peer_names)} into `Documents/Peers/<Name>/`.\n"
+                    f"- 🏷️ **Clean Cryptic Downloads**: Standardize messy WhatsApp downloads (`DOC-*.pdf`) into descriptive names.\n"
+                    f"- 🗑️ **Cleanup**: Soft-delete temporary cache files and old screenshots into `.agent_trash`.\n\n"
+                    f"Whenever you'd like me to formulate a plan, simply ask (e.g., *\"Organize all my university files\"* or *\"Sort student vouchers\"*)!"
+                ),
+                "version": APP_VERSION,
+                "actions": [],
+                "quick_chips": [
+                    "📋 Sort Student Vouchers",
+                    "👥 Separate Peer Documents",
+                    "🏷️ Clean Download Names",
+                    "🗑️ Cleanup Old Screenshots"
+                ]
+            })
 
     if not plan_actions:
         return jsonify({
