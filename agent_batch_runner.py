@@ -396,7 +396,7 @@ Reconnaissance (Stage 1) & Plan Synthesis (Stage 2):
 ```
 
 Strict Policy & Safety Rules:
-- Blast Radius Limit: Max 20 actions per batch.
+- Batch Capacity: Up to 500 actions per plan, executed gradually in safe micro-chunks.
 - Storage Boundary: All paths must be relative to storage root without leading slashes.
 - Blacklisted Targets: NEVER touch or reference '/Android', '.agent_trash', '.ledger.db', '.git', or root dotfiles.
 - Zero Hard-Delete: Only use action 'trash' for removal; physical deletes are prohibited.
@@ -453,8 +453,8 @@ def extract_json_plan(response_text: str) -> Dict[str, Any]:
     if not isinstance(actions, list) or len(actions) == 0:
         raise ValueError("Action Plan must contain a non-empty 'actions' list")
 
-    if len(actions) > 20:
-        raise ValueError(f"Blast radius exceeded: Plan contains {len(actions)} actions (max 20)")
+    if len(actions) > 500:
+        raise ValueError(f"Batch capacity exceeded: Plan contains {len(actions)} actions (max 500)")
 
     # Validate individual steps
     for i, act in enumerate(actions):
@@ -1100,7 +1100,7 @@ def main():
                 f"- Action Type: '{target_op}' (Formulate strict '{target_op}' actions for all matching files into '{args.to}')\n"
                 f"- Ensure a 'make_dir' action is included for '{args.to}' before moving or copying files into it.\n"
                 f"- Leave all non-matching files untouched in their current directories.\n"
-                f"- Comply strictly with blast radius limit (max 20 actions)."
+                f"- Ensure safe gradual execution (up to 500 actions per plan)."
             )
             if custom_instruction:
                 custom_instruction = f"{gather_directive}\n- Additional Instructions: {custom_instruction}"

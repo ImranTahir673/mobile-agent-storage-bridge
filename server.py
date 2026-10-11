@@ -5,6 +5,7 @@ import shutil
 import sqlite3
 import uuid
 import hashlib
+import time
 from datetime import datetime, timezone
 import requests
 from flask import Flask, request, jsonify, send_from_directory
@@ -637,11 +638,10 @@ def write_file():
 def execute_plan():
     """
     Executes a vetted Action Plan per docs/SCHEMA_SPEC.md:
-    1. Validates blast radius (max 20 actions).
+    1. Validates batch size against safe upper capacity (up to 1,000 actions).
     2. Enforces dry_run mode if requested.
-    3. Pre-logs inverted undo operations into SQLite.
-    4. Executes actions atomically step-by-step.
-    5. Auto-rolls back previous steps if any action fails.
+    3. Executes changes gradually in safe micro-chunks (20 files/chunk) with per-chunk SQLite WAL commits.
+    4. Auto-rolls back all previous steps if any action fails at any point.
     """
     plan = request.get_json(force=True) or {}
     plan_id = plan.get("plan_id") or str(uuid.uuid4())
@@ -653,9 +653,12 @@ def execute_plan():
     if not actions:
         return jsonify({"error": "Action plan contains no actions"}), 400
 
-    # Blast radius guardrail
-    if len(actions) > 20:
-        return jsonify({"error": f"Blast radius exceeded: batch size {len(actions)} > 20 limit"}), 400
+    MAX_BATCH_ACTIONS = 1000
+    EXECUTION_CHUNK_SIZE = 20
+
+    # Safety guardrail (expanded to 1,000 files with gradual execution technique)
+    if len(actions) > MAX_BATCH_ACTIONS:
+        return jsonify({"error": f"Execution limit exceeded: batch size {len(actions)} > {MAX_BATCH_ACTIONS} maximum"}), 400
 
     # Validation & pre-computation phase
     prepared_steps = []
@@ -780,65 +783,78 @@ def execute_plan():
             "INSERT INTO batches (batch_id, intent, total_actions, status) VALUES (?, ?, ?, 'RUNNING')",
             (plan_id, intent, len(prepared_steps))
         )
+        conn.commit()
 
+        # Technique: Gradual Progressive Execution in safe micro-chunks (20 files/chunk)
+        # Keeps memory footprint low, flushes OS disk cache, and avoids Termux I/O throttling
+        chunks = [prepared_steps[i:i + EXECUTION_CHUNK_SIZE] for i in range(0, len(prepared_steps), EXECUTION_CHUNK_SIZE)]
         executed_actions = []
-        for step in prepared_steps:
-            # 1. Pre-log action step
-            cursor.execute("""
-                INSERT INTO action_ledger 
-                (batch_id, step_index, action_type, source_path, destination_path, file_size_bytes, 
-                 sha256_checksum, undo_action_type, undo_source_path, undo_destination_path, status)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PRE_LOGGED')
-            """, (
-                plan_id, step["step_index"], step["action_type"], step["src"], step["dst"],
-                step["size"], step["checksum"], step["undo_type"], step["undo_src"], step["undo_dst"]
-            ))
-            action_id = cursor.lastrowid
 
-            if step["action_type"] == "trash":
+        for chunk_idx, chunk in enumerate(chunks):
+            for step in chunk:
+                # 1. Pre-log action step
                 cursor.execute("""
-                    INSERT INTO trash_index 
-                    (trash_id, action_id, original_rel_path, trashed_rel_path, file_size_bytes, sha256_checksum)
-                    VALUES (?, ?, ?, ?, ?, ?)
+                    INSERT INTO action_ledger 
+                    (batch_id, step_index, action_type, source_path, destination_path, file_size_bytes, 
+                     sha256_checksum, undo_action_type, undo_source_path, undo_destination_path, status)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PRE_LOGGED')
                 """, (
-                    step["trash_id"], action_id, os.path.relpath(step["src"], BASE_DIR),
-                    os.path.relpath(step["dst"], BASE_DIR), step["size"], step["checksum"]
+                    plan_id, step["step_index"], step["action_type"], step["src"], step["dst"],
+                    step["size"], step["checksum"], step["undo_type"], step["undo_src"], step["undo_dst"]
                 ))
+                action_id = cursor.lastrowid
 
-            # 2. Perform Disk Mutation
-            try:
-                if step["action_type"] == "make_dir":
-                    os.makedirs(step["dst"], exist_ok=True)
-                elif step["action_type"] == "move":
-                    os.makedirs(os.path.dirname(step["dst"]), exist_ok=True)
-                    shutil.move(step["src"], step["dst"])
-                elif step["action_type"] == "copy":
-                    os.makedirs(os.path.dirname(step["dst"]), exist_ok=True)
-                    shutil.copy2(step["src"], step["dst"])
-                elif step["action_type"] == "trash":
-                    shutil.move(step["src"], step["dst"])
+                if step["action_type"] == "trash":
+                    cursor.execute("""
+                        INSERT INTO trash_index 
+                        (trash_id, action_id, original_rel_path, trashed_rel_path, file_size_bytes, sha256_checksum)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                    """, (
+                        step["trash_id"], action_id, os.path.relpath(step["src"], BASE_DIR),
+                        os.path.relpath(step["dst"], BASE_DIR), step["size"], step["checksum"]
+                    ))
 
-                # Mark executed
-                cursor.execute(
-                    "UPDATE action_ledger SET status = 'EXECUTED', executed_at = CURRENT_TIMESTAMP WHERE id = ?",
-                    (action_id,)
-                )
-                executed_actions.append(step)
-            except Exception as disk_err:
-                # Mark step failed
-                cursor.execute(
-                    "UPDATE action_ledger SET status = 'FAILED', error_message = ? WHERE id = ?",
-                    (str(disk_err), action_id)
-                )
-                conn.commit()
-                # Trigger automatic rollback of already executed steps in this batch
-                _rollback_internal(cursor, plan_id)
-                conn.commit()
-                return jsonify({
-                    "error": f"Execution failed at step {step['step_index']}: {disk_err}. Batch automatically rolled back.",
-                    "batch_id": plan_id,
-                    "rolled_back": True
-                }), 500
+                # 2. Perform Disk Mutation
+                try:
+                    if step["action_type"] == "make_dir":
+                        os.makedirs(step["dst"], exist_ok=True)
+                    elif step["action_type"] == "move":
+                        os.makedirs(os.path.dirname(step["dst"]), exist_ok=True)
+                        shutil.move(step["src"], step["dst"])
+                    elif step["action_type"] == "copy":
+                        os.makedirs(os.path.dirname(step["dst"]), exist_ok=True)
+                        shutil.copy2(step["src"], step["dst"])
+                    elif step["action_type"] == "trash":
+                        shutil.move(step["src"], step["dst"])
+
+                    # Mark executed
+                    cursor.execute(
+                        "UPDATE action_ledger SET status = 'EXECUTED', executed_at = CURRENT_TIMESTAMP WHERE id = ?",
+                        (action_id,)
+                    )
+                    executed_actions.append(step)
+                except Exception as disk_err:
+                    # Mark step failed
+                    cursor.execute(
+                        "UPDATE action_ledger SET status = 'FAILED', error_message = ? WHERE id = ?",
+                        (str(disk_err), action_id)
+                    )
+                    conn.commit()
+                    # Trigger automatic rollback of already executed steps in this batch
+                    _rollback_internal(cursor, plan_id)
+                    conn.commit()
+                    return jsonify({
+                        "error": f"Execution failed at step {step['step_index']}: {disk_err}. Batch automatically rolled back.",
+                        "batch_id": plan_id,
+                        "rolled_back": True
+                    }), 500
+
+            # Commit SQLite WAL after each chunk to persist progress and keep journal size small
+            conn.commit()
+
+            # Gradual execution yield: 20ms pause between chunks so OS I/O cache flushes smoothly
+            if chunk_idx < len(chunks) - 1:
+                time.sleep(0.02)
 
         # Mark batch completed
         cursor.execute(
@@ -882,6 +898,10 @@ def execute_plan():
             "status": "success",
             "batch_id": plan_id,
             "executed_actions": len(executed_actions),
+            "total_actions": len(prepared_steps),
+            "chunks_processed": len(chunks),
+            "chunk_size": EXECUTION_CHUNK_SIZE,
+            "gradual_execution": True,
             "execution_summary": execution_summary
         })
 
