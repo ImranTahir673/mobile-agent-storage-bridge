@@ -418,14 +418,21 @@ document.addEventListener('DOMContentLoaded', () => {
     // Header
     const header = document.createElement('div');
     header.className = 'diff-header';
+    const isLargeBatch = actions.length > 20;
     header.innerHTML = `
       <div class="diff-title-row">
         <div class="diff-title">
           <span>Action Plan Proposal</span>
           <span class="diff-count-badge" id="diff-badge-count">${actions.length} Actions</span>
+          ${isLargeBatch ? `<span class="batch-strategy-tag" style="background: rgba(16, 185, 129, 0.15); color: #34D399; font-size: 11px; padding: 2px 8px; border-radius: 9999px; border: 1px solid rgba(16, 185, 129, 0.3); font-weight: 500;">⚡ Gradual Execution: Chunks of 20</span>` : ''}
         </div>
       </div>
       <div class="diff-desc">${escapeHtml(plan.description || 'Filesystem reorganization')}</div>
+      <div class="diff-selection-controls" style="display: flex; gap: 8px; margin-top: 8px;">
+        <button class="pill-btn select-all-btn" id="btn-select-all-${plan.plan_id}" style="background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.12); color: var(--text-secondary); font-size: 11px; padding: 3px 10px; border-radius: 6px; cursor: pointer;">Select All (${actions.length})</button>
+        ${isLargeBatch ? `<button class="pill-btn select-20-btn" id="btn-select-20-${plan.plan_id}" style="background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.12); color: var(--text-secondary); font-size: 11px; padding: 3px 10px; border-radius: 6px; cursor: pointer;">Select First 20</button>` : ''}
+        <button class="pill-btn deselect-all-btn" id="btn-deselect-all-${plan.plan_id}" style="background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.12); color: var(--text-secondary); font-size: 11px; padding: 3px 10px; border-radius: 6px; cursor: pointer;">Deselect All</button>
+      </div>
     `;
     container.appendChild(header);
 
@@ -464,6 +471,51 @@ document.addEventListener('DOMContentLoaded', () => {
 
     approveBtn.addEventListener('click', () => executeApprovedActions(container, plan));
     rejectBtn.addEventListener('click', () => rejectPlan(container, plan));
+
+    // Selection Controls Listeners
+    const btnSelectAll = header.querySelector(`#btn-select-all-${plan.plan_id}`);
+    const btnSelect20 = header.querySelector(`#btn-select-20-${plan.plan_id}`);
+    const btnDeselectAll = header.querySelector(`#btn-deselect-all-${plan.plan_id}`);
+
+    if (btnSelectAll) {
+      btnSelectAll.addEventListener('click', () => {
+        state.selectedActionIds.clear();
+        actions.forEach(a => state.selectedActionIds.add(a.action_id));
+        list.querySelectorAll('.diff-card').forEach(c => {
+          c.classList.remove('excluded');
+          c.classList.add('selected');
+        });
+        updateDiffActionBarCount();
+      });
+    }
+
+    if (btnSelect20) {
+      btnSelect20.addEventListener('click', () => {
+        state.selectedActionIds.clear();
+        actions.slice(0, 20).forEach(a => state.selectedActionIds.add(a.action_id));
+        list.querySelectorAll('.diff-card').forEach((c, idx) => {
+          if (idx < 20) {
+            c.classList.remove('excluded');
+            c.classList.add('selected');
+          } else {
+            c.classList.remove('selected');
+            c.classList.add('excluded');
+          }
+        });
+        updateDiffActionBarCount();
+      });
+    }
+
+    if (btnDeselectAll) {
+      btnDeselectAll.addEventListener('click', () => {
+        state.selectedActionIds.clear();
+        list.querySelectorAll('.diff-card').forEach(c => {
+          c.classList.remove('selected');
+          c.classList.add('excluded');
+        });
+        updateDiffActionBarCount();
+      });
+    }
   }
 
   function createDiffCardElement(act) {
@@ -602,7 +654,12 @@ document.addEventListener('DOMContentLoaded', () => {
     const rejectBtn = container.querySelector('#reject-plan-btn');
     if (approveBtn) {
       approveBtn.disabled = true;
-      approveBtn.innerHTML = `<span>Executing atomically...</span>`;
+      if (selectedActions.length > 20) {
+        const estChunks = Math.ceil(selectedActions.length / 20);
+        approveBtn.innerHTML = `<span>⚡ Applying ${selectedActions.length} changes gradually (${estChunks} micro-chunks)...</span>`;
+      } else {
+        approveBtn.innerHTML = `<span>Executing atomically...</span>`;
+      }
     }
     if (rejectBtn) rejectBtn.style.display = 'none';
 
@@ -634,7 +691,10 @@ document.addEventListener('DOMContentLoaded', () => {
       // Render interactive Execution Success Card with Before & After Audit View
       renderExecutionSuccess(container, result);
 
-      showToast(`✓ Batch #${result.batch_id.substring(0, 8)} executed! (1-Tap Undo active)`, 'success', 4000);
+      const chunkMsg = (result.chunks_processed && result.chunks_processed > 1)
+        ? ` (${result.chunks_processed} gradual chunks applied)`
+        : '';
+      showToast(`✓ Batch #${result.batch_id.substring(0, 8)} executed! (${result.executed_actions} changes${chunkMsg}, 1-Tap Undo active)`, 'success', 4500);
     } catch (err) {
       showToast(`Execution Error: ${err.message}`, 'error', 5000);
       if (approveBtn) {
@@ -713,6 +773,9 @@ document.addEventListener('DOMContentLoaded', () => {
     const count = result.executed_actions || summary.length;
     const batchId = result.batch_id;
     const shortId = batchId.length > 8 ? batchId.substring(0, 8) : batchId;
+    const chunkText = (result.chunks_processed && result.chunks_processed > 1)
+      ? ` gradually across ${result.chunks_processed} safe micro-chunks (20 files/chunk)`
+      : '';
 
     container.innerHTML = `
       <div class="execution-success-card" id="audit-card-${batchId}">
@@ -723,7 +786,7 @@ document.addEventListener('DOMContentLoaded', () => {
           <span>Batch Executed Successfully</span>
         </div>
         <p class="success-meta-text">
-          Batch <code>#${shortId}</code> applied ${count} atomic changes. Pre-logged to SQLite WAL ledger.
+          Batch <code>#${shortId}</code> applied ${count} atomic changes${chunkText}. Pre-logged to SQLite WAL ledger.
         </p>
 
         <div class="audit-action-center">
