@@ -60,7 +60,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }, duration);
   }
 
-  const EXPECTED_VERSION = 'v0.5.2-live';
+  const EXPECTED_VERSION = 'v0.6-live';
 
   async function fetchHealth() {
     try {
@@ -257,6 +257,71 @@ document.addEventListener('DOMContentLoaded', () => {
     scrollToBottom();
   }
 
+  function formatInlineMarkdown(str) {
+    let s = escapeHtml(str);
+    // Inline code: `code`
+    s = s.replace(/`([^`]+)`/g, '<code class="inline-code">$1</code>');
+    // Bold: **text**
+    s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+    // Italic: *text*
+    s = s.replace(/\*([^*]+)\*/g, '<em>$1</em>');
+    return s;
+  }
+
+  function renderMarkdown(rawText) {
+    if (!rawText) return '';
+    const text = rawText.replace(/\r\n/g, '\n');
+    const lines = text.split('\n');
+    let html = '';
+    let inUl = false;
+    let inOl = false;
+
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+
+      // Check unordered list item (* or -)
+      const ulMatch = line.match(/^(\s*)[*-]\s+(.+)$/);
+      // Check ordered list item (1. )
+      const olMatch = line.match(/^(\s*)\d+\.\s+(.+)$/);
+      // Check header (### or ## or #)
+      const headerMatch = line.match(/^(#{1,4})\s+(.+)$/);
+
+      if (ulMatch) {
+        if (!inUl) {
+          if (inOl) { html += '</ol>'; inOl = false; }
+          html += '<ul class="md-list">';
+          inUl = true;
+        }
+        html += `<li>${formatInlineMarkdown(ulMatch[2])}</li>`;
+      } else if (olMatch) {
+        if (!inOl) {
+          if (inUl) { html += '</ul>'; inUl = false; }
+          html += '<ol class="md-list">';
+          inOl = true;
+        }
+        html += `<li>${formatInlineMarkdown(olMatch[2])}</li>`;
+      } else {
+        if (inUl) { html += '</ul>'; inUl = false; }
+        if (inOl) { html += '</ol>'; inOl = false; }
+
+        if (headerMatch) {
+          const level = headerMatch[1].length;
+          const hTag = level <= 2 ? 'h4' : 'h5';
+          html += `<${hTag} class="md-heading">${formatInlineMarkdown(headerMatch[2])}</${hTag}>`;
+        } else if (line.trim() === '') {
+          html += '<div class="md-gap"></div>';
+        } else {
+          html += `<p>${formatInlineMarkdown(line)}</p>`;
+        }
+      }
+    }
+
+    if (inUl) html += '</ul>';
+    if (inOl) html += '</ol>';
+
+    return html;
+  }
+
   function appendAssistantMessage(text) {
     const card = document.createElement('div');
     card.className = 'message-card assistant';
@@ -271,7 +336,29 @@ document.addEventListener('DOMContentLoaded', () => {
         <span class="message-time">Just now</span>
       </div>
       <div class="message-body">
-        <p>${text.replace(/\n\n/g, '</p><p>').replace(/\n/g, '<br>')}</p>
+        ${renderMarkdown(text)}
+      </div>
+    `;
+    elements.conversationStream.appendChild(card);
+    scrollToBottom();
+  }
+
+  function appendQueryInfoMessage(text, queryResults) {
+    const card = document.createElement('div');
+    card.className = 'message-card assistant query-card';
+    card.innerHTML = `
+      <div class="message-header">
+        <div class="assistant-avatar query-avatar">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+          </svg>
+        </div>
+        <div class="message-sender">Storage Copilot</div>
+        <span class="query-info-badge">🔍 Information Query</span>
+        <span class="message-time">Just now</span>
+      </div>
+      <div class="message-body">
+        ${renderMarkdown(text)}
       </div>
     `;
     elements.conversationStream.appendChild(card);
@@ -758,6 +845,9 @@ document.addEventListener('DOMContentLoaded', () => {
       if (data.type === 'conversation') {
         // Casual greetings or guidance
         appendAssistantMessage(data.message);
+      } else if (data.type === 'query_info') {
+        // Read-only filesystem query results with citations
+        appendQueryInfoMessage(data.message, data.query_results);
       } else if (data.type === 'plan' && data.plan) {
         // Synthesized Action Plan
         appendAssistantMessage(data.message || 'I have analyzed your request and formulated the following Action Plan:');

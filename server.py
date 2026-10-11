@@ -10,7 +10,7 @@ import requests
 from flask import Flask, request, jsonify, send_from_directory
 
 app = Flask("MobileStorageBridge")
-APP_VERSION = "v0.5.2-live"
+APP_VERSION = "v0.6-live"
 
 # ==============================================================================
 # Environment Configuration (.env loader)
@@ -1076,15 +1076,17 @@ def get_recent_batch():
 
 @app.route("/seed_fixtures", methods=["POST"])
 def seed_fixtures():
-    """Seeds realistic sample mobile files in Download/ to test instant plan generation and execution."""
+    """Seeds realistic sample mobile files in Download/ to test instant plan generation, query inspection, and execution."""
     download_dir = os.path.join(BASE_DIR, "Download")
     os.makedirs(download_dir, exist_ok=True)
     sample_files = {
         "BSAI-182_fee_voucher_fall.pdf": "Student Fee Voucher: Name: Imran Tahir, Roll No: BSAI-182, Amount: PKR 45,000, Status: Paid.",
         "fawad fee.pdf": "Student Fee Slip: Name: Fawad, Roll No: BSAI-190, Amount: PKR 45,000, Status: Paid.",
         "Sumbal pass.pdf": "University Entry Pass: Student Name: Sumbal, Department: AI.",
-        "1508.06576v2_neural_style.pdf": "A Neural Algorithm of Artistic Style by Leon A. Gatys, Alexander S. Ecker, Matthias Bethge.",
-        "DOC-20250413-WA0017..pdf": "Scanned document export via WhatsApp messenger. Cryptic raw camera export.",
+        "1508.06576v2_neural_style.pdf": "A Neural Algorithm of Artistic Style by Leon A. Gatys, Alexander S. Ecker, Matthias Bethge. ArXiv research paper on deep learning neural representations.",
+        "DOC-20250413-WA0017..pdf": "Knowledge Representation and Reasoning Lecture 4: First-Order Predicate Logic, Ontologies, and Semantic Networks. BSAI Semester 6 University Course.",
+        "DOC-20250413-WA0018..pdf": "Artificial Intelligence Course Assignment 2: Heuristic Search and A* Graph Exploration by Imran Tahir (BSAI-182).",
+        "DOC-20250413-WA0019..pdf": "Electricity Utility Bill Invoice for March 2025. Consumer ID: 948201. Amount Due: PKR 8,500. Status: Pending.",
         "Screenshot_20241001-142210.png": "[PNG Image Binary Fixture: Temporary screen capture]",
         "temp_cache_sync.tmp": "[Temporary sync cache file created by updater]",
         "WhatsApp_Doc_Ahmed_Receipt.pdf": "Payment receipt for Ahmed, Department Library Fee."
@@ -1092,10 +1094,9 @@ def seed_fixtures():
     created = []
     for fname, content in sample_files.items():
         fpath = os.path.join(download_dir, fname)
-        if not os.path.exists(fpath):
-            with open(fpath, "w", encoding="utf-8") as f:
-                f.write(content)
-            created.append(fname)
+        with open(fpath, "w", encoding="utf-8") as f:
+            f.write(content)
+        created.append(fname)
     return jsonify({
         "status": "success",
         "message": f"Seeded {len(created)} fixture files into Download/",
@@ -1215,26 +1216,34 @@ def format_plan_badges(plan_actions: list, peer_names: list, manifest_lookup: di
 
     return formatted_actions
 
-def call_gemini_api(system_prompt: str, user_prompt: str) -> dict:
+GEMINI_MODELS = [
+    "gemini-2.5-flash",
+    "gemini-3.8-flash",
+    "gemini-3.5-flash-lite",
+    "gemini-3.5-flash",
+    "gemini-flash-latest"
+]
+
+def call_gemini_json(system_prompt: str, user_prompt: str) -> dict:
     """
-    Sends structured prompt to Gemini API with model fallback:
-    1. gemini-3.5-flash-lite
-    2. gemini-2.5-flash
-    3. gemini-3.8-flash
-    4. gemini-2.0-flash
+    Sends structured JSON prompt to Gemini API with model fallback:
+    1. gemini-2.5-flash
+    2. gemini-3.8-flash
+    3. gemini-3.5-flash-lite
+    4. gemini-3.5-flash
+    5. gemini-flash-latest
     """
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
         return {}
 
-    models = ["gemini-3.5-flash-lite", "gemini-2.5-flash", "gemini-3.8-flash", "gemini-2.0-flash", "gemini-1.5-flash"]
     payload = {
         "system_instruction": {"parts": [{"text": system_prompt}]},
         "contents": [{"role": "user", "parts": [{"text": user_prompt}]}],
         "generationConfig": {"temperature": 0.1, "responseMimeType": "application/json"}
     }
 
-    for model in models:
+    for model in GEMINI_MODELS:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
         try:
             resp = requests.post(url, json=payload, timeout=25)
@@ -1245,30 +1254,188 @@ def call_gemini_api(system_prompt: str, user_prompt: str) -> dict:
                     parts = candidates[0].get("content", {}).get("parts", [])
                     if parts:
                         text = parts[0].get("text", "")
-                        return extract_json_plan(text)
-            elif resp.status_code in (404, 503):
+                        try:
+                            return extract_json_plan(text)
+                        except Exception:
+                            continue
+            elif resp.status_code in (400, 404, 503):
                 continue
         except Exception:
             continue
     return {}
 
+def call_gemini_text(system_prompt: str, user_prompt: str) -> str:
+    """
+    Sends conversational/markdown prompt to Gemini API with model fallback and returns raw text.
+    """
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        return ""
+
+    payload = {
+        "system_instruction": {"parts": [{"text": system_prompt}]},
+        "contents": [{"role": "user", "parts": [{"text": user_prompt}]}],
+        "generationConfig": {"temperature": 0.3}
+    }
+
+    for model in GEMINI_MODELS:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+        try:
+            resp = requests.post(url, json=payload, timeout=25)
+            if resp.status_code == 200:
+                data = resp.json()
+                candidates = data.get("candidates", [])
+                if candidates:
+                    parts = candidates[0].get("content", {}).get("parts", [])
+                    if parts:
+                        text = parts[0].get("text", "")
+                        if text and text.strip():
+                            return text.strip()
+            elif resp.status_code in (400, 404, 503):
+                continue
+        except Exception:
+            continue
+    return ""
+
+def call_gemini_api(system_prompt: str, user_prompt: str) -> dict:
+    """Backwards compatibility alias for structured JSON plan generation."""
+    return call_gemini_json(system_prompt, user_prompt)
+
+def collect_storage_files(base_dir: str, target_folder: str = "Download", max_files: int = 50) -> list:
+    """
+    Collects real files across device storage (target folder and Documents subtree),
+    extracting up to 600 chars of text with PII redaction for inspection and query answering.
+    """
+    collected = []
+    seen_paths = set()
+
+    search_dirs = [
+        os.path.join(base_dir, target_folder),
+        os.path.join(base_dir, "Documents"),
+        os.path.join(base_dir, "Download"),
+    ]
+
+    for s_dir in search_dirs:
+        if not os.path.exists(s_dir) or not os.path.isdir(s_dir):
+            continue
+        try:
+            for root, dirs, files in os.walk(s_dir):
+                # Omit internal protected trees from query inspection
+                dirs[:] = [d for d in dirs if not d.startswith(".") and d.lower() != "android"]
+                for f in files:
+                    if f.startswith("."):
+                        continue
+                    full_p = os.path.join(root, f)
+                    if full_p in seen_paths:
+                        continue
+                    seen_paths.add(full_p)
+
+                    try:
+                        fsize = os.path.getsize(full_p)
+                    except Exception:
+                        fsize = 0
+
+                    ext = os.path.splitext(f)[1].lower()
+                    rel_p = os.path.relpath(full_p, base_dir).replace("\\", "/")
+
+                    raw_text = ""
+                    if ext == ".pdf":
+                        try:
+                            import pypdf
+                            reader = pypdf.PdfReader(full_p)
+                            parts = [p.extract_text() or "" for p in reader.pages[:2]]
+                            raw_text = "\n".join(parts)[:600]
+                        except Exception:
+                            try:
+                                with open(full_p, "r", encoding="utf-8", errors="replace") as fh:
+                                    raw_text = fh.read(600)
+                            except Exception:
+                                raw_text = ""
+                    elif ext in (".txt", ".md", ".json", ".csv", ".tmp", ".log", ".xml", ".html"):
+                        try:
+                            with open(full_p, "r", encoding="utf-8", errors="replace") as fh:
+                                raw_text = fh.read(600)
+                        except Exception:
+                            raw_text = ""
+
+                    sanitized = sanitize_pii(raw_text)
+                    collected.append({
+                        "filename": f,
+                        "name": f,
+                        "path": rel_p,
+                        "full_path": full_p,
+                        "extension": ext,
+                        "size_kb": round(fsize / 1024, 1),
+                        "size_bytes": fsize,
+                        "snippet": sanitized,
+                        "text_snippet": sanitized if sanitized else "None (binary/image)",
+                        "has_content": bool(sanitized)
+                    })
+                    if len(collected) >= max_files:
+                        return collected
+        except Exception:
+            continue
+    return collected
+
+def ensure_unique_plan_destinations(actions: list) -> list:
+    """
+    Enforces strict destination uniqueness across all actions in a single batch.
+    Prevents duplicate destination collisions by disambiguating with source tokens or numeric counters.
+    """
+    seen_destinations = set()
+    cleaned_actions = []
+
+    for act in actions:
+        act_copy = dict(act)
+        act_type = act_copy.get("type", "")
+
+        if act_type in ("move", "copy"):
+            dst = (act_copy.get("destination") or "").replace("\\", "/").strip()
+            if dst:
+                base_dir = os.path.dirname(dst)
+                base_name = os.path.basename(dst)
+                stem, ext = os.path.splitext(base_name)
+                src_path = act_copy.get("source") or act_copy.get("path") or ""
+                src_stem = os.path.splitext(os.path.basename(src_path))[0]
+
+                cand_dst = dst
+                counter = 1
+                while cand_dst.lower() in seen_destinations:
+                    # Disambiguate using unique source marker or counter
+                    if counter == 1 and src_stem:
+                        clean_token = re.sub(r"[^\w-]", "", src_stem)
+                        token = clean_token[-6:] if len(clean_token) >= 4 else clean_token
+                        cand_dst = f"{base_dir}/{stem}_{token}{ext}" if base_dir else f"{stem}_{token}{ext}"
+                    else:
+                        cand_dst = f"{base_dir}/{stem}_{counter}{ext}" if base_dir else f"{stem}_{counter}{ext}"
+                    counter += 1
+
+                seen_destinations.add(cand_dst.lower())
+                act_copy["destination"] = cand_dst
+        cleaned_actions.append(act_copy)
+    return cleaned_actions
+
 @app.route("/propose_plan", methods=["POST"])
 def propose_plan():
     """
-    Dual-Stage Intent Routing & Live Reconnaissance Endpoint:
+    v0.6-live Three-Tier Intent Routing & Dynamic Reconnaissance Endpoint:
     
-    STAGE 1: Intent Classification via Gemini (BEFORE disk access)
-    - If intent is "CONVERSATION" (e.g., greetings like "Hii", "Hello", "who are you?", "what can you do?"):
-      Returns:
-      {"type": "conversation", "message": "<Helpful conversational response explaining Storage Copilot capabilities for Imran Tahir>", "version": "v0.5.2-live"}
-      Does NOT scan the disk or generate any file mutation cards!
-      
-    STAGE 2: Physical Disk Reconnaissance & Gemini Action Plan Synthesis
-    - Executed ONLY if intent is "FILE_OPERATION".
-    - Scans actual files on disk in target folder.
-    - Inspects RAM snippets with PII scrubbing.
-    - Prompts Gemini to synthesize verified Action Plan.
-    - Formats visual badges: FILE_MOVE, PEER_MOVE, RENAME, FOLDER_CREATE, TRASH.
+    TIER 1: CONVERSATION
+    - Greetings, general questions, capabilities, follow-ups ("What else?").
+    - Dispatched to Gemini with user persona (Imran Tahir, BSAI-182).
+    - NEVER returns static canned templates.
+    
+    TIER 2: QUERY_INFO (READ-ONLY)
+    - Queries asking to list, search, find, or inspect files ("List university lectures", "Find receipts").
+    - Reads real storage files and extracted PII-sanitized snippets.
+    - Synthesizes structured Markdown summary with citations/snippets in chat.
+    - Stages ZERO file mutations.
+    
+    TIER 3: FILE_OPERATION
+    - Moves, renames, organization, and trash requests ("Sort student vouchers", "Clean download names").
+    - Inspects real files and enforces Academic Taxonomy Priority under Documents/University/<Subject>/.
+    - Content-derived naming (never generic Document_2025-04-13.pdf).
+    - Strict programmatic collision avoidance ensuring unique destination paths.
     """
     data = request.get_json(force=True) or {}
     raw_prompt = (data.get("prompt") or "").strip()
@@ -1295,52 +1462,113 @@ def propose_plan():
     ) if peers else "\n".join(f"- Peer '{p}': designated folder 'Documents/Peers/{p}'" for p in peer_names)
 
     # =========================================================================
-    # STAGE 1: Fast Intent Classification via Gemini (BEFORE touching disk)
+    # STAGE 1: Three-Tier Intent Classification via Gemini
     # =========================================================================
-    intent_classification_system_prompt = f"""You are Storage Copilot, running locally on an Android device via Termux for {owner_name} (Roll/ID: {identifiers}).
+    intent_classification_system_prompt = f"""You are Storage Copilot, running locally on an Android device via Termux for {owner_name} (Roll/ID: {identifiers}, Major: Artificial Intelligence).
 Storage Root: /storage/emulated/0 (Downloads, Documents).
 Known Peers: {", ".join(peer_names)}.
 
-Classify the user's prompt into exactly one of two intents:
-1. "CONVERSATION":
-   - Greetings (e.g., "Hi", "Hii", "Hello", "Hey", "Good morning")
-   - Questions about your identity, role, or capabilities (e.g., "who are you?", "what can you do?", "help", "how do you work?")
-   - General conversation, small talk, or inquiries not requesting file moves/modifications.
+Classify the user's prompt into exactly ONE of three intents:
 
-2. "FILE_OPERATION":
-   - Requests to organize, sort, clean, separate, move, delete, trash, rename, or manage files and folders (e.g., "Sort student vouchers", "separate peer docs", "clean downloads", "cleanup screenshots", "move pdfs to documents").
+1. "CONVERSATION":
+   - Greetings (e.g., "Hi", "Hello", "Hey", "Good morning")
+   - Questions about your identity, role, or capabilities (e.g., "who are you?", "what can you do?", "help", "how do you work?")
+   - Open conversational follow-ups (e.g., "What else?", "Tell me more", "Thanks")
+   - General questions not requesting to inspect/search files or execute file operations.
+
+2. "QUERY_INFO":
+   - Read-only search, query, inspection, or summary requests (e.g., "List university lectures", "Find receipts", "What is inside Download?", "Show me AI documents", "Do I have any fee slips?", "What files are here?").
+   - The user wants information, summaries, or citations about their stored files WITHOUT moving, renaming, trashing, or organizing them.
+
+3. "FILE_OPERATION":
+   - Requests to organize, sort, clean, separate, move, delete, trash, rename, or manage files and folders (e.g., "Sort student vouchers", "separate peer docs", "clean downloads", "cleanup screenshots", "move pdfs to university").
 
 Respond STRICTLY with valid JSON adhering to this schema:
 {{
-  "intent": "CONVERSATION" | "FILE_OPERATION",
-  "reply": "<Helpful conversational response explaining Storage Copilot capabilities for {owner_name} on Android Termux if intent is CONVERSATION. Empty string if FILE_OPERATION.>"
+  "intent": "CONVERSATION" | "QUERY_INFO" | "FILE_OPERATION",
+  "reply": "<Dynamic, helpful conversational response addressing the user directly if CONVERSATION. Empty string otherwise.>"
 }}
 """
 
-    stage1_resp = call_gemini_api(intent_classification_system_prompt, raw_prompt)
+    stage1_resp = call_gemini_json(intent_classification_system_prompt, raw_prompt)
     intent = stage1_resp.get("intent", "").upper() if isinstance(stage1_resp, dict) else ""
     conv_reply = stage1_resp.get("reply", "") if isinstance(stage1_resp, dict) else ""
 
-    # Offline / API failure heuristic fallback for Stage 1:
+    # Offline / Heuristic Fallback for Stage 1:
     if not intent:
         lower_p = raw_prompt.lower()
-        file_op_keywords = ("sort", "voucher", "fee", "challan", "slip", "peer", "separate", "clean", "download", "screenshot", "trash", "delete", "move", "organize", "rename", "paper", "receipt")
-        if any(k in lower_p for k in file_op_keywords):
+        query_lead_keywords = (
+            "list", "find", "show", "search", "what is inside", "what is in", 
+            "what else is in", "what files", "how many files", "do i have", 
+            "display", "summarize", "view", "inspect", "where is", "where are",
+            "tell me about"
+        )
+        file_op_keywords = (
+            "sort", "voucher", "fee", "challan", "slip", "peer", "separate", 
+            "clean", "download", "screenshot", "trash", "delete", "move", 
+            "organize", "rename", "isolate", "structure"
+        )
+
+        if any(k in lower_p for k in query_lead_keywords):
+            intent = "QUERY_INFO"
+        elif any(k in lower_p for k in ("what else", "tell me more", "who are you", "what can you do", "help", "hi", "hello", "hey", "thanks")):
+            intent = "CONVERSATION"
+        elif any(k in lower_p for k in file_op_keywords):
             intent = "FILE_OPERATION"
         else:
             intent = "CONVERSATION"
 
-    # If intent is CONVERSATION: Return IMMEDIATELY without scanning disk or generating mutation cards!
+    # =========================================================================
+    # TIER 1: CONVERSATION (Dynamic Gemini Reply - Zero Canned Strings)
+    # =========================================================================
     if intent == "CONVERSATION":
         if not conv_reply:
-            conv_reply = (
-                f"👋 Hello {owner_name}! I am Storage Copilot, running locally on your Android device via Termux.\n\n"
-                f"Storage Root: /storage/emulated/0 (Downloads, Documents)\n"
-                f"Known Peers: {', '.join(peer_names)}\n\n"
-                "I analyze unorganized files, separate peer documents from personal storage, sort university fee vouchers, "
-                "and clean up downloads—with interactive diff reviews and 1-tap rollback.\n\n"
-                "Tap one of the quick task chips below to scan your storage and formulate an Action Plan!"
-            )
+            conv_sys = f"""You are Storage Copilot, running locally on an Android device via Termux for {owner_name} (Roll/ID: {identifiers}, Major: Artificial Intelligence).
+Storage Root: /storage/emulated/0 (Downloads, Documents).
+Known Peers: {", ".join(peer_names)}.
+Peer Routing:
+{peer_matrix_lines}
+
+Respond naturally, conversationally, and helpfully to the user's message in your persona as their Android storage copilot.
+CRITICAL: Never output a generic canned template or repetitive boilerplate greeting unless the user gave a simple one-word greeting.
+Directly answer their specific question, follow-up ("what else", "tell me more"), or greeting.
+Keep responses concise, helpful, and formatted with clean paragraphs or bullet points where appropriate.
+Explain your actual features (interactive diff reviews, academic lecture sorting under Documents/University/, peer document isolation, 1-tap rollback via SQLite WAL ledger, informational file inspection) whenever asked about capabilities.
+"""
+            conv_reply = call_gemini_text(conv_sys, raw_prompt)
+
+        if not conv_reply:
+            # Dynamic contextual offline fallback tailored directly to prompt
+            lp = raw_prompt.lower()
+            if any(w in lp for w in ("what else", "more", "next")):
+                conv_reply = (
+                    f"Here are several other tasks I can help you with, {owner_name}:\n\n"
+                    f"- **Inspect & Query**: Ask *\"List university lectures\"* or *\"Find receipts\"* to search file contents without moving them.\n"
+                    f"- **Sort Academic Vouchers**: Separate your BSAI fee slips into `Documents/University/Vouchers`.\n"
+                    f"- **Isolate Peer Documents**: Route incoming files for {', '.join(peer_names)} to `Documents/Peers/<Name>`.\n"
+                    f"- **Clean Cryptic Downloads**: Standardize messy WhatsApp or arXiv downloads with descriptive, content-derived names.\n"
+                    f"- **Cleanup**: Safely soft-delete obsolete screenshots into `.agent_trash` with 1-tap rollback."
+                )
+            elif any(w in lp for w in ("who are you", "what can you do", "help", "role")):
+                conv_reply = (
+                    f"I am Storage Copilot, your autonomous Android storage assistant running locally via Termux for {owner_name} ({identifiers[0] if identifiers else 'BSAI'}).\n\n"
+                    "I help you inspect document contents with PII scrubbing, answer queries about your files, organize downloads, and safely separate peer documents—all with interactive diff approval and 1-tap rollback."
+                )
+            elif any(w in lp for w in ("peer", "peers", "friends", "fawad", "sumbal", "ahmed", "yousaf")):
+                conv_reply = (
+                    f"Your registered peer separation matrix includes: **{', '.join(peer_names)}**.\n\n"
+                    "Any documents or vouchers identified for these classmates are isolated into `Documents/Peers/<Name>` to protect your personal storage."
+                )
+            elif any(w in lp for w in ("hi", "hello", "hey", "salam", "morning")):
+                conv_reply = (
+                    f"👋 Hello {owner_name}! Storage Copilot is online and connected to your storage root (`/storage/emulated/0`).\n\n"
+                    "How can I help with your files today? You can ask me to list documents, organize downloads, or sort peer files."
+                )
+            else:
+                conv_reply = (
+                    f"I'm ready to assist with your storage, {owner_name}. You can ask me informational questions like *\"List university lectures\"* or request operations like *\"Sort student vouchers\"* and *\"Clean download names\"*."
+                )
+
         return jsonify({
             "type": "conversation",
             "message": conv_reply,
@@ -1355,10 +1583,121 @@ Respond STRICTLY with valid JSON adhering to this schema:
         })
 
     # =========================================================================
-    # STAGE 2: Physical Disk Reconnaissance & Action Plan Synthesis
-    # (Reached ONLY when intent is "FILE_OPERATION")
+    # TIER 2: QUERY_INFO (Read-Only Inspection - Zero Mutations)
     # =========================================================================
+    if intent == "QUERY_INFO":
+        all_files = collect_storage_files(BASE_STORAGE_DIR, target_folder)
 
+        if not all_files:
+            return jsonify({
+                "type": "query_info",
+                "message": (
+                    f"📂 No files found in storage (`{target_folder}/` or `Documents/`). The directories are currently empty.\n\n"
+                    f"Please place files in `{target_folder}/` or tap 'Seed Fixtures' to populate demo files for testing."
+                ),
+                "version": APP_VERSION,
+                "actions": [],
+                "query_results": [],
+                "quick_chips": [
+                    "📋 Sort Student Vouchers",
+                    "👥 Separate Peer Documents",
+                    "🏷️ Clean Download Names",
+                    "🗑️ Cleanup Old Screenshots"
+                ]
+            })
+
+        gemini_manifest = [
+            {
+                "filename": f["filename"],
+                "path": f["path"],
+                "size_kb": f["size_kb"],
+                "has_content": f["has_content"],
+                "text_snippet": f["text_snippet"]
+            }
+            for f in all_files[:35]
+        ]
+
+        query_system_prompt = f"""You are Storage Copilot, running locally on an Android device via Termux for {owner_name} (Roll/ID: {identifiers}, Major: Artificial Intelligence).
+Known Peers: {", ".join(peer_names)}.
+Storage Root: /storage/emulated/0 (Downloads, Documents).
+
+The user is asking a READ-ONLY question about their storage files:
+"{raw_prompt}"
+
+Here are the real files currently on the device with their inspected content snippets (sanitized for PII):
+{json.dumps(gemini_manifest, indent=2)}
+
+INSTRUCTIONS:
+1. Answer the user's query directly, informatively, and conversationally.
+2. Filter and present the relevant files matching their inquiry (e.g., university lectures, AI coursework, fee vouchers, peer receipts, or downloads).
+3. Format as a clean, structured Markdown response:
+   - Use bold for file names.
+   - Show file path in code spans (e.g. `Download/filename.pdf`).
+   - Mention the file size and a concise summary of what was found in the text snippet.
+   - Group by category if multiple categories match (e.g., **University Academic Documents**, **Financial Receipts**).
+4. If no files match the query, clearly state what was searched and explain that no matching documents were found.
+5. STRICT RULE: This is a read-only query. Do NOT generate any file mutation plan, JSON actions, or suggest modifying files.
+"""
+
+        query_reply = call_gemini_text(query_system_prompt, raw_prompt)
+
+        # Offline heuristic search if Gemini is offline
+        if not query_reply:
+            lower_p = raw_prompt.lower()
+            keywords = [w for w in re.split(r"\W+", lower_p) if len(w) > 2 and w not in ("the", "all", "and", "for", "with", "from", "list", "find", "show", "what", "where", "inside", "documents", "files")]
+
+            matches = []
+            for f in all_files:
+                fn_l = f["filename"].lower()
+                snip_l = f["snippet"].lower()
+                path_l = f["path"].lower()
+
+                score = 0
+                if any(term in lower_p for term in ("lecture", "university", "course", "ai", "study", "academic", "knowledge")):
+                    if any(k in fn_l or k in snip_l for k in ("lecture", "knowledge representation", "artificial intelligence", "neural", "assignment", "pass", "voucher", "bsai")):
+                        score += 3
+                if any(term in lower_p for term in ("receipt", "bill", "finance", "voucher", "fee", "money")):
+                    if any(k in fn_l or k in snip_l for k in ("receipt", "invoice", "fee", "bill", "payment", "voucher", "paid", "challan")):
+                        score += 3
+                if any(p_name.lower() in lower_p for p_name in peer_names):
+                    for p_name in peer_names:
+                        if p_name.lower() in lower_p and (p_name.lower() in fn_l or p_name.lower() in snip_l):
+                            score += 4
+                if any(k in fn_l or k in snip_l or k in path_l for k in keywords):
+                    score += 1
+
+                if score > 0 or not keywords:
+                    matches.append((score, f))
+
+            matches.sort(key=lambda x: x[0], reverse=True)
+            matched_files = [m[1] for m in matches[:10]]
+
+            if matched_files:
+                lines = [f"### 📂 Inspected Storage Query: \"{raw_prompt}\"\n\nFound **{len(matched_files)} matching document(s)** on your device:"]
+                for m in matched_files:
+                    snip_preview = m["snippet"][:130] if m["snippet"] else "Binary / image fixture"
+                    lines.append(f"- **{m['filename']}** (`{m['path']}` • {m['size_kb']} KB)\n  *Content Summary:* {snip_preview}")
+                query_reply = "\n\n".join(lines)
+            else:
+                query_reply = f"ℹ️ I searched your storage ({len(all_files)} real files inspected), but found no files matching **\"{raw_prompt}\"**.\n\nTry asking *\"List university lectures\"* or *\"Find receipts\"*."
+
+        return jsonify({
+            "type": "query_info",
+            "message": query_reply,
+            "version": APP_VERSION,
+            "actions": [],
+            "query_results": [],
+            "quick_chips": [
+                "📋 Sort Student Vouchers",
+                "👥 Separate Peer Documents",
+                "🏷️ Clean Download Names",
+                "🗑️ Cleanup Old Screenshots"
+            ]
+        })
+
+    # =========================================================================
+    # TIER 3: FILE_OPERATION (Reconnaissance & Action Plan Synthesis)
+    # =========================================================================
     # 1. Locate target folder
     target_dir = None
     dir_candidates = [
@@ -1381,14 +1720,13 @@ Respond STRICTLY with valid JSON adhering to this schema:
         target_dir = os.path.join(BASE_STORAGE_DIR, target_folder)
         os.makedirs(target_dir, exist_ok=True)
 
-    # 2. Read actual real files on disk
+    # 2. Read real files in target directory
     scanned_entries = []
     if os.path.exists(target_dir) and os.path.isdir(target_dir):
         for entry in os.scandir(target_dir):
             if entry.is_file() and not entry.name.startswith("."):
                 scanned_entries.append(entry)
 
-    # If target directory is empty:
     if not scanned_entries:
         return jsonify({
             "type": "conversation",
@@ -1406,7 +1744,7 @@ Respond STRICTLY with valid JSON adhering to this schema:
             ]
         })
 
-    # 3. In-Memory Snippet Inspection & PII Scrubbing (Up to 30 candidate files)
+    # 3. Snippet inspection & PII scrubbing (up to 30 candidate files)
     manifest = []
     manifest_for_gemini = []
     manifest_lookup = {}
@@ -1414,8 +1752,6 @@ Respond STRICTLY with valid JSON adhering to this schema:
         filename = entry.name
         file_size = entry.stat().st_size
         ext = os.path.splitext(filename)[1].lower()
-
-        print(f"[RECON] Inspecting '{filename}' | Size: {file_size} bytes", flush=True)
 
         raw_text = ""
         try:
@@ -1439,10 +1775,7 @@ Respond STRICTLY with valid JSON adhering to this schema:
         except Exception:
             raw_text = ""
 
-        print(f"[RECON] Extracted {len(raw_text)} chars from {filename}", flush=True)
-
         sanitized_snippet = sanitize_pii(raw_text)
-        print(f"[PII] Sanitized snippet for {filename}: {sanitized_snippet[:80]}...", flush=True)
 
         try:
             rel_path = os.path.relpath(entry.path, BASE_STORAGE_DIR).replace("\\", "/")
@@ -1474,7 +1807,7 @@ Respond STRICTLY with valid JSON adhering to this schema:
 
     # 4. Formulate Stage 2 Gemini System Prompt with Real Files Manifest
     system_prompt = f"""You are Storage Copilot, running locally on an Android device via Termux.
-Active User: {owner_name} (Roll/ID: {identifiers}).
+Active User: {owner_name} (Roll/ID: {identifiers}, Major: Artificial Intelligence).
 Storage Root: /storage/emulated/0 (Downloads, Documents).
 Known Peers: {", ".join(peer_names)}.
 
@@ -1489,38 +1822,24 @@ Define a unified JSON contract for your responses:
 }}
 
 IMPORTANT: The candidates below are the ACTUAL files currently sitting on disk.
-Do NOT filter candidate files using literal prompt keywords (e.g., do NOT look for the literal words "Clean Download Names" or "Separate Peer Documents" in filenames!).
 Reason SEMANTICALLY over each candidate's filename, size_kb, text_snippet, and has_content to decide the appropriate operation:
 
-CRITICAL NAMING RULES:
-1. NEVER rename files using generic labels like "WhatsApp_Export_Doc", "Organized_Doc", or "Document".
-2. Read each file's `text_snippet`. Use the actual subject matter, topic, or document purpose to assign a specific, descriptive name (e.g., "AI_Knowledge_Representation_Lecture.pdf", "Fee_Challan_Fall2025.pdf", "Electricity_Bill_April.pdf").
-3. Route to meaningful category folders: e.g., "Documents/University/AI/", "Documents/Finances/", "Documents/Peers/<Name>/".
-4. If NO text snippet exists, use date/context (e.g., "Document_2025-04-13.<ext>"), never "WhatsApp_Export".
+CRITICAL TAXONOMY & NAMING RULES:
+1. ACADEMIC PRIORITY (BS AI Curriculum):
+   - If a document contains academic terms ("Knowledge Representation", "Artificial Intelligence", "AI", "Semester", "Lecture", "Course", "Assignment", "Notes", "Exam", "Lab", "Neural"), categorize under "Documents/University/<Subject>/" (e.g. "Documents/University/AI/Knowledge_Representation_Lecture_04.pdf"), NEVER under "Documents/Finances/".
+2. PREVENT COLLISION & USE CONTENT-DERIVED NAMES:
+   - NEVER rename files using generic static labels like "Document_2025-04-13.pdf" or "WhatsApp_Export".
+   - Read each file's `text_snippet`. Use the actual subject matter or purpose to assign a specific, unique name (e.g. "Knowledge_Representation_Lecture_04.pdf", "AI_Course_Assignment_02.pdf", "Electricity_Bill_March2025.pdf").
+   - EVERY proposed action in a batch MUST have a distinct, UNIQUE destination path. Never output duplicate destination paths.
+3. PEER ISOLATION:
+   - Identify files naming or belonging to peers ({", ".join(peer_names)}). Route strictly to "Documents/Peers/<PeerName>/".
+4. PERSONAL VOUCHERS:
+   - Route {owner_name}'s personal fee vouchers to "Documents/University/Vouchers/".
 
-SEMANTIC TASK GUIDELINES:
-1. "Clean Download Names" (or renaming messy/cryptic downloads):
-   - Identify cryptic, messy, timestamped, WhatsApp-exported, or paper-code filenames (e.g., 'DOC-20250413-WA0017..pdf', '1508.06576v2_neural_style.pdf', raw hash strings, raw camera timestamps).
-   - Propose semantic "type": "move" (RENAME) actions with specific, descriptive human-readable filenames inside appropriate structured folders based on their text_snippet content (e.g., 'Documents/University/AI/Neural_Algorithm_Artistic_Style_Paper.pdf' or 'Documents/Finances/Identity_Document_Export_20250413.pdf').
-2. "Cleanup Old Screenshots" or "Clean temp" (soft-deleting trash):
-   - Identify image captures / screenshots (e.g., 'Screenshot_*.png') and temporary/cache files ('.tmp', '.cache', '.bak').
-   - Propose "type": "trash" actions to route them to '.agent_trash' with 1-tap undo safety.
-3. "Separate Peer Documents" (peer separation):
-   - Identify documents containing or naming peers ({", ".join(peer_names)}) in their filename or text_snippet (e.g., Fawad, Sumbal, Ahmed, Yousaf).
-   - Propose "type": "move" actions to route them into their designated peer folders (e.g. 'Documents/Peers/<PeerName>/...'). Never route peer files to personal folders.
-4. "Sort Student Vouchers" (academic & fee management):
-   - Identify academic fee documents, challans, or vouchers from snippets or filenames.
-   - Route {owner_name}'s personal fee vouchers/slips to 'Documents/University/Vouchers' (or 'Documents/University/').
-   - Route any peer vouchers to their respective peer directory in 'Documents/Peers/<PeerName>/'.
-
-CRITICAL RULES FOR FILE ACTIONS:
-- Propose actions ONLY for files present in the provided Manifest ({len(manifest)} real files on disk). Never invent or hallucinate non-existent filenames.
-- Always create parent directories with 'make_dir' before moving files into them.
-- Action format:
-  {{"action_id": "step-1", "type": "make_dir", "path": "Documents/..."}}
-  {{"action_id": "step-2", "type": "move", "source": "<exact filename from manifest>", "destination": "Documents/...", "rationale": "...", "peer_name": "..." (if peer), "ai_inspected": true, "inspected_preview": "<first 100 chars of text_snippet>"}}
-  {{"action_id": "step-3", "type": "trash", "path": "<exact filename from manifest>", "rationale": "...", "ai_inspected": false, "inspected_preview": "No readable text extracted (scanned image or binary document)"}}
-- If NO files match the operational criteria, set "type": "conversation" and explain in "message" that no matching files were found. Actions: [].
+Action format:
+- {{"action_id": "step-1", "type": "make_dir", "path": "Documents/..."}}
+- {{"action_id": "step-2", "type": "move", "source": "<exact filename from manifest>", "destination": "Documents/...", "rationale": "...", "peer_name": "..." (if peer), "ai_inspected": true, "inspected_preview": "<first 100 chars of text_snippet>"}}
+- {{"action_id": "step-3", "type": "trash", "path": "<exact filename from manifest>", "rationale": "...", "ai_inspected": false, "inspected_preview": "..."}}
 """
 
     user_prompt_text = f"""Operational Request: "{raw_prompt}"
@@ -1530,7 +1849,7 @@ Available Real Files Manifest ({len(manifest)} real files on disk):
 {json.dumps(manifest_for_gemini, indent=2)}
 """
 
-    gemini_resp = call_gemini_api(system_prompt, user_prompt_text)
+    gemini_resp = call_gemini_json(system_prompt, user_prompt_text)
 
     # 5. Evaluate Gemini Stage 2 Output
     if gemini_resp and isinstance(gemini_resp, dict):
@@ -1577,6 +1896,8 @@ Available Real Files Manifest ({len(manifest)} real files on disk):
                     validated_actions.append(act)
 
         if validated_actions:
+            # Enforce batch destination collision prevention
+            validated_actions = ensure_unique_plan_destinations(validated_actions)
             formatted_actions = format_plan_badges(validated_actions, peer_names, manifest_lookup)
             plan_id = str(uuid.uuid4())
             action_plan = {
@@ -1594,7 +1915,7 @@ Available Real Files Manifest ({len(manifest)} real files on disk):
                 "plan": action_plan
             })
 
-    # 6. Heuristic Fallback (Active if Gemini API key is missing or offline for Stage 2)
+    # 6. Heuristic Fallback (Active if Gemini is offline or API key missing)
     lower_p = raw_prompt.lower()
     plan_actions = []
     plan_desc = ""
@@ -1680,18 +2001,37 @@ Available Real Files Manifest ({len(manifest)} real files on disk):
             if fn.endswith((".tmp", ".log")):
                 continue
             if re.search(r"^(?:DOC-|\d{4}\.\d{4,5}|IMG_|WhatsApp|Screenshot|[a-f0-9]{16,})", fn, re.I) or ".." in fn or "wa0" in fn.lower():
-                clean_title = fn
                 snip = item["snippet"].lower()
-                if "1508" in fn or "neural" in snip:
+                clean_title = fn
+
+                # 1. Academic prioritization
+                if any(k in snip for k in ("knowledge representation", "artificial intelligence", "lecture", "course", "assignment", "semester", "bsai")):
+                    target_d = "Documents/University/AI"
+                    if "knowledge representation" in snip:
+                        clean_title = "Knowledge_Representation_Lecture.pdf"
+                    elif "assignment" in snip:
+                        clean_title = "AI_Course_Assignment.pdf"
+                    else:
+                        clean_title = "AI_Lecture_Notes.pdf"
+                elif "1508" in fn or "neural" in snip:
                     clean_title = "Neural_Algorithm_Artistic_Style_Paper.pdf"
                     target_d = "Documents/University/AI"
-                elif "doc-" in fn.lower() or "wa" in fn.lower():
-                    clean_title = re.sub(r"\.\.+", ".", fn)
-                    if "identity" in snip or "scanned" in snip:
-                        clean_title = "Scanned_Identity_Document_20250413.pdf"
-                    else:
-                        clean_title = "Document_2025-04-13.pdf"
+                elif any(p_name.lower() in snip for p_name in peer_names):
+                    p_found = next(p for p in peer_names if p.lower() in snip)
+                    target_d = f"Documents/Peers/{p_found}"
+                    clean_title = f"{p_found}_Receipt.pdf"
+                elif "voucher" in snip or "fee" in snip:
+                    target_d = "Documents/University/Vouchers"
+                    clean_title = "Student_Fee_Voucher.pdf"
+                elif "bill" in snip or "invoice" in snip or "utility" in snip or "electricity" in snip:
                     target_d = "Documents/Finances"
+                    clean_title = "Electricity_Bill_Invoice.pdf"
+                elif "doc-" in fn.lower() or "wa" in fn.lower():
+                    # Clean double dots and derive title
+                    clean_fn = re.sub(r"\.\.+", ".", fn)
+                    stem_clean = os.path.splitext(clean_fn)[0]
+                    clean_title = f"Document_{stem_clean}.pdf"
+                    target_d = "Documents/Personal"
                 else:
                     clean_title = re.sub(r"^\d{4}\.\d{4,5}v?\d*_", "Research_Paper_", fn)
                     target_d = "Documents/University/AI"
@@ -1706,7 +2046,7 @@ Available Real Files Manifest ({len(manifest)} real files on disk):
                     "source": item["path"],
                     "destination": f"{target_d}/{clean_title}",
                     "badge": "RENAME",
-                    "rationale": f"Identified specific document content in '{fn}' and assigned semantic destination"
+                    "rationale": f"Semantically organized '{fn}' into {target_d} based on inspected content"
                 })
                 step_idx += 1
 
@@ -1761,6 +2101,8 @@ Available Real Files Manifest ({len(manifest)} real files on disk):
             ]
         })
 
+    # Enforce batch destination collision prevention
+    plan_actions = ensure_unique_plan_destinations(plan_actions)
     formatted_actions = format_plan_badges(plan_actions, peer_names, manifest_lookup)
     plan_id = str(uuid.uuid4())
     action_plan = {
