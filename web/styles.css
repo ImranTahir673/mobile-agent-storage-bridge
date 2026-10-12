@@ -972,7 +972,8 @@ html, body {
   color: #FBBF24;
 }
 
-.badge-TRASH {
+.badge-TRASH,
+.badge-DEDUPLICATION_TRASH {
   background-color: var(--badge-trash-bg);
   border: 1px solid var(--badge-trash-border);
   color: #F87171;
