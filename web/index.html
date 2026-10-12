@@ -32,9 +32,15 @@
         </div>
       </div>
 
-      <div class="engine-badge online" id="engine-status-badge" title="Bridge server connection status">
-        <span class="pulse-dot"></span>
-        <span class="badge-text" id="engine-status-text">Engine Online</span>
+      <div class="header-controls">
+        <button class="ai-status-pill" id="ai-status-pill" title="Configure Google Gemini Intelligence Key">
+          <span class="ai-sparkle">✨</span>
+          <span class="ai-status-label" id="ai-status-label">AI Status</span>
+        </button>
+        <div class="engine-badge online" id="engine-status-badge" title="Bridge server connection status">
+          <span class="pulse-dot"></span>
+          <span class="badge-text" id="engine-status-text">Engine Online</span>
+        </div>
       </div>
     </header>
 
@@ -194,6 +200,50 @@
     <!-- Notification Toast / Snackbar -->
     <div class="toast-snackbar" id="toast" role="alert" aria-live="polite">
       <div class="toast-content" id="toast-message">Message</div>
+    </div>
+
+    <!-- Google Gemini AI Key Configuration Modal -->
+    <div class="modal-overlay" id="api-key-modal" style="display: none;">
+      <div class="modal-dialog glass-modal">
+        <div class="modal-header">
+          <div class="modal-title-wrap">
+            <span class="modal-icon">✨</span>
+            <h3 class="modal-title">Gemini AI Engine</h3>
+          </div>
+          <button class="modal-close-btn" id="close-api-modal-btn" aria-label="Close modal">&times;</button>
+        </div>
+        <div class="modal-body">
+          <p class="modal-desc">
+            Enable advanced contextual reasoning, intelligent document understanding, and dynamic conversation powered by Google Gemini.
+          </p>
+          <div class="key-status-row" id="key-status-row">
+            <span class="key-status-label">Engine Status:</span>
+            <span class="key-status-val" id="key-current-status">Checking...</span>
+          </div>
+          <div class="input-group">
+            <label for="gemini-key-input" class="input-label">Google Gemini API Key</label>
+            <div class="key-input-wrapper">
+              <input 
+                type="password" 
+                id="gemini-key-input" 
+                class="key-text-input" 
+                placeholder="AIzaSy..." 
+                autocomplete="off"
+              />
+              <button type="button" class="key-toggle-btn" id="toggle-key-visibility" title="Show/Hide Key">👁️</button>
+            </div>
+            <p class="input-hint">Your API key is securely saved to your local Termux <code>.env</code> file on your device.</p>
+          </div>
+          <div class="api-feedback-msg" id="api-feedback-msg" style="display: none;"></div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" id="cancel-api-btn">Cancel</button>
+          <button class="btn btn-primary" id="save-api-key-btn">
+            <span class="btn-spinner" id="save-key-spinner" style="display: none;"></span>
+            <span id="save-key-btn-text">Verify & Save</span>
+          </button>
+        </div>
+      </div>
     </div>
 
   </div>
