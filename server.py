@@ -2277,729 +2277,12 @@ def propose_plan():
     ) if peers else "\n".join(f"- Peer '{p}': designated folder 'Documents/Peers/{p}'" for p in peer_names)
 
     # =========================================================================
-    # STAGE 1: Three-Tier Intent Classification via Gemini (Multi-Turn Aware)
+    # RECONNAISSANCE FIRST: Live Storage & Manifest Inspection
     # =========================================================================
     now_dt = datetime.now()
     now_str = now_dt.strftime("%A, %B %d, %Y at %I:%M %p")
     today_date = now_dt.strftime("%Y-%m-%d")
 
-    intent_classification_system_prompt = f"""You are Storage Copilot, an advanced on-device AI agent running locally via Termux on Android for {owner_name} (Roll/ID: {identifiers}, Major: Artificial Intelligence).
-Current Device Time: {now_str} (Today's Date: {today_date}).
-Storage Root: /storage/emulated/0 (Downloads, Documents).
-Known Peers: {", ".join(peer_names)}.
-Peer Routing:
-{peer_matrix_lines}
-
-RECENT CONVERSATION HISTORY (Last turns):
-{conversation_context_block}
-
-YOUR AGENT PERSONA & BOUNDARIES:
-- You are an articulate, capable AI agent (similar to Google DeepMind / Antigravity). You communicate with clarity, intelligence, and empathy directly to {owner_name}.
-- You possess complete self-awareness of your abilities, capabilities, and system boundaries.
-- WHAT YOU CAN DO: Local storage reconnaissance, content inspection with in-memory PII sanitization, intelligent file organization (academic vs peer vs personal bills), cryptographic duplicate detection & redundant file cleanup, interactive diff approval, and 1-tap atomic rollbacks via SQLite WAL.
-- WHAT YOU CANNOT DO (OUT OF SCOPE): You cannot send emails, send SMS/WhatsApp messages, browse the live web, access cloud storage directly, launch external apps, or alter Android system configurations.
-
-CLASSIFY THE USER'S PROMPT INTO EXACTLY ONE OF THREE INTENTS:
-
-1. "CONVERSATION":
-   - Suggestions, advice, ideas, recommendations, or questions on how to organize/clean storage (e.g. "What can we do to the files on my phone to organize in the best way possible", "Some suggestions for my files to organize", "What do you suggest?", "Give me ideas to clean up my downloads", "What should I do?").
-   - Greetings, casual chat, check-ins ("Hi", "Hello", "Hey", "Good morning", "Salam")
-   - Questions about your identity, capabilities, or how you work ("Who are you?", "What can you do?", "Help", "What are your boundaries?")
-   - Open conversational follow-ups ("What else?", "Tell me more", "Thanks")
-   - OUT-OF-SCOPE REQUESTS: Any request asking to perform external actions outside local storage.
-
-2. "QUERY_INFO":
-   - Read-only queries asking to find, search, locate, list, inspect, audit, summarize, or check files or dates (e.g., "Find duplicate files", "Find me Sumbal pass", "List files in download", "Are there any duplicate files?", "Any more sorting for the download?", "What's left to sort?").
-   - Status checks on whether a folder still has unorganized files left.
-   - ZERO file moves, renames, or deletions.
-
-3. "FILE_OPERATION":
-   - Explicit commands, instructions, or confirmations to take action, execute, or stage file moves/renames/deletions right now.
-   - CRITICAL MULTI-TURN CONFIRMATIONS: If the user says "Yes", "Yeah", "Sure", "Okay", "Proceed", "Go ahead", "Do it", "Sort them" in response to an action or plan the Assistant previously recommended in RECENT CONVERSATION HISTORY, classify as "FILE_OPERATION"!
-   - POLITE ACTION DIRECTIVES: If the user says "How about we first sort all those files in documents directory...", "Can we first organize...", "Let's sort...", or "First sort...", this is an ACTION INSTRUCTION. Classify as "FILE_OPERATION"!
-   - Examples:
-     * "Clean duplicate downloads"
-     * "Yes organize all my uni files"
-     * "Sort student vouchers"
-     * "Separate peer documents"
-     * "Clean download names"
-     * "How about we first sort all those files in the documents directory"
-
-Respond STRICTLY with valid JSON adhering to this schema:
-{{
-  "intent": "CONVERSATION" | "QUERY_INFO" | "FILE_OPERATION",
-  "reply": "<Dynamic, helpful conversational response addressing the user directly if CONVERSATION. Empty string if QUERY_INFO or FILE_OPERATION.>"
-}}
-"""
-
-    stage1_resp = call_gemini_json(intent_classification_system_prompt, raw_prompt)
-    intent = stage1_resp.get("intent", "").upper() if isinstance(stage1_resp, dict) else ""
-    conv_reply = stage1_resp.get("reply", "") if isinstance(stage1_resp, dict) else ""
-
-    # Offline / Heuristic Fallback for Stage 1:
-    if not intent:
-        lower_p = normalized_prompt.lower()
-
-        # Action command starters / imperative prefixes
-        action_command_starts = (
-            "yes ", "yeah ", "sure ", "ok ", "okay ", "please ", "go ahead ", "proceed ",
-            "sort ", "organize ", "clean ", "move ", "put ", "trash ", "delete ", "tidy ", "structure ", "deduplicate "
-        )
-        is_action_command = any(lower_p.startswith(p) for p in action_command_starts)
-
-        advice_lead_keywords = (
-            "suggestion", "suggestions", "suggest", "recommend", "recommendation",
-            "recommendations", "idea", "ideas", "advice", "tip", "tips", "how to",
-            "how should", "how can", "what do you think", "what should i", "guide me",
-            "options", "propose some ideas", "any ideas", "what can we do", "what can i do",
-            "what could we do", "what should we do", "what to do", "best way", "best ways",
-            "best way possible"
-        )
-        query_lead_keywords = (
-            "list", "find", "show", "search", "what is inside", "what is in", 
-            "what else is in", "what files", "how many files", "do i have", 
-            "display", "summarize", "view", "inspect", "where is", "where are",
-            "tell me about", "locate", "check for", "which files", "today did i",
-            "did i receive", "receive any", "recent", "are there any", "are there",
-            "any more", "more sorting", "what's left", "whats left", "remaining files"
-        )
-        file_op_keywords = (
-            "sort", "voucher", "fee", "challan", "slip", "peer", "separate", 
-            "clean", "download", "screenshot", "trash", "delete", "move", 
-            "organize", "rename", "isolate", "structure", "tidy", "place",
-            "duplicate", "duplicates", "dedup", "deduplicate"
-        )
-
-        if is_pure_affirmative:
-            intent = "FILE_OPERATION"
-        elif is_polite_action:
-            intent = "FILE_OPERATION"
-        elif is_action_command and any(k in lower_p for k in file_op_keywords):
-            intent = "FILE_OPERATION"
-        elif any(k in lower_p for k in advice_lead_keywords):
-            intent = "CONVERSATION"
-        elif any(k in lower_p for k in query_lead_keywords) and not any(k in lower_p for k in ("sort", "organize", "clean", "trash", "move", "separate", "rename", "deduplicate")):
-            intent = "QUERY_INFO"
-        elif any(k in lower_p for k in ("what else", "tell me more", "who are you", "what can you do", "help", "hi", "hello", "hey", "thanks", "email", "mail", "whatsapp", "music")):
-            intent = "CONVERSATION"
-        elif any(k in lower_p for k in file_op_keywords):
-            intent = "FILE_OPERATION"
-        else:
-            intent = "CONVERSATION"
-
-    # =========================================================================
-    # TIER 1: CONVERSATION (Dynamic Gemini Reply - Zero Canned Strings)
-    # =========================================================================
-    # TIER 1: CONVERSATION (Dynamic Gemini Reply & Live Storage Audit - Zero Canned Strings)
-    # =========================================================================
-    if intent == "CONVERSATION":
-        dynamic_audit = generate_dynamic_storage_advice(BASE_STORAGE_DIR, target_folder, owner_name, peer_names)
-        if not conv_reply:
-            conv_sys = f"""You are Storage Copilot, an advanced on-device AI agent running locally via Termux on Android for {owner_name} (Roll/ID: {identifiers}, Major: Artificial Intelligence).
-Current Device Time: {now_str} (Today's Date: {today_date}).
-Storage Root: /storage/emulated/0 (Downloads, Documents).
-Known Peers: {", ".join(peer_names)}.
-Peer Routing:
-{peer_matrix_lines}
-
-LIVE REAL-TIME STORAGE AUDIT ({target_folder}/):
-{dynamic_audit}
-
-YOUR AGENT PERSONA:
-- You are an elite, highly capable AI agent (similar to Google DeepMind / Antigravity). You speak articulately, intelligently, and directly to {owner_name}.
-- You are warm, confident, and professional. Never robotic or generic.
-- CRITICAL: Never output a generic boilerplate template or canned greeting unless the user gave a simple one-word greeting like "hi".
-- Ground your suggestions in the LIVE REAL-TIME STORAGE AUDIT above. Refer to real filenames, actual counts, and real storage categories currently on the device.
-
-CAPABILITIES & BOUNDARIES:
-- WHAT YOU CAN DO (Your Core Superpowers):
-  1. Deep Document Reconnaissance: Inspect PDFs, notes, vouchers, and bills on local storage with RAM-level PII sanitization (redacting CNIC, passport, IBAN, and personal names before LLM reasoning).
-  2. Intelligent Organization: Route academic study materials to `Documents/University/<Subject>/`, student vouchers to `Documents/University/Vouchers/`, isolate peer documents to `Documents/Peers/<PeerName>/`, and utility bills to `Documents/Finances/`.
-  3. Interactive Diff Safety: Stage proposed moves/renames for interactive user review before execution.
-  4. 1-Tap Atomic Rollback: Undo any batch of actions with full state recovery via an on-device SQLite WAL ledger (`.ledger.db`).
-  5. Content-Aware Renaming & Search: Standardize cryptic WhatsApp (`DOC-*.pdf`) or arXiv downloads into clean, descriptive filenames.
-- WHAT YOU CANNOT DO (Out-of-Scope Boundaries):
-  1. You CANNOT send emails, SMS, WhatsApp messages, or interact with external communication services.
-  2. You CANNOT browse or scrape the live internet, or download YouTube/web media.
-  3. You CANNOT access cloud storage (Google Drive/Dropbox) unless locally synced to storage.
-  4. You CANNOT modify Android system settings, root files, or app packages outside shared user storage (`/storage/emulated/0`).
-  5. You CANNOT execute arbitrary system shell commands or process financial payments.
-
-ADVICE & RECOMMENDATIONS:
-- If {owner_name} is asking for suggestions, ideas, or recommendations on how to organize his files:
-  Use the live audit above to provide an articulate, personalized roadmap citing his actual files and sizes.
-  Invite him to pick which action to execute (e.g. "Separate peer documents", "Clean duplicates", or "Organize all university files").
-
-HANDLING OUT-OF-SCOPE REQUESTS:
-- If the user asks you to do something out of scope (e.g. sending emails, messaging, internet search, system modifications), do NOT pretend to do it or hallucinate an action.
-- Explain clearly, politely, and knowledgeably that the requested action is outside your local storage management sandbox.
-- State exactly what you can do instead for that topic (e.g., if asked to email an assignment: offer to locate and verify the assignment PDF in `Documents/University/AI/` so {owner_name} can easily attach it).
-
-Keep your response well-structured using clean Markdown formatting (bullet points, bold highlights, code spans).
-"""
-            conv_reply = call_gemini_text(conv_sys, raw_prompt)
-
-        # Dynamic fallback: audit live files on disk instead of returning static strings
-        if not conv_reply:
-            lp = normalized_prompt.lower()
-            if any(w in lp for w in ("suggestion", "suggest", "recommend", "recommendation", "idea", "how should i", "how to organize", "advice", "tip", "options", "best way", "what can we do", "what can i do", "fikes", "vest")):
-                conv_reply = dynamic_audit
-            elif any(w in lp for w in ("email", "mail", "whatsapp", "call", "sms", "spotify", "music", "flight", "weather", "browse", "internet", "hack")):
-                conv_reply = (
-                    f"I cannot perform external actions like sending emails or accessing web services, {owner_name}.\n\n"
-                    f"I am **Storage Copilot**, an on-device Android AI agent running locally via Termux. My capabilities are focused entirely on your device's filesystem (`/storage/emulated/0`):\n\n"
-                    f"- 🔍 **Document Reconnaissance**: Search, inspect, and summarize PDFs, notes, vouchers, and bills with zero-cloud PII redaction.\n"
-                    f"- 📂 **Intelligent Taxonomy**: Organize university course files into `Documents/University/<Subject>/` and isolate peer files into `Documents/Peers/<Name>/`.\n"
-                    f"- 🛡️ **Interactive Safety**: Staged diff reviews before any files are moved, plus 1-tap atomic rollbacks via SQLite WAL ledger.\n\n"
-                    f"If you'd like me to find or verify the file on your device so you can attach it, just let me know!"
-                )
-            elif any(w in lp for w in ("what else", "more", "next")):
-                conv_reply = (
-                    f"Here are several other tasks I can help you with, {owner_name}:\n\n"
-                    f"- **Inspect & Query**: Ask *\"List files in download\"* or *\"today did I receive any documents?\"* to inspect files without moving them.\n"
-                    f"- **Sort Academic Vouchers**: Separate your BSAI fee slips into `Documents/University/Vouchers`.\n"
-                    f"- **Isolate Peer Documents**: Route incoming files for {', '.join(peer_names)} to `Documents/Peers/<Name>`.\n"
-                    f"- **Clean Cryptic Downloads**: Standardize messy WhatsApp or arXiv downloads with descriptive, content-derived names.\n"
-                    f"- **Deduplication**: Safely identify and clean redundant files to free up storage."
-                )
-            elif any(w in lp for w in ("who are you", "what can you do", "help", "role", "abilities", "capabilities", "boundaries")):
-                conv_reply = (
-                    f"I am **Storage Copilot**, your autonomous on-device AI storage agent running locally via Termux on Android for **{owner_name}** ({identifiers[0] if identifiers else 'BSAI-182'}, Artificial Intelligence).\n\n"
-                    f"### 🚀 What I Can Do:\n"
-                    f"- 🔍 **Smart Document Reconnaissance**: Search and inspect files across storage (`/storage/emulated/0`), extracting PDF text and metadata with in-memory PII sanitization.\n"
-                    f"- 📚 **Academic Study Organization**: Sort lectures, assignments, and research papers into `Documents/University/<Subject>/`.\n"
-                    f"- 👥 **Peer Separation**: Isolate incoming documents for {', '.join(peer_names)} into dedicated `Documents/Peers/<Name>/` directories.\n"
-                    f"- 🏷️ **Content-Aware Renaming**: Standardize cryptic filenames (like WhatsApp `DOC-*.pdf` or arXiv IDs) into clear, human-readable titles.\n"
-                    f"- 🛡️ **Interactive Diff & 1-Tap Undo**: Review proposed changes in interactive diff cards before execution, with complete 1-tap rollback powered by SQLite WAL.\n\n"
-                    f"### ⚠️ Boundaries & Scope:\n"
-                    f"- I run strictly on your local Android device without cloud file uploads.\n"
-                    f"- I cannot send emails, browse the live internet, or access apps/accounts outside your local storage.\n\n"
-                    f"Try asking: *\"List files in download\"*, *\"Find me Sumbal pass\"*, or *\"today did I receive any documents?\"*"
-                )
-            elif any(w in lp for w in ("peer", "peers", "friends", "fawad", "sumbal", "ahmed", "yousaf")):
-                conv_reply = (
-                    f"Your registered peer separation matrix includes: **{', '.join(peer_names)}**.\n\n"
-                    "Any documents or vouchers identified for these classmates are isolated into `Documents/Peers/<Name>` to protect your personal storage."
-                )
-            elif any(w in lp for w in ("hi", "hello", "hey", "salam", "morning", "afternoon", "evening")):
-                conv_reply = (
-                    f"👋 Hello {owner_name}! Storage Copilot is online and connected to your storage root (`/storage/emulated/0`).\n\n"
-                    f"How can I help with your files today? You can ask me to search documents, organize downloads, or audit storage."
-                )
-            else:
-                conv_reply = dynamic_audit
-
-        return jsonify({
-            "type": "conversation",
-            "message": conv_reply,
-            "version": APP_VERSION,
-            "actions": [],
-            "quick_chips": [
-                "🧹 Clean Duplicates",
-                "📋 Sort Student Vouchers",
-                "👥 Separate Peer Documents",
-                "🏷️ Clean Download Names"
-            ]
-        })
-
-    # =========================================================================
-    # TIER 2: QUERY_INFO (Read-Only Inspection - Zero Mutations)
-    # =========================================================================
-    if intent == "QUERY_INFO":
-        all_files = collect_storage_files(BASE_STORAGE_DIR, target_folder)
-        lower_prompt = raw_prompt.lower()
-        parsed_intent = parse_query_intent(raw_prompt, target_folder)
-
-        if not all_files:
-            return jsonify({
-                "type": "query_info",
-                "message": (
-                    f"📂 No files found in storage (`{target_folder}/` or `Documents/`). The directories are currently empty.\n\n"
-                    f"Please place files in `{target_folder}/` or tap 'Seed Fixtures' to populate demo files for testing."
-                ),
-                "version": APP_VERSION,
-                "actions": [],
-                "query_results": [],
-                "quick_chips": [
-                    "🧹 Clean Duplicates",
-                    "📋 Sort Student Vouchers",
-                    "👥 Separate Peer Documents",
-                    "🏷️ Clean Download Names"
-                ]
-            })
-
-        # Check if the query is asking about duplicates
-        is_duplicate_query = any(w in lower_prompt for w in ("duplicate", "duplicates", "dedup", "deduplicate", "repeated file", "repeated files"))
-        if is_duplicate_query:
-            dup_res = find_duplicate_clusters(BASE_STORAGE_DIR, target_folder)
-            if dup_res["total_duplicates"] == 0:
-                return jsonify({
-                    "type": "query_info",
-                    "message": f"✨ **No duplicate files detected in `{target_folder}/`!**\n\nI scanned your storage files using cryptographic SHA-256 content hashing. Every document is unique and no redundant copies were found.",
-                    "version": APP_VERSION,
-                    "actions": [],
-                    "query_results": [],
-                    "duplicate_summary": dup_res,
-                    "quick_chips": [
-                        "🧹 Clean duplicate downloads",
-                        "📋 Sort Student Vouchers",
-                        "👥 Separate Peer Documents",
-                        "🏷️ Clean Download Names"
-                    ]
-                })
-            else:
-                lines = [
-                    f"### 🧹 Duplicate File Audit for `{target_folder}/`",
-                    f"Found **{dup_res['total_duplicates']} redundant duplicate file(s)** across **{dup_res['total_clusters']} group(s)**.",
-                    f"**Total Reclaimable Storage:** `{dup_res['reclaimable_human']}`\n",
-                    "#### Detected Groups:"
-                ]
-                for idx, cluster in enumerate(dup_res["clusters"], 1):
-                    k = cluster["keeper"]
-                    lines.append(f"**Group {idx}** (Size: {cluster['size_human']} each, Reclaimable: {cluster['reclaimable_human']}):")
-                    lines.append(f"- 🛡️ **Preserving Keeper:** `{k['path']}` *({k['reason']})*")
-                    for d in cluster["duplicates"]:
-                        lines.append(f"- 🗑️ **Redundant Copy:** `{d['path']}` *({d['reason']})*")
-                    lines.append("")
-                lines.append("💡 *To clean up these redundant copies and reclaim space, say **'Clean duplicate downloads'** or tap **Clean Duplicates** below.*")
-
-                return jsonify({
-                    "type": "query_info",
-                    "message": "\n".join(lines),
-                    "version": APP_VERSION,
-                    "actions": [],
-                    "query_results": dup_res["clusters"],
-                    "duplicate_summary": dup_res,
-                    "quick_chips": [
-                        "🧹 Clean duplicate downloads",
-                        "📋 Sort Student Vouchers",
-                        "👥 Separate Peer Documents",
-                        "🏷️ Clean Download Names"
-                    ]
-                })
-
-        # ---------------------------------------------------------------------
-        # SUB-CASE A0: Folder Audit & Remaining Work Request (e.g. "Any more sorting for the download?", "What's left?")
-        # ---------------------------------------------------------------------
-        if parsed_intent.get("is_audit_status_query"):
-            dir_name = parsed_intent["folder_constraint"] or target_folder
-            dir_files = [
-                f for f in all_files 
-                if f["path"].startswith(f"{dir_name}/") or (f["path"] == f["filename"] and dir_name.lower() in ("download", "downloads"))
-            ]
-            if not dir_files and dir_name.lower() in ("download", "downloads"):
-                dir_files = [f for f in all_files if not f["path"].startswith("Documents/")]
-
-            unorganized_acad = []
-            unorganized_peers = defaultdict(list)
-            unorganized_vouchers = []
-            unorganized_trash = []
-
-            for f in dir_files:
-                fn = f["filename"]
-                is_p = False
-                for p in peer_names:
-                    if p.lower() in fn.lower():
-                        unorganized_peers[p].append(f)
-                        is_p = True
-                        break
-                if is_p:
-                    continue
-
-                if any(w in fn.lower() for w in ("voucher", "challan", "fee", "receipt")):
-                    unorganized_vouchers.append(f)
-                elif any(w in fn.lower() for w in ("lecture", "notes", "assignment", "wa0017", "wa0018", "neural", "1508", "paper", "bsai")):
-                    unorganized_acad.append(f)
-                elif fn.endswith(".tmp") or "screenshot" in fn.lower() or fn.startswith("temp_"):
-                    unorganized_trash.append(f)
-
-            total_pending = len(unorganized_acad) + sum(len(l) for l in unorganized_peers.values()) + len(unorganized_vouchers) + len(unorganized_trash)
-
-            gemini_audit_prompt = f"""You are Storage Copilot, an advanced on-device AI agent for {owner_name}.
-User Query: "{raw_prompt}"
-Target Folder: {dir_name}/
-Total Remaining Files in Folder: {len(dir_files)}.
-Pending Unorganized Files:
-- Academic Courseware: {len(unorganized_acad)} file(s)
-- Peer Classmate Files: {sum(len(l) for l in unorganized_peers.values())} file(s)
-- Tuition Vouchers: {len(unorganized_vouchers)} file(s)
-- Temporary Trash/Cache: {len(unorganized_trash)} file(s)
-
-INSTRUCTIONS:
-1. Speak articulately and directly to {owner_name}.
-2. Explain the current status of `{dir_name}/`.
-3. If there are pending unorganized files ({total_pending} remaining): clearly list what remains and suggest next logical steps (e.g., 'Separate peer documents' or 'Organize university files').
-4. If NO unorganized files remain: celebrate that the folder is clean and organized, and note that only personal/general files remain.
-5. NEVER search for a file named 'download sorting' or output robotic database strings.
-"""
-            audit_reply = call_gemini_text(gemini_audit_prompt, raw_prompt)
-
-            if not audit_reply:
-                if total_pending > 0:
-                    lines = [
-                        f"I audited your **`{dir_name}/`** directory. You currently have **{len(dir_files)} file(s)**, with **{total_pending} file(s)** ready for further organization:\n"
-                    ]
-                    if unorganized_peers:
-                        p_summary = ", ".join([f"{len(l)} from **{p}**" for p, l in unorganized_peers.items()])
-                        lines.append(f"- 👥 **Peer Documents ({p_summary})**: We can isolate these into `Documents/Peers/<Name>/`.")
-                    if unorganized_acad:
-                        lines.append(f"- 📚 **Academic Courseware ({len(unorganized_acad)} file(s))**: Can be organized into `Documents/University/AI/`.")
-                    if unorganized_vouchers:
-                        lines.append(f"- 🧾 **Fee Vouchers ({len(unorganized_vouchers)} file(s))**: Can be archived into `Documents/University/Vouchers/`.")
-                    if unorganized_trash:
-                        lines.append(f"- 🗑️ **Temporary Files ({len(unorganized_trash)} file(s))**: Can be safely soft-deleted.")
-                    lines.append(f"\n💡 *Would you like me to proceed with any of these? Say **\"Separate peer documents\"** or **\"Organize all university files\"** to review a plan.*")
-                    audit_reply = "\n".join(lines)
-                else:
-                    audit_reply = (
-                        f"✨ **`{dir_name}/` is in great shape!**\n\n"
-                        f"All primary academic courseware, fee vouchers, and classmate documents have already been organized into their respective folders. "
-                        f"The remaining {len(dir_files)} file(s) are general downloads and documents."
-                    )
-
-            return jsonify({
-                "type": "query_info",
-                "message": audit_reply,
-                "version": APP_VERSION,
-                "actions": [],
-                "query_results": [],
-                "quick_chips": [
-                    "👥 Separate Peer Documents",
-                    "📋 Sort Student Vouchers",
-                    "🧹 Clean Duplicates",
-                    "🏷️ Clean Download Names"
-                ]
-            })
-
-        # ---------------------------------------------------------------------
-        # SUB-CASE A: Directory Listing / Inventory Request (e.g. "Give me list of all the files in download")
-        # ---------------------------------------------------------------------
-        if parsed_intent["is_directory_listing"]:
-            dir_name = parsed_intent["folder_constraint"] or target_folder
-            dir_files = [
-                f for f in all_files 
-                if f["path"].startswith(f"{dir_name}/") or (f["path"] == f["filename"] and dir_name.lower() in ("download", "downloads"))
-            ]
-            if not dir_files and dir_name.lower() in ("download", "downloads"):
-                dir_files = [f for f in all_files if not f["path"].startswith("Documents/")]
-
-            # Group files in directory by semantic category
-            grouped_acad = []
-            grouped_peers = defaultdict(list)
-            grouped_fin = []
-            grouped_trash = []
-            grouped_general = []
-
-            for f in dir_files:
-                fn = f["filename"]
-                is_p = False
-                for p in peer_names:
-                    if p.lower() in fn.lower():
-                        grouped_peers[p].append(f)
-                        is_p = True
-                        break
-                if is_p:
-                    continue
-
-                if any(w in fn.lower() for w in ("voucher", "challan", "fee", "receipt", "bill", "invoice")):
-                    grouped_fin.append(f)
-                elif any(w in fn.lower() for w in ("lecture", "notes", "assignment", "wa0017", "wa0018", "neural", "1508", "paper", "bsai")):
-                    grouped_acad.append(f)
-                elif fn.endswith(".tmp") or "screenshot" in fn.lower() or fn.startswith("temp_"):
-                    grouped_trash.append(f)
-                else:
-                    grouped_general.append(f)
-
-            total_bytes = sum(f.get("size_bytes", 0) for f in dir_files)
-            total_human = format_bytes_human(total_bytes)
-
-            # Try generating articulate inventory via Gemini if online
-            dir_manifest = [
-                {"filename": f["filename"], "path": f["path"], "size_kb": f.get("size_kb", 0)}
-                for f in dir_files[:25]
-            ]
-            gemini_dir_prompt = f"""You are Storage Copilot, an advanced on-device AI agent for {owner_name}.
-User Query: "{raw_prompt}"
-Target Directory: {dir_name}/
-Total Files in Folder: {len(dir_files)} ({total_human}).
-Files Manifest:
-{json.dumps(dir_manifest, indent=2)}
-
-INSTRUCTIONS:
-Provide a clear, articulate, structured inventory of the files in `{dir_name}/`.
-Group them logically (e.g. Academic, Peer Classmates, Vouchers/Finances, General Downloads).
-Cite filenames with bold text and paths in code spans.
-Give a brief, intelligent copilot recommendation at the end on what can be organized.
-Never output robotic database strings like 'Match: Filename matches:'.
-"""
-            query_reply = call_gemini_text(gemini_dir_prompt, raw_prompt)
-
-            if not query_reply:
-                # High-fidelity local inventory synthesis
-                lines = [
-                    f"Here is the complete inventory of your **`{dir_name}/`** folder (**{len(dir_files)} file(s)**, {total_human}):\n"
-                ]
-                if grouped_acad:
-                    lines.append(f"📚 **Academic Courseware ({len(grouped_acad)} file(s)):**")
-                    for f in grouped_acad[:6]:
-                        lines.append(f"- 📄 **{f['filename']}** (`{f['path']}` • {f.get('size_kb', 0)} KB)")
-                    if len(grouped_acad) > 6:
-                        lines.append(f"- *...and {len(grouped_acad) - 6} more academic file(s)*")
-                    lines.append("")
-
-                if grouped_peers:
-                    peer_summary = ", ".join([f"{len(fl)} from **{p}**" for p, fl in grouped_peers.items()])
-                    lines.append(f"👥 **Peer Classmate Documents ({peer_summary}):**")
-                    for p, fl in grouped_peers.items():
-                        for f in fl[:4]:
-                            lines.append(f"- 📄 **{f['filename']}** (`{f['path']}` • {f.get('size_kb', 0)} KB)")
-                    lines.append("")
-
-                if grouped_fin:
-                    lines.append(f"🧾 **Tuition & Financial Records ({len(grouped_fin)} file(s)):**")
-                    for f in grouped_fin[:6]:
-                        lines.append(f"- 📄 **{f['filename']}** (`{f['path']}` • {f.get('size_kb', 0)} KB)")
-                    lines.append("")
-
-                if grouped_general:
-                    lines.append(f"📄 **General Documents & Downloads ({len(grouped_general)} file(s)):**")
-                    for f in grouped_general[:8]:
-                        lines.append(f"- 📄 **{f['filename']}** (`{f['path']}` • {f.get('size_kb', 0)} KB)")
-                    if len(grouped_general) > 8:
-                        lines.append(f"- *...and {len(grouped_general) - 8} more document(s)*")
-                    lines.append("")
-
-                if grouped_trash:
-                    lines.append(f"🗑️ **Temporary Cache & Screen Captures ({len(grouped_trash)} file(s)):**")
-                    for f in grouped_trash[:4]:
-                        lines.append(f"- 📄 `{f['filename']}` ({f.get('size_kb', 0)} KB)")
-                    lines.append("")
-
-                lines.append(
-                    f"💡 *Copilot Analysis: I can organize these files for you. Say **\"Organize all university files\"** or **\"Separate peer documents\"** to review a staged Action Plan.*"
-                )
-                query_reply = "\n".join(lines)
-
-            return jsonify({
-                "type": "query_info",
-                "message": query_reply,
-                "version": APP_VERSION,
-                "actions": [],
-                "query_results": [],
-                "quick_chips": [
-                    "🧹 Clean Duplicates",
-                    "📋 Sort Student Vouchers",
-                    "👥 Separate Peer Documents",
-                    "🏷️ Clean Download Names"
-                ]
-            })
-
-        # ---------------------------------------------------------------------
-        # SUB-CASE B: Specific Document Lookup, Topic Filter, or Date Search
-        # ---------------------------------------------------------------------
-        is_date_query = any(w in lower_prompt for w in ("today", "yesterday", "date", "recent", "new", "received", "downloaded today", "last"))
-
-        scored_files = []
-        for f in all_files:
-            match_score, match_reason = score_document_match(raw_prompt, f)
-            classification = classify_document(f["filename"], f["snippet"])
-            scored_files.append({
-                **f,
-                "score": match_score,
-                "match_reason": match_reason,
-                "category": classification["category"],
-                "type_label": classification["type_label"]
-            })
-
-        if is_date_query:
-            scored_files.sort(key=lambda x: (x.get("is_today", False), x.get("modified_timestamp", 0)), reverse=True)
-            top_matches = [f for f in scored_files if f.get("is_today") or f.get("score", 0) >= 45.0]
-        else:
-            scored_files.sort(key=lambda x: x["score"], reverse=True)
-            top_matches = [f for f in scored_files if f["score"] >= 45.0]
-
-        # Compact manifest for Gemini (top 15 candidates max to keep network payload light & fast)
-        gemini_manifest = [
-            {
-                "filename": f["filename"],
-                "path": f["path"],
-                "size_kb": f["size_kb"],
-                "modified_date": f.get("modified_str", "Unknown"),
-                "is_today": f.get("is_today", False),
-                "category": f["type_label"],
-                "match_score": f["score"],
-                "snippet": (f.get("snippet") or "")[:80]
-            }
-            for f in top_matches[:15]
-        ]
-
-        query_system_prompt = f"""You are Storage Copilot, an articulate on-device AI agent for {owner_name} (BSAI-182).
-Current Device Time: {now_str}.
-Storage Root: /storage/emulated/0 (Downloads, Documents).
-Total Files Indexed: {len(all_files)}.
-Known Peers: {", ".join(peer_names)}.
-Peer Routing:
-{peer_matrix_lines}
-
-USER SEARCH QUERY:
-"{raw_prompt}"
-
-CANDIDATE MATCHES (Ranked by semantic score, filtered for PII):
-{json.dumps(gemini_manifest, indent=2)}
-
-INSTRUCTIONS & REASONING RULES:
-1. Act as an intelligent, articulate AI agent (like Google DeepMind / Antigravity). Speak directly to {owner_name}.
-2. SPECIFIC BOOK OR DOCUMENT SEARCH (e.g. 'Can you find me the book for 48 laws of power?'):
-   - If a matching book/document is present in candidates: highlight ONLY that specific file with its exact name, path in code spans, size, and category.
-   - Do NOT list unrelated files like peer passes or random text files!
-   - Offer a helpful next step (e.g. moving it to `Documents/Books/`).
-3. IDENTITY PASS CAUTION:
-   - If the user asks for their entry pass/degree and only a classmate pass exists: explain that a pass for peer {peer_names} was found, but not one in {owner_name}'s name.
-4. If no genuine match exists: explain politely that you searched across the {len(all_files)} indexed files on their storage and could not find it.
-5. NEVER output robotic database strings like 'Match: Filename matches:' or 'Category: General Document • Match: ...'.
-"""
-
-        query_reply = call_gemini_text(query_system_prompt, raw_prompt)
-
-        # High-precision local fallback search if Gemini is offline
-        if not query_reply:
-            if is_date_query:
-                today_matches = [f for f in all_files if f.get("is_today")]
-                if today_matches:
-                    lines = [f"📅 **Documents Received Today ({now_dt.strftime('%B %d, %Y')}):**\n\nFound **{len(today_matches)} document(s)** downloaded today:"]
-                    for m in today_matches[:10]:
-                        snip_preview = f" • *Preview:* \"{m['snippet'][:80]}\"" if m.get("snippet") and m['snippet'] != "none (binary/image)" else ""
-                        time_display = m.get("modified_str") or "Today"
-                        lines.append(f"- 📄 **{m['filename']}** (`{m['path']}` • {m.get('size_kb', 0)} KB • *{time_display}*){snip_preview}")
-                    query_reply = "\n\n".join(lines)
-                else:
-                    recent_files = sorted(all_files, key=lambda x: x.get("modified_timestamp", 0), reverse=True)[:5]
-                    lines = [f"📅 You have not received or downloaded any new documents today ({now_dt.strftime('%B %d, %Y')}).\n\nHere are your most recently modified files:"]
-                    for m in recent_files:
-                        time_display = m.get("modified_str") or "Earlier"
-                        lines.append(f"- 📄 **{m['filename']}** (`{m['path']}` • *{time_display}*)")
-                    query_reply = "\n\n".join(lines)
-            elif top_matches:
-                # If there is a single standout match (e.g. specific book lookup like 48 laws of power)
-                best = top_matches[0]
-                if len(top_matches) == 1 or (best["score"] >= 120.0 and (len(top_matches) == 1 or best["score"] - top_matches[1]["score"] >= 35.0)):
-                    lines = [
-                        f"I found the document you were looking for on your device:\n\n"
-                        f"- 📄 **{best['filename']}**\n"
-                        f"  * Location: `{best['path']}`\n"
-                        f"  * Size: {best['size_kb']} KB\n"
-                        f"  * Category: **{best['type_label']}**"
-                    ]
-                    if best.get("snippet") and best["snippet"] != "none (binary/image)":
-                        lines.append(f"  * Preview: *\"{best['snippet'][:150]}\"*")
-                    lines.append(f"\n💡 *Would you like me to organize, move, or inspect this file further?*")
-                    query_reply = "\n".join(lines)
-                else:
-                    lines = [f"I found **{len(top_matches)} matching document(s)** on your device:\n"]
-                    for m in top_matches[:8]:
-                        snip_preview = f" • *Preview:* \"{m['snippet'][:90]}\"" if m.get("snippet") and m['snippet'] != "none (binary/image)" else ""
-                        lines.append(f"- 📄 **{m['filename']}** (`{m['path']}` • {m['size_kb']} KB)\n  *Category:* **{m['type_label']}**{snip_preview}")
-                    query_reply = "\n\n".join(lines)
-            else:
-                # No matches found: check identity pass distinction
-                if any(w in lower_prompt for w in ("pass", "degree", "entry")):
-                    peer_passes = [
-                        f for f in all_files 
-                        if any(p.lower() in f["filename"].lower() for p in peer_names) and "pass" in f["filename"].lower()
-                    ]
-                    if peer_passes:
-                        found_p = peer_passes[0]
-                        query_reply = (
-                            f"I searched your storage ({len(all_files)} files indexed).\n\n"
-                            f"I found an entry pass for your classmate (`{found_p['path']}` • {found_p.get('size_kb', 0)} KB), "
-                            f"but I did not find a degree or entry pass issued for you ({owner_name}, {identifiers[0] if identifiers else 'BSAI-182'}).\n\n"
-                            f"If you received it recently, make sure it has finished downloading into `{target_folder}/`."
-                        )
-                    else:
-                        query_reply = f"I searched your storage ({len(all_files)} files indexed), but found no degree or entry pass matching **\"{raw_prompt}\"**."
-                else:
-                    target_disp = parsed_intent.get("cleaned_target") or raw_prompt
-                    query_reply = (
-                        f"I searched across your storage ({len(all_files)} files indexed), but couldn't find any documents matching **\"{target_disp}\"**.\n\n"
-                        f"Please check if the file was downloaded under a different name or if the download is still in progress."
-                    )
-
-        return jsonify({
-            "type": "query_info",
-            "message": query_reply,
-            "version": APP_VERSION,
-            "actions": [],
-            "query_results": [],
-            "quick_chips": [
-                "🧹 Clean Duplicates",
-                "📋 Sort Student Vouchers",
-                "👥 Separate Peer Documents",
-                "🏷️ Clean Download Names"
-            ]
-        })
-
-    # =========================================================================
-    # TIER 3: FILE_OPERATION (Reconnaissance & Action Plan Synthesis)
-    # =========================================================================
-    # Phase 1: Check if this file operation request is deduplication cleanup
-    is_deduplicate_req = any(k in normalized_prompt.lower() for k in ("duplicate", "duplicates", "dedup", "deduplicate", "repeated file", "repeated files"))
-    if is_deduplicate_req:
-        dup_res = find_duplicate_clusters(BASE_STORAGE_DIR, target_folder)
-        if dup_res["total_duplicates"] == 0:
-            return jsonify({
-                "type": "conversation",
-                "message": (
-                    f"✨ **No duplicate files detected in `{target_folder}/`!**\n\n"
-                    "All documents possess unique cryptographic SHA-256 signatures. No redundant copies were found to clean."
-                ),
-                "version": APP_VERSION,
-                "actions": [],
-                "duplicate_summary": dup_res,
-                "quick_chips": [
-                    "📋 Sort Student Vouchers",
-                    "👥 Separate Peer Documents",
-                    "🏷️ Clean Download Names",
-                    "🗑️ Cleanup Old Screenshots"
-                ]
-            })
-
-        actions = []
-        for cluster in dup_res["clusters"]:
-            keeper = cluster["keeper"]
-            for dup in cluster["duplicates"]:
-                actions.append({
-                    "action_id": f"step-{len(actions) + 1}",
-                    "type": "trash",
-                    "badge": "TRASH",
-                    "badge_label": "Soft Delete",
-                    "source": dup["path"],
-                    "path": dup["path"],
-                    "destination": f".agent_trash/{dup['filename']}",
-                    "rationale": f"Redundant duplicate of '{keeper['filename']}' ({cluster['size_human']} reclaimed)",
-                    "ai_inspected": True,
-                    "inspected_preview": f"Exact SHA-256 match with {keeper['filename']}"
-                })
-
-        plan_id = str(uuid.uuid4())
-        plan_desc = f"Deduplication: Clean {len(actions)} redundant duplicate file(s) ({dup_res['reclaimable_human']})"
-        return jsonify({
-            "type": "plan",
-            "message": (
-                f"Identified **{len(actions)} redundant duplicate file(s)** across {dup_res['total_clusters']} group(s). "
-                f"Cleaning them will reclaim **{dup_res['reclaimable_human']}** of storage while safely preserving all original canonical files.\n\n"
-                "Review the proposed removals below. Tap **Execute Action Plan** to move redundant copies to `.agent_trash` (with 1-tap rollback at any time)."
-            ),
-            "plan": {
-                "plan_id": plan_id,
-                "description": plan_desc,
-                "actions": actions
-            },
-            "actions": actions,
-            "duplicate_summary": dup_res,
-            "version": APP_VERSION
-        })
-
-    # 1. Locate target folder
     target_dir = None
     dir_candidates = [
         target_folder,
@@ -3021,31 +2304,20 @@ INSTRUCTIONS & REASONING RULES:
         target_dir = os.path.join(BASE_STORAGE_DIR, target_folder)
         os.makedirs(target_dir, exist_ok=True)
 
-    # 2. Read real files in target directory
     scanned_entries = []
+    subfolders = []
     if os.path.exists(target_dir) and os.path.isdir(target_dir):
         for entry in os.scandir(target_dir):
-            if entry.is_file() and not entry.name.startswith("."):
+            if entry.is_dir() and not entry.name.startswith("."):
+                try:
+                    cnt = len([f for f in os.scandir(entry.path) if not f.name.startswith(".")])
+                    subfolders.append(f"{entry.name} ({cnt} items)")
+                except Exception:
+                    subfolders.append(entry.name)
+            elif entry.is_file() and not entry.name.startswith("."):
                 scanned_entries.append(entry)
 
-    if not scanned_entries:
-        return jsonify({
-            "type": "conversation",
-            "message": (
-                f"📂 No eligible documents found in '{target_folder}/'. The directory is currently empty.\n\n"
-                f"Please place documents to organize in your {target_folder}/ folder, or tap 'Seed Fixtures' to populate demo files for testing."
-            ),
-            "version": APP_VERSION,
-            "actions": [],
-            "quick_chips": [
-                "📋 Sort Student Vouchers",
-                "👥 Separate Peer Documents",
-                "🏷️ Clean Download Names",
-                "🗑️ Cleanup Old Screenshots"
-            ]
-        })
-
-    # 3. Snippet inspection & PII scrubbing (up to 300 candidate files)
+    # Snippet inspection & PII scrubbing (up to 300 candidate files)
     manifest = []
     manifest_for_gemini = []
     manifest_lookup = {}
@@ -3070,6 +2342,7 @@ INSTRUCTIONS & REASONING RULES:
 
         manifest_item = {
             "filename": filename,
+            "path": rel_path,
             "size_kb": round(file_size / 1024, 1),
             "modified_date": mtime_str,
             "text_snippet": sanitized_snippet if sanitized_snippet else "None (binary/image)",
@@ -3093,7 +2366,94 @@ INSTRUCTIONS & REASONING RULES:
         manifest_lookup[rel_path.lower()] = internal_item
         manifest_lookup[filename.lower()] = internal_item
 
-    # 4. Formulate Stage 2 Gemini System Prompt with Real Files Manifest
+    # Fast-path for Deduplication Commands & Queries
+    is_deduplicate_req = any(k in normalized_prompt.lower() for k in ("duplicate", "duplicates", "dedup", "deduplicate", "repeated file", "repeated files"))
+    if is_deduplicate_req:
+        dup_res = find_duplicate_clusters(BASE_STORAGE_DIR, target_folder)
+        is_clean_action = any(k in normalized_prompt.lower() for k in ("clean", "delete", "trash", "remove", "wipe")) or is_pure_affirmative
+        if dup_res["total_duplicates"] == 0:
+            return jsonify({
+                "type": "conversation" if is_clean_action else "query_info",
+                "message": (
+                    f"✨ **No duplicate files detected in `{target_folder}/`!**\n\n"
+                    "All documents possess unique cryptographic SHA-256 signatures. No redundant copies were found to clean."
+                ),
+                "version": APP_VERSION,
+                "actions": [],
+                "duplicate_summary": dup_res,
+                "quick_chips": [
+                    "📋 Sort Student Vouchers",
+                    "👥 Separate Peer Documents",
+                    "🏷️ Clean Download Names",
+                    "🗑️ Cleanup Old Screenshots"
+                ]
+            })
+        if is_clean_action:
+            actions = []
+            for cluster in dup_res["clusters"]:
+                keeper = cluster["keeper"]
+                for dup in cluster["duplicates"]:
+                    actions.append({
+                        "action_id": f"step-{len(actions) + 1}",
+                        "type": "trash",
+                        "badge": "TRASH",
+                        "badge_label": "Soft Delete",
+                        "source": dup["path"],
+                        "path": dup["path"],
+                        "destination": f".agent_trash/{dup['filename']}",
+                        "rationale": f"Redundant duplicate of '{keeper['filename']}' ({cluster['size_human']} reclaimed)",
+                        "ai_inspected": True,
+                        "inspected_preview": f"Exact SHA-256 match with {keeper['filename']}"
+                    })
+            plan_id = str(uuid.uuid4())
+            plan_desc = f"Deduplication: Clean {len(actions)} redundant duplicate file(s) ({dup_res['reclaimable_human']})"
+            return jsonify({
+                "type": "plan",
+                "message": (
+                    f"Identified **{len(actions)} redundant duplicate file(s)** across {dup_res['total_clusters']} group(s). "
+                    f"Cleaning them will reclaim **{dup_res['reclaimable_human']}** of storage while safely preserving all original canonical files.\n\n"
+                    "Review the proposed removals below. Tap **Execute Action Plan** to move redundant copies to `.agent_trash` (with 1-tap rollback at any time)."
+                ),
+                "plan": {
+                    "plan_id": plan_id,
+                    "description": plan_desc,
+                    "actions": actions
+                },
+                "actions": actions,
+                "duplicate_summary": dup_res,
+                "version": APP_VERSION
+            })
+        else:
+            lines = [
+                f"### 🧹 Duplicate File Audit for `{target_folder}/`",
+                f"Found **{dup_res['total_duplicates']} redundant duplicate file(s)** across **{dup_res['total_clusters']} group(s)**.",
+                f"**Total Reclaimable Storage:** `{dup_res['reclaimable_human']}`\n",
+                "#### Detected Groups:"
+            ]
+            for idx, cluster in enumerate(dup_res["clusters"], 1):
+                k = cluster["keeper"]
+                lines.append(f"**Group {idx}** (Size: {cluster['size_human']} each, Reclaimable: {cluster['reclaimable_human']}):")
+                lines.append(f"- 🛡️ **Preserving Keeper:** `{k['path']}` *({k['reason']})*")
+                for d in cluster["duplicates"]:
+                    lines.append(f"- 🗑️ **Redundant Copy:** `{d['path']}` *({d['reason']})*")
+                lines.append("")
+            lines.append("💡 *To clean up these redundant copies and reclaim space, say **'Clean duplicate downloads'** or tap **Clean Duplicates** below.*")
+            return jsonify({
+                "type": "query_info",
+                "message": "\n".join(lines),
+                "version": APP_VERSION,
+                "actions": [],
+                "query_results": dup_res["clusters"],
+                "duplicate_summary": dup_res,
+                "quick_chips": [
+                    "🧹 Clean duplicate downloads",
+                    "📋 Sort Student Vouchers",
+                    "👥 Separate Peer Documents",
+                    "🏷️ Clean Download Names"
+                ]
+            })
+
+    # Effective request context
     if is_pure_affirmative:
         last_asst_snippet = last_asst[:400].replace('\n', ' ') if last_asst else normalized_prompt
         effective_request = f"The user confirmed with '{raw_prompt}' to proceed with the specific action, plan, or recommendation previously discussed by the assistant in the latest turn: \"{last_asst_snippet}\"."
@@ -3102,143 +2462,146 @@ INSTRUCTIONS & REASONING RULES:
     else:
         effective_request = raw_prompt
 
-    system_prompt = f"""You are Storage Copilot, running locally on an Android device via Termux.
-Active User: {owner_name} (Roll/ID: {identifiers}, Major: Artificial Intelligence).
+    # =========================================================================
+    # UNIFIED GROUNDED GEMINI REASONING (Single Unified Pipeline Turn)
+    # =========================================================================
+    unified_system_prompt = f"""You are Storage Copilot, an elite, articulate on-device AI agent running locally via Termux on Android for {owner_name} (Roll/ID: {identifiers}, Major: Artificial Intelligence).
+Current Device Time: {now_str} (Today's Date: {today_date}).
 Storage Root: /storage/emulated/0 (Downloads, Documents).
 Known Peers: {", ".join(peer_names)}.
+Peer Routing:
+{peer_matrix_lines}
 
 RECENT CONVERSATION HISTORY (Last turns):
 {conversation_context_block}
 
-Peer Separation Matrix:
-{peer_matrix_lines}
+LIVE DIRECTORY STATUS FOR '{target_folder}/':
+- Top-level subfolders: {", ".join(subfolders) if subfolders else "None"}
+- Direct files on disk ({len(manifest)} files indexed):
+{json.dumps(manifest_for_gemini[:60], indent=2)}
 
-Define a unified JSON contract for your responses:
+YOUR AGENT PERSONA & CAPABILITIES:
+- You are an articulate, highly capable AI agent (similar to Google DeepMind / Antigravity). You communicate with clarity, intelligence, and empathy directly to {owner_name}.
+- You possess complete self-awareness of your abilities and system boundaries.
+- WHAT YOU CAN DO: Local storage reconnaissance, content inspection with in-memory PII sanitization, intelligent file organization (academic vs peer vs personal bills), cryptographic duplicate detection, interactive diff approval, and 1-tap atomic rollbacks via SQLite WAL.
+- WHAT YOU CANNOT DO: You cannot send emails, send SMS/WhatsApp messages, browse the live web, access cloud storage directly, launch external apps, or alter Android system configurations. If asked to do something out-of-scope, politely state your local storage boundaries and explain what local storage task you can help with instead.
+
+REASONING RULES & UNIFIED CONTRACT:
+Analyze the operational request and dialogue history with full, direct access to the live files manifest above.
+Determine your response type natively:
+
+1. "query_info" (SEARCH / LOOKUP / INSPECT / LIST):
+   - Triggered when the user asks to find, list, search, view, audit, check, or inspect documents or categories (e.g. "find Java book", "list lectures", "find receipts", "what is inside Download", "what files are here?", "any more sorting for download?").
+   - Directly inspect the real files manifest above. If matching documents exist (e.g. JavaTheCompleteReference.pdf for Java language), cite them with bold names, paths in code spans, sizes, and helpful details.
+   - For folder listing or inventory requests, provide a clean, grouped markdown overview of the files.
+   - For status or audit checks ("any more sorting for download?"), summarize what unorganized files remain or praise the clean state.
+   - Set "actions": []
+
+2. "conversation" (ADVICE / GREETINGS / CAPABILITIES / FOLLOW-UPS / OUT-OF-SCOPE):
+   - Triggered for greetings ("Hi", "Hello"), capabilities ("What can you do?", "Who are you?"), conversational follow-ups ("What else?", "Tell me more", "What other things can you do?"), suggestions/advice ("What suggestions do you have for my files?", "How can I organize?"), or out-of-scope requests (emails, web search).
+   - CRITICAL: If the user asks "What else?", "What else can you do?", or "What can you do?", do NOT treat it as a file search query. Explain your broader capabilities and what actions {owner_name} can take next.
+   - Ground your advice in the actual live directory status above. Cite real filenames and real categories.
+   - Set "actions": []
+
+3. "plan" (ACTIONS / CONFIRMATIONS / ORGANIZING):
+   - Triggered when the user explicitly commands an action ("Clean Download Names", "Sort student vouchers", "Separate peer documents", "How about we first sort...") OR confirms a previous suggestion ("Yes", "Proceed", "Do it").
+   - Synthesize move/rename/trash actions referencing exact filenames from the manifest.
+   - Academic Taxonomy:
+     * Academic study materials (lectures, assignments, notes) -> Documents/University/<Subject>/
+     * Personal tuition vouchers -> Documents/University/Vouchers/
+     * Peer documents for classmates ({", ".join(peer_names)}) -> Documents/Peers/<PeerName>/
+     * Utility/electricity bills -> Documents/Finances/
+   - Content-Derived Naming: Standardize ambiguous WhatsApp (DOC-*.pdf) or cryptic downloads into clean, descriptive titles (e.g. 'Knowledge_Representation_Lecture_04.pdf'). NEVER use generic 'Document_2025-04-13.pdf'.
+   - Ensure every proposed action has a unique, collision-free destination.
+
+OUTPUT SCHEMA (Strict JSON):
 {{
-  "type": "conversation" | "plan",
-  "message": "Conversational reply or plan summary",
-  "actions": [ ... ] // empty if type == "conversation"
+  "type": "conversation" | "query_info" | "plan",
+  "message": "<Articulate, empathetic, direct markdown response addressing {owner_name}>",
+  "actions": [
+    {{
+      "action_id": "step-1",
+      "type": "move" | "trash" | "make_dir",
+      "source": "<exact filename from manifest>",
+      "destination": "Documents/...",
+      "rationale": "...",
+      "badge": "RENAME" | "FILE_MOVE" | "TRASH"
+    }}
+  ],
+  "quick_chips": [ ... 3-4 dynamic, contextual suggestions ... ]
 }}
-
-CRITICAL INTENT HANDLING:
-- If the user is asking for suggestions, ideas, advice, recommendations, or options (e.g., "Some suggestions for my files to organize", "What do you suggest?", "How should I organize?"):
-  DO NOT CREATE ACTIONS! Return "type": "conversation", "actions": [], and provide articulate, thoughtful recommendations in "message" explaining how they can organize their files.
-- If the user confirmed with "Yes", "Proceed", or agreed to proceed with a previously discussed proposal (see RECENT CONVERSATION HISTORY): CREATE the appropriate "type": "plan" with actions for that confirmed action!
-- If the user gives an action instruction like "How about we first sort...", "Can we first organize...", "First sort...", treat this as a direct instruction to stage a plan for those files ("type": "plan").
-- ONLY return "type": "plan" with move/rename actions if the user gives an explicit command or instruction or confirmation to organize or modify files.
-
-IMPORTANT: The candidates below are the ACTUAL files currently sitting on disk.
-Reason SEMANTICALLY over each candidate's filename, size_kb, text_snippet, and has_content to decide the appropriate operation:
-
-CRITICAL TAXONOMY & CAUTION RULES:
-1. ACADEMIC STUDY MATERIALS vs IDENTITY PASSES (STRICT SEPARATION):
-   - ACADEMIC STUDY: Lectures, assignments, research papers, course notes, slides (e.g. Knowledge Representation, AI, Neural style paper).
-     Route to: "Documents/University/<Subject>/" (e.g. "Documents/University/AI/").
-   - IDENTITY & ENTRY PASSES: Entry passes, student ID cards, transit passes, admission passes, passports (e.g. "University Entry Pass: Student Name: [REDACTED_NAME]").
-     CAUTION: Even if issued by a university, an Entry Pass or Student ID is NOT academic study material! NEVER move entry passes or passports into academic lecture/course folders ("Documents/University/AI/").
-     If the user asked to organize "university files", organize ONLY academic course study materials.
-     If organizing identity documents, route to "Documents/Personal/Identity/".
-2. PREVENT COLLISION & USE CONTENT-DERIVED DESCRIPTIVE NAMES:
-   - NEVER rename files using generic static labels like "Document_2025-04-13.pdf" or "Documents/Organized/".
-   - Read each file's `text_snippet`. Use the actual subject matter or purpose to assign a specific, unique name (e.g. "Knowledge_Representation_Lecture_04.pdf", "AI_Course_Assignment_02.pdf", "Electricity_Bill_March2025.pdf").
-   - EVERY proposed action in a batch MUST have a distinct, UNIQUE destination path.
-3. PEER ISOLATION:
-   - Only route to "Documents/Peers/<PeerName>/" if the file explicitly belongs to that peer AND the user requested peer separation or peer context is primary.
-4. PERSONAL VOUCHERS:
-   - Route personal fee vouchers to "Documents/University/Vouchers/".
-5. UTILITIES & BILLS:
-   - Route electricity, utility, or consumer invoices to "Documents/Finances/".
-6. STRICT USER REQUEST SCOPE:
-   - ONLY include move/rename actions for files that correspond to the user's explicit request!
-   - If the user specifically asks to "Organize all my University files", touch ONLY academic university files (lectures, assignments, research papers, course notes) and university fee vouchers.
-   - CRITICAL: Do NOT touch or move peer documents (like "Sumbal pass.pdf", "fawad fee.pdf", "WhatsApp_Doc_Ahmed_Receipt.pdf"), identity passes, utility bills, or unrelated files when the user only asked to organize university files! Leave them untouched in Download/.
-   - If the user specifically asks to "Separate peer documents", touch ONLY files identified for peers.
-   - If the user asks to "Clean Download Names", organize and rename ambiguous downloads into their respective folders.
-
-Action format:
-- {{"action_id": "step-1", "type": "make_dir", "path": "Documents/..."}}
-- {{"action_id": "step-2", "type": "move", "source": "<exact filename from manifest>", "destination": "Documents/...", "rationale": "...", "badge": "RENAME" | "FILE_MOVE", "ai_inspected": true, "inspected_preview": "<first 100 chars of text_snippet>"}}
-- {{"action_id": "step-3", "type": "trash", "path": "<exact filename from manifest>", "rationale": "...", "badge": "TRASH", "ai_inspected": false, "inspected_preview": "..."}}
 """
 
-    user_prompt_text = f"""Operational Request: "{effective_request}"
+    user_query_text = f"""Operational Request: "{effective_request}"
 Raw User Prompt: "{raw_prompt}"
-
-Current Target Directory: "{target_folder}"
-Available Real Files Manifest ({len(manifest)} real files on disk):
-{json.dumps(manifest_for_gemini, indent=2)}
+Target Folder: "{target_folder}"
 """
 
-    gemini_resp = call_gemini_json(system_prompt, user_prompt_text)
+    gemini_resp = call_gemini_json(unified_system_prompt, user_query_text)
 
-    # 5. Evaluate Gemini Stage 2 Output
+    # Process Unified Gemini Output
     if gemini_resp and isinstance(gemini_resp, dict):
-        resp_type = gemini_resp.get("type", "conversation")
-        resp_message = gemini_resp.get("message", "")
-        raw_actions = gemini_resp.get("actions", [])
+        resp_type = (gemini_resp.get("type") or "conversation").lower()
+        resp_message = gemini_resp.get("message") or ""
+        raw_actions = gemini_resp.get("actions") or []
+        quick_chips = gemini_resp.get("quick_chips") or [
+            "🧹 Clean Duplicates",
+            "📋 Sort Student Vouchers",
+            "👥 Separate Peer Documents",
+            "🏷️ Clean Download Names"
+        ]
 
-        if resp_type == "conversation" or not raw_actions:
+        if resp_type == "plan" and raw_actions:
+            manifest_paths = {m["path"].lower(): m["path"] for m in manifest}
+            manifest_names = {m["filename"].lower(): m["path"] for m in manifest}
+
+            validated_actions = []
+            for act in raw_actions:
+                act_type = act.get("type")
+                if act_type == "make_dir":
+                    validated_actions.append(act)
+                elif act_type in ("move", "copy", "trash"):
+                    src = act.get("source") or act.get("path") or ""
+                    matched_src = None
+                    if src.lower() in manifest_paths:
+                        matched_src = manifest_paths[src.lower()]
+                    elif os.path.basename(src).lower() in manifest_names:
+                        matched_src = manifest_names[os.path.basename(src).lower()]
+
+                    if matched_src:
+                        if act_type in ("move", "copy"):
+                            act["source"] = matched_src
+                        else:
+                            act["path"] = matched_src
+                        validated_actions.append(act)
+
+            if validated_actions:
+                validated_actions = ensure_unique_plan_destinations(validated_actions)
+                formatted_actions = format_plan_badges(validated_actions, peer_names, manifest_lookup)
+                plan_id = str(uuid.uuid4())
+                action_plan = {
+                    "plan_id": plan_id,
+                    "version": "1.0",
+                    "description": resp_message or f"Organize files per: {raw_prompt}",
+                    "collision_strategy": "RENAME_NUMERIC",
+                    "actions": formatted_actions
+                }
+                return jsonify({
+                    "type": "plan",
+                    "message": resp_message or f"I've inspected your storage ({len(manifest)} real files on disk) and synthesized an Action Plan.",
+                    "version": APP_VERSION,
+                    "actions": formatted_actions,
+                    "plan": action_plan,
+                    "quick_chips": quick_chips
+                })
+
+        elif resp_type in ("query_info", "conversation"):
             return jsonify({
-                "type": "conversation",
-                "message": resp_message or f"No files in '{target_folder}/' required modification under this criteria.",
+                "type": resp_type,
+                "message": resp_message or f"I've reviewed your storage in `{target_folder}/`.",
                 "version": APP_VERSION,
                 "actions": [],
-                "quick_chips": [
-                    "📋 Sort Student Vouchers",
-                    "👥 Separate Peer Documents",
-                    "🏷️ Clean Download Names",
-                    "🗑️ Cleanup Old Screenshots"
-                ]
-            })
-
-        # Process and validate raw_actions from Gemini plan against manifest
-        manifest_paths = {m["path"].lower(): m["path"] for m in manifest}
-        manifest_names = {m["filename"].lower(): m["path"] for m in manifest}
-
-        validated_actions = []
-        for act in raw_actions:
-            act_type = act.get("type")
-            if act_type == "make_dir":
-                validated_actions.append(act)
-            elif act_type in ("move", "copy", "trash"):
-                src = act.get("source") or act.get("path") or ""
-                matched_src = None
-                if src.lower() in manifest_paths:
-                    matched_src = manifest_paths[src.lower()]
-                elif os.path.basename(src).lower() in manifest_names:
-                    matched_src = manifest_names[os.path.basename(src).lower()]
-
-                if matched_src:
-                    if act_type in ("move", "copy"):
-                        act["source"] = matched_src
-                    else:
-                        act["path"] = matched_src
-                    validated_actions.append(act)
-
-        if validated_actions:
-            # Enforce batch destination collision prevention
-            validated_actions = ensure_unique_plan_destinations(validated_actions)
-            formatted_actions = format_plan_badges(validated_actions, peer_names, manifest_lookup)
-            plan_id = str(uuid.uuid4())
-            action_plan = {
-                "plan_id": plan_id,
-                "version": "1.0",
-                "description": resp_message or f"Organize files per: {raw_prompt}",
-                "collision_strategy": "RENAME_NUMERIC",
-                "actions": formatted_actions
-            }
-            return jsonify({
-                "type": "plan",
-                "message": resp_message or f"I've inspected your storage ({len(manifest)} real files on disk) and synthesized an Action Plan.",
-                "version": APP_VERSION,
-                "actions": formatted_actions,
-                "plan": action_plan,
-                "quick_chips": [
-                    "⏩ Process Next Batch",
-                    "👥 Separate Peer Documents",
-                    "📋 Sort Student Vouchers",
-                    "🧹 Clean Duplicates"
-                ]
+                "quick_chips": quick_chips
             })
 
     # 6. Heuristic Fallback (Active if Gemini is offline or API key missing)
