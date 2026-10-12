@@ -23,6 +23,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // DOM Elements
   // ==============================================================================
   const elements = {
+    clearChatBtn: document.getElementById('clear-chat-btn'),
     engineStatusBadge: document.getElementById('engine-status-badge'),
     engineStatusText: document.getElementById('engine-status-text'),
     userDisplayName: document.getElementById('user-display-name'),
@@ -272,13 +273,103 @@ document.addEventListener('DOMContentLoaded', () => {
   // ==============================================================================
   // Chat Timeline Rendering
   // ==============================================================================
+  // ==============================================================================
+  // Conversation History Storage & Dynamic Chips
+  // ==============================================================================
+  const STORAGE_KEY = 'storage_bridge_chat_history_v1';
+
+  function saveChatHistory() {
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(state.conversationHistory));
+    } catch (e) {
+      console.warn('Could not save conversation history:', e);
+    }
+  }
+
+  function loadChatHistory() {
+    try {
+      const saved = localStorage.getItem(STORAGE_KEY);
+      if (!saved) return false;
+      const history = JSON.parse(saved);
+      if (!Array.isArray(history) || history.length === 0) return false;
+      
+      state.conversationHistory = history;
+      history.forEach(item => {
+        if (item.role === 'user') {
+          appendUserMessage(item.content, false);
+        } else if (item.role === 'assistant') {
+          if (item.type === 'query_info') {
+            appendQueryInfoMessage(item.content, item.queryResults, false);
+          } else if (item.type === 'plan' && item.plan) {
+            appendAssistantMessage(item.content, false);
+            renderDiffReview(item.plan, false);
+          } else {
+            appendAssistantMessage(item.content, false);
+          }
+        }
+      });
+      return true;
+    } catch (e) {
+      console.warn('Could not restore chat history:', e);
+      return false;
+    }
+  }
+
+  function clearChatHistory() {
+    try {
+      localStorage.removeItem(STORAGE_KEY);
+    } catch (e) {}
+    state.conversationHistory = [];
+    state.activePlan = null;
+    state.selectedActionIds.clear();
+    elements.conversationStream.innerHTML = `
+      <div class="message-card assistant welcome-card">
+        <div class="message-header">
+          <div class="assistant-avatar">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z" />
+            </svg>
+          </div>
+          <div class="message-sender">Storage Copilot</div>
+          <span class="message-time">Just now</span>
+        </div>
+        <div class="message-body">
+          <p><strong>👋 Welcome Imran!</strong> I'm your mobile storage organization copilot.</p>
+          <p>I analyze unstructured files on your device, protect your personal documents by routing peer files away, sort university vouchers, and clean up temporary files—with <strong>human-in-the-loop diff approval</strong> and <strong>1-tap rollback</strong>.</p>
+          <p class="hint-text">💡 Tap one of the quick task chips below or type any custom request.</p>
+        </div>
+      </div>
+    `;
+    showToast('✓ Chat history cleared', 'info');
+  }
+
+  function updateQuickChips(chips) {
+    if (!chips || !chips.length || !elements.chipsContainer) return;
+    elements.chipsContainer.innerHTML = chips.map(chipText => {
+      let emoji = '💡';
+      const isNext = chipText.includes('Next Batch');
+      if (chipText.includes('Duplicate') || chipText.includes('Clean Duplicates')) emoji = '🧹';
+      else if (chipText.includes('Voucher') || chipText.includes('Slip')) emoji = '📋';
+      else if (chipText.includes('Peer') || chipText.includes('Student')) emoji = '👥';
+      else if (chipText.includes('Name')) emoji = '🏷️';
+      else if (chipText.includes('Batch')) emoji = '⏩';
+      else if (chipText.includes('Screenshot') || chipText.includes('Cache') || chipText.includes('Trash')) emoji = '🗑️';
+      return `
+        <button class="task-chip ${isNext ? 'highlight-chip' : ''}" data-task="${escapeHtml(chipText)}">
+          <span class="chip-emoji">${emoji}</span>
+          <span class="chip-label">${escapeHtml(chipText)}</span>
+        </button>
+      `;
+    }).join('');
+  }
+
   function scrollToBottom() {
     setTimeout(() => {
       elements.contentScroll.scrollTop = elements.contentScroll.scrollHeight;
     }, 60);
   }
 
-  function appendUserMessage(text) {
+  function appendUserMessage(text, shouldScroll = true) {
     const card = document.createElement('div');
     card.className = 'message-card user';
     card.innerHTML = `
@@ -291,7 +382,7 @@ document.addEventListener('DOMContentLoaded', () => {
       </div>
     `;
     elements.conversationStream.appendChild(card);
-    scrollToBottom();
+    if (shouldScroll) scrollToBottom();
   }
 
   function formatInlineMarkdown(str) {
@@ -359,7 +450,7 @@ document.addEventListener('DOMContentLoaded', () => {
     return html;
   }
 
-  function appendAssistantMessage(text) {
+  function appendAssistantMessage(text, shouldScroll = true) {
     const card = document.createElement('div');
     card.className = 'message-card assistant';
     card.innerHTML = `
@@ -377,10 +468,10 @@ document.addEventListener('DOMContentLoaded', () => {
       </div>
     `;
     elements.conversationStream.appendChild(card);
-    scrollToBottom();
+    if (shouldScroll) scrollToBottom();
   }
 
-  function appendQueryInfoMessage(text, queryResults) {
+  function appendQueryInfoMessage(text, queryResults, shouldScroll = true) {
     const card = document.createElement('div');
     card.className = 'message-card assistant query-card';
     card.innerHTML = `
@@ -399,7 +490,7 @@ document.addEventListener('DOMContentLoaded', () => {
       </div>
     `;
     elements.conversationStream.appendChild(card);
-    scrollToBottom();
+    if (shouldScroll) scrollToBottom();
   }
 
   function appendSystemNotice(html) {
@@ -440,7 +531,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // ==============================================================================
   // Interactive Diff Review Cards Rendering & Execution
   // ==============================================================================
-  function renderDiffReview(plan) {
+  function renderDiffReview(plan, shouldScroll = true) {
     state.activePlan = plan;
     const actions = plan.actions || [];
     
@@ -500,7 +591,7 @@ document.addEventListener('DOMContentLoaded', () => {
     container.appendChild(actionBar);
 
     elements.conversationStream.appendChild(container);
-    scrollToBottom();
+    if (shouldScroll) scrollToBottom();
 
     // Event Listeners for Action Bar
     const approveBtn = actionBar.querySelector('#approve-plan-btn');
@@ -930,6 +1021,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Record user message to conversation history
     state.conversationHistory.push({ role: 'user', content: text });
+    saveChatHistory();
 
     try {
       const resp = await fetch('/propose_plan', {
@@ -938,7 +1030,7 @@ document.addEventListener('DOMContentLoaded', () => {
         body: JSON.stringify({ 
           prompt: text, 
           target_folder: 'Download',
-          conversation_history: state.conversationHistory.slice(-6)
+          conversation_history: state.conversationHistory.slice(-6).map(h => ({ role: h.role, content: h.content }))
         })
       });
 
@@ -949,10 +1041,22 @@ document.addEventListener('DOMContentLoaded', () => {
         throw new Error(data.error || 'Failed to analyze prompt');
       }
 
-      // Record assistant message to conversation history
+      // Record assistant message to conversation history with metadata
       const replyMsg = data.message || '';
       if (replyMsg) {
-        state.conversationHistory.push({ role: 'assistant', content: replyMsg });
+        state.conversationHistory.push({ 
+          role: 'assistant', 
+          content: replyMsg,
+          type: data.type,
+          plan: data.plan,
+          queryResults: data.query_results
+        });
+        saveChatHistory();
+      }
+
+      // Update quick chips if dynamically provided by server
+      if (data.quick_chips && data.quick_chips.length > 0) {
+        updateQuickChips(data.quick_chips);
       }
 
       if (data.type === 'conversation') {
@@ -978,6 +1082,30 @@ document.addEventListener('DOMContentLoaded', () => {
   // ==============================================================================
   // Event Bindings
   // ==============================================================================
+  // Clear Chat History Button (Mobile 2-Tap Safety Pattern)
+  if (elements.clearChatBtn) {
+    let clearConfirmTimeout = null;
+    elements.clearChatBtn.addEventListener('click', () => {
+      if (elements.clearChatBtn.dataset.confirming === 'true') {
+        clearTimeout(clearConfirmTimeout);
+        elements.clearChatBtn.dataset.confirming = 'false';
+        elements.clearChatBtn.classList.remove('confirm-active');
+        elements.clearChatBtn.title = 'Clear Chat History';
+        clearChatHistory();
+      } else {
+        elements.clearChatBtn.dataset.confirming = 'true';
+        elements.clearChatBtn.classList.add('confirm-active');
+        elements.clearChatBtn.title = 'Tap again to confirm clearing chat';
+        showToast('Tap trash icon again to clear conversation', 'info', 2800);
+        clearConfirmTimeout = setTimeout(() => {
+          elements.clearChatBtn.dataset.confirming = 'false';
+          elements.clearChatBtn.classList.remove('confirm-active');
+          elements.clearChatBtn.title = 'Clear Chat History';
+        }, 3000);
+      }
+    });
+  }
+
   // 1. Form Submit
   elements.promptForm.addEventListener('submit', (e) => {
     e.preventDefault();
@@ -1124,6 +1252,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // Startup Initialization (initApp)
   // ==============================================================================
   async function initApp() {
+    loadChatHistory();
     const healthData = await fetchHealth();
     if (healthData && healthData.version && healthData.version !== EXPECTED_VERSION) {
       console.warn(`[initApp] Bridge version mismatch: server reported ${healthData.version}, expected ${EXPECTED_VERSION}`);

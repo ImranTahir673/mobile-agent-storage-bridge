@@ -6,6 +6,7 @@ import sqlite3
 import uuid
 import hashlib
 import time
+import zipfile
 from collections import defaultdict
 from datetime import datetime, timezone
 import requests
@@ -529,6 +530,62 @@ def list_files():
 
     return jsonify({"path": rel_path, "items": items})
 
+def extract_file_snippet(file_path: str, max_chars: int = 400) -> str:
+    """
+    Intelligently extracts textual preview across text files, PDFs, Word docx, PowerPoint pptx, and archives.
+    Uses Python standard library zipfile for docx/pptx/zip/apk (strictly zero external dependencies).
+    """
+    ext = os.path.splitext(file_path)[1].lower()
+    try:
+        if ext == ".pdf":
+            try:
+                import pypdf
+                reader = pypdf.PdfReader(file_path)
+                parts = [p.extract_text() or "" for p in reader.pages[:2]]
+                return "\n".join(parts)[:max_chars]
+            except Exception:
+                try:
+                    with open(file_path, "r", encoding="utf-8", errors="replace") as fh:
+                        return fh.read(max_chars)
+                except Exception:
+                    return ""
+        elif ext in (".txt", ".md", ".json", ".csv", ".tmp", ".log", ".xml", ".html", ".tex", ".cpp", ".py", ".vcf", ".ics"):
+            try:
+                with open(file_path, "r", encoding="utf-8", errors="replace") as fh:
+                    return fh.read(max_chars)
+            except Exception:
+                return ""
+        elif ext in (".docx", ".pptx", ".xlsx", ".zip", ".apk", ".xapk"):
+            try:
+                with zipfile.ZipFile(file_path, "r") as z:
+                    names = z.namelist()
+                    if ext == ".docx" and "word/document.xml" in names:
+                        xml = z.read("word/document.xml").decode("utf-8", errors="ignore")
+                        text = re.sub(r"<[^>]+>", " ", xml)
+                        text = re.sub(r"\s+", " ", text).strip()
+                        return f"[Word Doc: {text[:max_chars]}]"
+                    elif ext == ".pptx" and any(n.startswith("ppt/slides/slide") for n in names):
+                        slide_files = [n for n in names if n.startswith("ppt/slides/slide") and n.endswith(".xml")][:3]
+                        text_parts = []
+                        for sf in slide_files:
+                            xml = z.read(sf).decode("utf-8", errors="ignore")
+                            s_text = re.sub(r"<[^>]+>", " ", xml)
+                            text_parts.append(s_text)
+                        full_t = re.sub(r"\s+", " ", " ".join(text_parts)).strip()
+                        return f"[Presentation: {full_t[:max_chars]}]"
+                    elif ext in (".apk", ".xapk"):
+                        has_manifest = "AndroidManifest.xml" in names
+                        clean_names = [n for n in names if not n.startswith("META-INF")][:6]
+                        return f"[Android Package: {len(names)} files, manifest={'yes' if has_manifest else 'no'}, entries: {', '.join(clean_names)}]"
+                    else:
+                        clean_names = [n for n in names if not n.startswith("__MACOSX")][:8]
+                        return f"[Archive with {len(names)} files: {', '.join(clean_names)}]"
+            except Exception:
+                return ""
+    except Exception:
+        return ""
+    return ""
+
 PII_PATTERNS = [
     # Passports (labeled and standalone patterns)
     (re.compile(r"(?i)\b(passport(?:\s*(?:no|number|#))?[:\s]*)[A-Za-z0-9]{6,12}\b"), r"\1[REDACTED_PASSPORT]"),
@@ -870,33 +927,7 @@ def read_file_snippet():
     if not os.path.exists(target) or not os.path.isfile(target):
         return jsonify({"error": "File not found"}), 404
 
-    snippet = ""
-    # Extract PDF text if pypdf is available
-    if target.lower().endswith(".pdf"):
-        try:
-            import pypdf
-            reader = pypdf.PdfReader(target)
-            text_parts = []
-            for page in reader.pages[:3]:
-                page_text = page.extract_text() or ""
-                text_parts.append(page_text)
-                if sum(len(t) for t in text_parts) >= max_chars:
-                    break
-            snippet = "\n".join(text_parts)[:max_chars]
-        except Exception as e:
-            try:
-                with open(target, "r", encoding="utf-8", errors="replace") as f:
-                    snippet = f.read(max_chars)
-            except Exception:
-                snippet = f"[PDF Preview Error: {e}]"
-    else:
-        # Standard text file extraction
-        try:
-            with open(target, "r", encoding="utf-8", errors="replace") as f:
-                snippet = f.read(max_chars)
-        except Exception as e:
-            return jsonify({"error": f"Failed reading file: {e}"}), 500
-
+    snippet = extract_file_snippet(target, max_chars)
     # Local pre-flight PII redaction before transmission over network
     sanitized_snippet = sanitize_pii(snippet)
     return jsonify({"path": rel_path, "snippet": sanitized_snippet})
@@ -1894,26 +1925,7 @@ def collect_storage_files(base_dir: str, target_folder: str = "Download", max_fi
                     ext = os.path.splitext(f)[1].lower()
                     rel_p = os.path.relpath(full_p, base_dir).replace("\\", "/")
 
-                    raw_text = ""
-                    if ext == ".pdf":
-                        try:
-                            import pypdf
-                            reader = pypdf.PdfReader(full_p)
-                            parts = [p.extract_text() or "" for p in reader.pages[:2]]
-                            raw_text = "\n".join(parts)[:600]
-                        except Exception:
-                            try:
-                                with open(full_p, "r", encoding="utf-8", errors="replace") as fh:
-                                    raw_text = fh.read(600)
-                            except Exception:
-                                raw_text = ""
-                    elif ext in (".txt", ".md", ".json", ".csv", ".tmp", ".log", ".xml", ".html"):
-                        try:
-                            with open(full_p, "r", encoding="utf-8", errors="replace") as fh:
-                                raw_text = fh.read(600)
-                        except Exception:
-                            raw_text = ""
-
+                    raw_text = extract_file_snippet(full_p, 400)
                     sanitized = sanitize_pii(raw_text)
                     collected.append({
                         "filename": f,
@@ -3022,28 +3034,7 @@ INSTRUCTIONS & REASONING RULES:
         except Exception:
             mtime_str = ""
 
-        raw_text = ""
-        try:
-            if ext == ".pdf":
-                try:
-                    import pypdf
-                    reader = pypdf.PdfReader(entry.path)
-                    parts = [p.extract_text() or "" for p in reader.pages[:2]]
-                    raw_text = "\n".join(parts)[:250]
-                except Exception:
-                    try:
-                        with open(entry.path, "r", encoding="utf-8", errors="replace") as f:
-                            raw_text = f.read(250)
-                    except Exception:
-                        raw_text = ""
-            elif ext in (".txt", ".md", ".json", ".csv", ".tmp", ".log", ".xml", ".html"):
-                with open(entry.path, "r", encoding="utf-8", errors="replace") as f:
-                    raw_text = f.read(250)
-            else:
-                raw_text = ""
-        except Exception:
-            raw_text = ""
-
+        raw_text = extract_file_snippet(entry.path, 300)
         sanitized_snippet = sanitize_pii(raw_text)
 
         try:
@@ -3215,7 +3206,13 @@ Available Real Files Manifest ({len(manifest)} real files on disk):
                 "message": resp_message or f"I've inspected your storage ({len(manifest)} real files on disk) and synthesized an Action Plan.",
                 "version": APP_VERSION,
                 "actions": formatted_actions,
-                "plan": action_plan
+                "plan": action_plan,
+                "quick_chips": [
+                    "⏩ Process Next Batch",
+                    "👥 Separate Peer Documents",
+                    "📋 Sort Student Vouchers",
+                    "🧹 Clean Duplicates"
+                ]
             })
 
     # 6. Heuristic Fallback (Active if Gemini is offline or API key missing)
@@ -3560,7 +3557,13 @@ Available Real Files Manifest ({len(manifest)} real files on disk):
         "message": f"I've inspected your storage ({len(manifest)} real files on disk) and synthesized an Action Plan for: \"{plan_desc}\"",
         "version": APP_VERSION,
         "actions": formatted_actions,
-        "plan": action_plan
+        "plan": action_plan,
+        "quick_chips": [
+            "⏩ Process Next Batch",
+            "👥 Separate Peer Documents",
+            "📋 Sort Student Vouchers",
+            "🧹 Clean Duplicates"
+        ]
     })
 
 if __name__ == "__main__":
