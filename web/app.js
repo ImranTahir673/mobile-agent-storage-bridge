@@ -1034,11 +1034,17 @@ document.addEventListener('DOMContentLoaded', () => {
         })
       });
 
-      const data = await resp.json();
+      let data;
+      try {
+        data = await resp.json();
+      } catch (jsonErr) {
+        removeTypingIndicator();
+        throw new Error(`Server error (${resp.status} ${resp.statusText || 'non-JSON response'}). Please restart python server.py in Termux.`);
+      }
       removeTypingIndicator();
 
       if (!resp.ok) {
-        throw new Error(data.error || 'Failed to analyze prompt');
+        throw new Error(data.error || data.message || `Server returned error (${resp.status})`);
       }
 
       // Record assistant message to conversation history with metadata
