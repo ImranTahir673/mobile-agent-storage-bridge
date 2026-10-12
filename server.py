@@ -743,20 +743,37 @@ def parse_query_intent(query: str, default_folder: str = "Download") -> dict:
             filtered_topic = "screenshot"
             is_directory_listing = False
 
-    # Extract target tokens for specific searches
-    cleaned_target = re.sub(
-        r"^(?:can\s+you\s+)?(?:find(?: me)?|where is|where are|search(?: for)?|locate|show(?: me)?|get(?: me)?|list|check|do\s+i\s+have)\s+",
-        "",
-        lower_q
-    ).strip()
-    cleaned_target = re.sub(r"^(?:the\s+book\s+for|a\s+copy\s+of|the\s+doc\s+for|the\s+file\s+for|my|the)\s+", "", cleaned_target).strip()
-    cleaned_target = re.sub(r"[?!.,\"';:]+$", "", cleaned_target).strip()
+    # Detect folder audit / remaining work query (e.g. "Any more sorting for the download?", "What's left to sort?", "Are there more files?")
+    is_audit_status_query = False
+    audit_status_patterns = (
+        r"\b(?:any\s+more|anything\s+else|what(?:'s|\s+is)\s+left|is\s+there\s+more|more\s+to\s+do|still\s+need|status\s+of)\b",
+        r"\b(?:clean\s+now|finished\s+sorting|done\s+sorting|remaining\s+files|left\s+to\s+sort|more\s+sorting)\b",
+        r"\bany\s+other\s+files\b",
+        r"\bany\s+more\b"
+    )
+    for pat in audit_status_patterns:
+        if re.search(pat, lower_q, re.I):
+            is_audit_status_query = True
+            break
 
-    target_tokens = [t for t in re.findall(r"\w+", cleaned_target) if len(t) > 1 and t not in SEARCH_STOPWORDS]
+    # Extract target tokens for specific searches (only if not an audit status query)
+    if is_audit_status_query:
+        target_tokens = []
+        cleaned_target = ""
+    else:
+        cleaned_target = re.sub(
+            r"^(?:can\s+you\s+)?(?:find(?: me)?|where is|where are|search(?: for)?|locate|show(?: me)?|get(?: me)?|list|check|do\s+i\s+have)\s+",
+            "",
+            lower_q
+        ).strip()
+        cleaned_target = re.sub(r"^(?:the\s+book\s+for|a\s+copy\s+of|the\s+doc\s+for|the\s+file\s+for|my|the)\s+", "", cleaned_target).strip()
+        cleaned_target = re.sub(r"[?!.,\"';:]+$", "", cleaned_target).strip()
+        target_tokens = [t for t in re.findall(r"\w+", cleaned_target) if len(t) > 1 and t not in SEARCH_STOPWORDS]
 
     return {
-        "folder_constraint": folder_constraint or (default_folder if is_directory_listing else folder_constraint),
+        "folder_constraint": folder_constraint or (default_folder if (is_directory_listing or is_audit_status_query) else folder_constraint),
         "is_directory_listing": is_directory_listing,
+        "is_audit_status_query": is_audit_status_query,
         "filtered_topic": filtered_topic,
         "target_tokens": target_tokens,
         "cleaned_target": cleaned_target
@@ -2166,7 +2183,38 @@ def propose_plan():
     data = request.get_json(force=True) or {}
     raw_prompt = (data.get("prompt") or "").strip()
     target_folder = data.get("target_folder") or "Download"
+    conversation_history = data.get("conversation_history") or []
     normalized_prompt = normalize_user_prompt(raw_prompt)
+    lower_raw = raw_prompt.lower()
+    lower_norm = normalized_prompt.lower()
+    affirmative_words = {"yes", "yeah", "yep", "sure", "ok", "okay", "go ahead", "proceed", "do it", "please do", "lets do it", "let's do it"}
+    is_pure_affirmative = lower_raw in affirmative_words or lower_norm in affirmative_words or any(lower_raw.startswith(w + " ") for w in ("yes", "sure", "ok", "okay", "go ahead", "proceed"))
+    is_polite_action = any(lower_norm.startswith(p) for p in ("how about we sort", "how about we organize", "how about we clean", "can we sort", "can we organize", "let's sort", "lets sort", "first sort")) or "first sort" in lower_norm
+
+    if is_pure_affirmative:
+        last_asst = ""
+        for turn in reversed(conversation_history):
+            r = (turn.get("role") or "").lower()
+            if r in ("assistant", "copilot", "bot"):
+                last_asst = (turn.get("content") or turn.get("text") or turn.get("message") or "").lower()
+                break
+        if "duplicate" in last_asst:
+            normalized_prompt = "clean duplicate downloads"
+        elif "peer" in last_asst:
+            normalized_prompt = "separate peer documents"
+        elif "voucher" in last_asst or "fee" in last_asst:
+            normalized_prompt = "sort student vouchers"
+        else:
+            normalized_prompt = "organize all my university files"
+
+    # Build dialogue context from recent conversation turns
+    context_lines = []
+    for turn in conversation_history[-4:]:
+        role = (turn.get("role") or "user").upper()
+        content = (turn.get("content") or turn.get("text") or turn.get("message") or "").strip()
+        if content:
+            context_lines.append(f"{role}: {content[:300].replace(chr(10), ' ')}")
+    conversation_context_block = "\n".join(context_lines) if context_lines else "None (New conversation)"
 
     # Load User Profile & Peer Separation Matrix for system context
     p_path = get_user_profile_path()
@@ -2189,21 +2237,21 @@ def propose_plan():
     ) if peers else "\n".join(f"- Peer '{p}': designated folder 'Documents/Peers/{p}'" for p in peer_names)
 
     # =========================================================================
-    # STAGE 1: Three-Tier Intent Classification via Gemini
+    # STAGE 1: Three-Tier Intent Classification via Gemini (Multi-Turn Aware)
     # =========================================================================
     now_dt = datetime.now()
     now_str = now_dt.strftime("%A, %B %d, %Y at %I:%M %p")
     today_date = now_dt.strftime("%Y-%m-%d")
 
-    # =========================================================================
-    # STAGE 1: Three-Tier Intent Classification via Gemini
-    # =========================================================================
     intent_classification_system_prompt = f"""You are Storage Copilot, an advanced on-device AI agent running locally via Termux on Android for {owner_name} (Roll/ID: {identifiers}, Major: Artificial Intelligence).
 Current Device Time: {now_str} (Today's Date: {today_date}).
 Storage Root: /storage/emulated/0 (Downloads, Documents).
 Known Peers: {", ".join(peer_names)}.
 Peer Routing:
 {peer_matrix_lines}
+
+RECENT CONVERSATION HISTORY (Last turns):
+{conversation_context_block}
 
 YOUR AGENT PERSONA & BOUNDARIES:
 - You are an articulate, capable AI agent (similar to Google DeepMind / Antigravity). You communicate with clarity, intelligence, and empathy directly to {owner_name}.
@@ -2214,34 +2262,33 @@ YOUR AGENT PERSONA & BOUNDARIES:
 CLASSIFY THE USER'S PROMPT INTO EXACTLY ONE OF THREE INTENTS:
 
 1. "CONVERSATION":
-   - Suggestions, advice, ideas, recommendations, or questions on how to organize/clean storage (e.g. "What can we do to the files on my phone to organize in the best way possible", "Some suggestions for my files to organize", "What do you suggest?", "How should I organize my university materials?", "Give me ideas to clean up my downloads", "What should I do?"). NOTE: Even if words like 'organize', 'sort', or 'files' appear in the prompt, if the user is asking for advice/suggestions/recommendations, classify as CONVERSATION! The user wants an intelligent conversational RESPONSE first, NOT an immediate mutation plan.
+   - Suggestions, advice, ideas, recommendations, or questions on how to organize/clean storage (e.g. "What can we do to the files on my phone to organize in the best way possible", "Some suggestions for my files to organize", "What do you suggest?", "Give me ideas to clean up my downloads", "What should I do?").
    - Greetings, casual chat, check-ins ("Hi", "Hello", "Hey", "Good morning", "Salam")
    - Questions about your identity, capabilities, or how you work ("Who are you?", "What can you do?", "Help", "What are your boundaries?")
    - Open conversational follow-ups ("What else?", "Tell me more", "Thanks")
-   - OUT-OF-SCOPE REQUESTS: Any request asking to perform external actions outside local storage (e.g., "Send an email to my professor", "Play music on Spotify", "Browse the web", "Check the weather", "Order food"). You must handle these under CONVERSATION by politely and knowledgeably explaining your sandbox boundaries and redirecting to local file actions.
+   - OUT-OF-SCOPE REQUESTS: Any request asking to perform external actions outside local storage.
 
 2. "QUERY_INFO":
-   - Read-only queries asking to find, search, locate, list, inspect, audit, summarize, or check files or dates (e.g., "Find duplicate files", "Check for duplicates", "Are there any duplicate files?", "Find me Sumbal pass", "Where is my degree pass or entry pass?", "Today did I receive any documents?", "List university lectures", "Show fee voucher", "What files are here?").
+   - Read-only queries asking to find, search, locate, list, inspect, audit, summarize, or check files or dates (e.g., "Find duplicate files", "Find me Sumbal pass", "List files in download", "Are there any duplicate files?", "Any more sorting for the download?", "What's left to sort?").
+   - Status checks on whether a folder still has unorganized files left.
    - ZERO file moves, renames, or deletions.
 
 3. "FILE_OPERATION":
    - Explicit commands, instructions, or confirmations to take action, execute, or stage file moves/renames/deletions right now.
+   - CRITICAL MULTI-TURN CONFIRMATIONS: If the user says "Yes", "Yeah", "Sure", "Okay", "Proceed", "Go ahead", "Do it", "Sort them" in response to an action or plan the Assistant previously recommended in RECENT CONVERSATION HISTORY, classify as "FILE_OPERATION"!
+   - POLITE ACTION DIRECTIVES: If the user says "How about we first sort all those files in documents directory...", "Can we first organize...", "Let's sort...", or "First sort...", this is an ACTION INSTRUCTION. Classify as "FILE_OPERATION"!
    - Examples:
-     * "Clean duplicate downloads" (or "Clean duplicates", "Remove duplicate files", "Deduplicate my files")
-     * "Yes organize all my uni files" (Slang: 'uni' = university / college courseware)
-     * "Sort all the other files like docs and pdfs in the download to their best suited places"
-     * "Organize all my university files"
+     * "Clean duplicate downloads"
+     * "Yes organize all my uni files"
      * "Sort student vouchers"
      * "Separate peer documents"
      * "Clean download names"
-     * "Cleanup old screenshots"
-     * "Move my CV to Personal"
-     * "Organize all files in download"
+     * "How about we first sort all those files in the documents directory"
 
 Respond STRICTLY with valid JSON adhering to this schema:
 {{
   "intent": "CONVERSATION" | "QUERY_INFO" | "FILE_OPERATION",
-  "reply": "<Dynamic, helpful conversational response addressing the user directly if CONVERSATION. If the user asked for suggestions/advice, provide a structured, intelligent recommendation tailored to Imran Tahir (BSAI student). Be insightful, knowledgeable of your abilities and boundaries, and address out-of-scope requests gracefully. Empty string if QUERY_INFO or FILE_OPERATION.>"
+  "reply": "<Dynamic, helpful conversational response addressing the user directly if CONVERSATION. Empty string if QUERY_INFO or FILE_OPERATION.>"
 }}
 """
 
@@ -2252,7 +2299,7 @@ Respond STRICTLY with valid JSON adhering to this schema:
     # Offline / Heuristic Fallback for Stage 1:
     if not intent:
         lower_p = normalized_prompt.lower()
-        
+
         # Action command starters / imperative prefixes
         action_command_starts = (
             "yes ", "yeah ", "sure ", "ok ", "okay ", "please ", "go ahead ", "proceed ",
@@ -2273,7 +2320,8 @@ Respond STRICTLY with valid JSON adhering to this schema:
             "what else is in", "what files", "how many files", "do i have", 
             "display", "summarize", "view", "inspect", "where is", "where are",
             "tell me about", "locate", "check for", "which files", "today did i",
-            "did i receive", "receive any", "recent", "are there any", "are there"
+            "did i receive", "receive any", "recent", "are there any", "are there",
+            "any more", "more sorting", "what's left", "whats left", "remaining files"
         )
         file_op_keywords = (
             "sort", "voucher", "fee", "challan", "slip", "peer", "separate", 
@@ -2282,7 +2330,11 @@ Respond STRICTLY with valid JSON adhering to this schema:
             "duplicate", "duplicates", "dedup", "deduplicate"
         )
 
-        if is_action_command and any(k in lower_p for k in file_op_keywords):
+        if is_pure_affirmative:
+            intent = "FILE_OPERATION"
+        elif is_polite_action:
+            intent = "FILE_OPERATION"
+        elif is_action_command and any(k in lower_p for k in file_op_keywords):
             intent = "FILE_OPERATION"
         elif any(k in lower_p for k in advice_lead_keywords):
             intent = "CONVERSATION"
@@ -2485,6 +2537,99 @@ Keep your response well-structured using clean Markdown formatting (bullet point
                         "🏷️ Clean Download Names"
                     ]
                 })
+
+        # ---------------------------------------------------------------------
+        # SUB-CASE A0: Folder Audit & Remaining Work Request (e.g. "Any more sorting for the download?", "What's left?")
+        # ---------------------------------------------------------------------
+        if parsed_intent.get("is_audit_status_query"):
+            dir_name = parsed_intent["folder_constraint"] or target_folder
+            dir_files = [
+                f for f in all_files 
+                if f["path"].startswith(f"{dir_name}/") or (f["path"] == f["filename"] and dir_name.lower() in ("download", "downloads"))
+            ]
+            if not dir_files and dir_name.lower() in ("download", "downloads"):
+                dir_files = [f for f in all_files if not f["path"].startswith("Documents/")]
+
+            unorganized_acad = []
+            unorganized_peers = defaultdict(list)
+            unorganized_vouchers = []
+            unorganized_trash = []
+
+            for f in dir_files:
+                fn = f["filename"]
+                is_p = False
+                for p in peer_names:
+                    if p.lower() in fn.lower():
+                        unorganized_peers[p].append(f)
+                        is_p = True
+                        break
+                if is_p:
+                    continue
+
+                if any(w in fn.lower() for w in ("voucher", "challan", "fee", "receipt")):
+                    unorganized_vouchers.append(f)
+                elif any(w in fn.lower() for w in ("lecture", "notes", "assignment", "wa0017", "wa0018", "neural", "1508", "paper", "bsai")):
+                    unorganized_acad.append(f)
+                elif fn.endswith(".tmp") or "screenshot" in fn.lower() or fn.startswith("temp_"):
+                    unorganized_trash.append(f)
+
+            total_pending = len(unorganized_acad) + sum(len(l) for l in unorganized_peers.values()) + len(unorganized_vouchers) + len(unorganized_trash)
+
+            gemini_audit_prompt = f"""You are Storage Copilot, an advanced on-device AI agent for {owner_name}.
+User Query: "{raw_prompt}"
+Target Folder: {dir_name}/
+Total Remaining Files in Folder: {len(dir_files)}.
+Pending Unorganized Files:
+- Academic Courseware: {len(unorganized_acad)} file(s)
+- Peer Classmate Files: {sum(len(l) for l in unorganized_peers.values())} file(s)
+- Tuition Vouchers: {len(unorganized_vouchers)} file(s)
+- Temporary Trash/Cache: {len(unorganized_trash)} file(s)
+
+INSTRUCTIONS:
+1. Speak articulately and directly to {owner_name}.
+2. Explain the current status of `{dir_name}/`.
+3. If there are pending unorganized files ({total_pending} remaining): clearly list what remains and suggest next logical steps (e.g., 'Separate peer documents' or 'Organize university files').
+4. If NO unorganized files remain: celebrate that the folder is clean and organized, and note that only personal/general files remain.
+5. NEVER search for a file named 'download sorting' or output robotic database strings.
+"""
+            audit_reply = call_gemini_text(gemini_audit_prompt, raw_prompt)
+
+            if not audit_reply:
+                if total_pending > 0:
+                    lines = [
+                        f"I audited your **`{dir_name}/`** directory. You currently have **{len(dir_files)} file(s)**, with **{total_pending} file(s)** ready for further organization:\n"
+                    ]
+                    if unorganized_peers:
+                        p_summary = ", ".join([f"{len(l)} from **{p}**" for p, l in unorganized_peers.items()])
+                        lines.append(f"- 👥 **Peer Documents ({p_summary})**: We can isolate these into `Documents/Peers/<Name>/`.")
+                    if unorganized_acad:
+                        lines.append(f"- 📚 **Academic Courseware ({len(unorganized_acad)} file(s))**: Can be organized into `Documents/University/AI/`.")
+                    if unorganized_vouchers:
+                        lines.append(f"- 🧾 **Fee Vouchers ({len(unorganized_vouchers)} file(s))**: Can be archived into `Documents/University/Vouchers/`.")
+                    if unorganized_trash:
+                        lines.append(f"- 🗑️ **Temporary Files ({len(unorganized_trash)} file(s))**: Can be safely soft-deleted.")
+                    lines.append(f"\n💡 *Would you like me to proceed with any of these? Say **\"Separate peer documents\"** or **\"Organize all university files\"** to review a plan.*")
+                    audit_reply = "\n".join(lines)
+                else:
+                    audit_reply = (
+                        f"✨ **`{dir_name}/` is in great shape!**\n\n"
+                        f"All primary academic courseware, fee vouchers, and classmate documents have already been organized into their respective folders. "
+                        f"The remaining {len(dir_files)} file(s) are general downloads and documents."
+                    )
+
+            return jsonify({
+                "type": "query_info",
+                "message": audit_reply,
+                "version": APP_VERSION,
+                "actions": [],
+                "query_results": [],
+                "quick_chips": [
+                    "👥 Separate Peer Documents",
+                    "📋 Sort Student Vouchers",
+                    "🧹 Clean Duplicates",
+                    "🏷️ Clean Download Names"
+                ]
+            })
 
         # ---------------------------------------------------------------------
         # SUB-CASE A: Directory Listing / Inventory Request (e.g. "Give me list of all the files in download")
@@ -2930,10 +3075,20 @@ INSTRUCTIONS & REASONING RULES:
         manifest_lookup[filename.lower()] = internal_item
 
     # 4. Formulate Stage 2 Gemini System Prompt with Real Files Manifest
+    if is_pure_affirmative:
+        effective_request = f"The user confirmed with '{raw_prompt}' to proceed with the previously discussed action: '{normalized_prompt}'."
+    elif is_polite_action:
+        effective_request = f"The user requested to proceed with the action: '{raw_prompt}'."
+    else:
+        effective_request = raw_prompt
+
     system_prompt = f"""You are Storage Copilot, running locally on an Android device via Termux.
 Active User: {owner_name} (Roll/ID: {identifiers}, Major: Artificial Intelligence).
 Storage Root: /storage/emulated/0 (Downloads, Documents).
 Known Peers: {", ".join(peer_names)}.
+
+RECENT CONVERSATION HISTORY (Last turns):
+{conversation_context_block}
 
 Peer Separation Matrix:
 {peer_matrix_lines}
@@ -2948,7 +3103,9 @@ Define a unified JSON contract for your responses:
 CRITICAL INTENT HANDLING:
 - If the user is asking for suggestions, ideas, advice, recommendations, or options (e.g., "Some suggestions for my files to organize", "What do you suggest?", "How should I organize?"):
   DO NOT CREATE ACTIONS! Return "type": "conversation", "actions": [], and provide articulate, thoughtful recommendations in "message" explaining how they can organize their files.
-- ONLY return "type": "plan" with move/rename actions if the user gives an explicit command or instruction to organize or modify files (e.g. "Organize all my university files", "Sort student vouchers").
+- If the user confirmed with "Yes", "Proceed", or agreed to proceed with a previously discussed proposal (see RECENT CONVERSATION HISTORY): CREATE the appropriate "type": "plan" with actions for that confirmed action!
+- If the user gives an action instruction like "How about we first sort...", "Can we first organize...", "First sort...", treat this as a direct instruction to stage a plan for those files ("type": "plan").
+- ONLY return "type": "plan" with move/rename actions if the user gives an explicit command or instruction or confirmation to organize or modify files.
 
 IMPORTANT: The candidates below are the ACTUAL files currently sitting on disk.
 Reason SEMANTICALLY over each candidate's filename, size_kb, text_snippet, and has_content to decide the appropriate operation:
@@ -2984,7 +3141,8 @@ Action format:
 - {{"action_id": "step-3", "type": "trash", "path": "<exact filename from manifest>", "rationale": "...", "badge": "TRASH", "ai_inspected": false, "inspected_preview": "..."}}
 """
 
-    user_prompt_text = f"""Operational Request: "{raw_prompt}"
+    user_prompt_text = f"""Operational Request: "{effective_request}"
+Raw User Prompt: "{raw_prompt}"
 
 Current Target Directory: "{target_folder}"
 Available Real Files Manifest ({len(manifest)} real files on disk):
@@ -3058,7 +3216,8 @@ Available Real Files Manifest ({len(manifest)} real files on disk):
             })
 
     # 6. Heuristic Fallback (Active if Gemini is offline or API key missing)
-    lower_p = raw_prompt.lower()
+    effective_p = (normalized_prompt if is_pure_affirmative else raw_prompt).lower()
+    lower_p = effective_p
     plan_actions = []
     plan_desc = ""
     created_dirs = set()
