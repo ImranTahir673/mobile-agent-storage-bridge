@@ -15,7 +15,8 @@ document.addEventListener('DOMContentLoaded', () => {
     lastBatchActions: 0,
     lastExecutionSummary: [],
     activePlan: null,
-    selectedActionIds: new Set()
+    selectedActionIds: new Set(),
+    conversationHistory: []
   };
 
   // ==============================================================================
@@ -927,11 +928,18 @@ document.addEventListener('DOMContentLoaded', () => {
     appendUserMessage(text);
     const typingBubble = showTypingIndicator();
 
+    // Record user message to conversation history
+    state.conversationHistory.push({ role: 'user', content: text });
+
     try {
       const resp = await fetch('/propose_plan', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompt: text, target_folder: 'Download' })
+        body: JSON.stringify({ 
+          prompt: text, 
+          target_folder: 'Download',
+          conversation_history: state.conversationHistory.slice(-6)
+        })
       });
 
       const data = await resp.json();
@@ -939,6 +947,12 @@ document.addEventListener('DOMContentLoaded', () => {
 
       if (!resp.ok) {
         throw new Error(data.error || 'Failed to analyze prompt');
+      }
+
+      // Record assistant message to conversation history
+      const replyMsg = data.message || '';
+      if (replyMsg) {
+        state.conversationHistory.push({ role: 'assistant', content: replyMsg });
       }
 
       if (data.type === 'conversation') {
