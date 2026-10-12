@@ -176,6 +176,79 @@ html, body {
   color: var(--primary-light);
 }
 
+/* Header Controls & Badges */
+.header-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.clear-chat-btn {
+  width: 30px;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 50%;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  transition: all 0.18s ease;
+}
+
+.clear-chat-btn:hover {
+  background: rgba(239, 68, 68, 0.15);
+  border-color: rgba(239, 68, 68, 0.35);
+  color: #FCA5A5;
+  transform: translateY(-1px);
+}
+
+.clear-chat-btn.confirm-active {
+  background: rgba(239, 68, 68, 0.35);
+  border-color: rgba(239, 68, 68, 0.7);
+  color: #FCA5A5;
+  box-shadow: 0 0 10px rgba(239, 68, 68, 0.4);
+}
+
+.clear-chat-btn svg {
+  width: 14px;
+  height: 14px;
+}
+
+.ai-status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 10px;
+  background: rgba(99, 102, 241, 0.12);
+  border: 1px solid rgba(99, 102, 241, 0.3);
+  border-radius: var(--radius-full);
+  color: #C7D2FE;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.ai-status-pill:hover {
+  background: rgba(99, 102, 241, 0.22);
+  border-color: rgba(99, 102, 241, 0.55);
+  transform: translateY(-1px);
+}
+
+.ai-status-pill.configured {
+  background: rgba(16, 185, 129, 0.12);
+  border-color: rgba(16, 185, 129, 0.35);
+  color: #6EE7B7;
+}
+
+.ai-status-pill.unconfigured {
+  background: rgba(245, 158, 11, 0.12);
+  border-color: rgba(245, 158, 11, 0.35);
+  color: #FCD34D;
+}
+
 /* Engine Status Badge */
 .engine-badge {
   display: flex;
@@ -1223,6 +1296,18 @@ html, body {
 
 .chip-emoji {
   font-size: 14px;
+}
+
+.task-chip.highlight-chip {
+  background: linear-gradient(135deg, rgba(99, 102, 241, 0.22) 0%, rgba(139, 92, 246, 0.22) 100%);
+  border-color: rgba(99, 102, 241, 0.5);
+  color: #EEF2FF;
+  box-shadow: 0 0 12px rgba(99, 102, 241, 0.25);
+}
+
+.task-chip.highlight-chip:hover {
+  background: linear-gradient(135deg, rgba(99, 102, 241, 0.35) 0%, rgba(139, 92, 246, 0.35) 100%);
+  border-color: rgba(99, 102, 241, 0.75);
 }
 
 /* Input Bar Wrapper */
