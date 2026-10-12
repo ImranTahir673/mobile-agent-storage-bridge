@@ -67,4 +67,9 @@ t5 = send_chat("Also can you find me a book for Java Language in the downloads?"
 assert t5.get("type") == "query_info", f"Expected 'query_info', got {t5.get('type')}"
 assert "java" in t5.get("message", "").lower(), "Must locate Java book in message!"
 
-print("\n\n>>> ALL 5 CHAT INTERACTIONS TESTED AND VERIFIED PERFECTLY! <<<")
+# TEST 6: Deep Content Summarization (Neural Style Paper)
+t6 = send_chat("Can you summarize the main findings of the neural style paper?")
+assert t6.get("type") == "query_info", f"Expected 'query_info', got {t6.get('type')}"
+assert "neural" in t6.get("message", "").lower() or "gatys" in t6.get("message", "").lower(), "Must summarize neural style paper!"
+
+print("\n\n>>> ALL 6 CHAT & DEEP INSPECTION INTERACTIONS TESTED AND VERIFIED PERFECTLY! <<<")
