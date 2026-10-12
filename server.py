@@ -2191,18 +2191,20 @@ def propose_plan():
     is_pure_affirmative = lower_raw in affirmative_words or lower_norm in affirmative_words or any(lower_raw.startswith(w + " ") for w in ("yes", "sure", "ok", "okay", "go ahead", "proceed"))
     is_polite_action = any(lower_norm.startswith(p) for p in ("how about we sort", "how about we organize", "how about we clean", "can we sort", "can we organize", "let's sort", "lets sort", "first sort")) or "first sort" in lower_norm
 
+    last_asst = ""
+    for turn in reversed(conversation_history):
+        r = (turn.get("role") or "").lower()
+        if r in ("assistant", "copilot", "bot"):
+            last_asst = (turn.get("content") or turn.get("text") or turn.get("message") or "").strip()
+            break
+
     if is_pure_affirmative:
-        last_asst = ""
-        for turn in reversed(conversation_history):
-            r = (turn.get("role") or "").lower()
-            if r in ("assistant", "copilot", "bot"):
-                last_asst = (turn.get("content") or turn.get("text") or turn.get("message") or "").lower()
-                break
-        if "duplicate" in last_asst:
+        lower_asst = last_asst.lower()
+        if "duplicate file audit" in lower_asst or "clean up these redundant copies" in lower_asst:
             normalized_prompt = "clean duplicate downloads"
-        elif "peer" in last_asst:
+        elif any(p in lower_asst for p in ("peer document", "peer files", "separate peer", "classmate", "peer separation")):
             normalized_prompt = "separate peer documents"
-        elif "voucher" in last_asst or "fee" in last_asst:
+        elif any(p in lower_asst for p in ("tuition voucher", "fee voucher", "fee slip", "student voucher", "student vouchers")):
             normalized_prompt = "sort student vouchers"
         else:
             normalized_prompt = "organize all my university files"
@@ -3076,7 +3078,8 @@ INSTRUCTIONS & REASONING RULES:
 
     # 4. Formulate Stage 2 Gemini System Prompt with Real Files Manifest
     if is_pure_affirmative:
-        effective_request = f"The user confirmed with '{raw_prompt}' to proceed with the previously discussed action: '{normalized_prompt}'."
+        last_asst_snippet = last_asst[:400].replace('\n', ' ') if last_asst else normalized_prompt
+        effective_request = f"The user confirmed with '{raw_prompt}' to proceed with the specific action, plan, or recommendation previously discussed by the assistant in the latest turn: \"{last_asst_snippet}\"."
     elif is_polite_action:
         effective_request = f"The user requested to proceed with the action: '{raw_prompt}'."
     else:
