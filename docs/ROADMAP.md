@@ -36,6 +36,11 @@ This roadmap details the engineering phases required to evolve the **Mobile Agen
                                                   |
                                                   v
 +---------------------------------------------------------------------------------------------------+
+| Phase 3.5: Unified Grounded Architecture & Temporal / Date-Range Engine [IN PROGRESS / TOMORROW]   |
++---------------------------------------------------------------------------------------------------+
+                                                  |
+                                                  v
++---------------------------------------------------------------------------------------------------+
 | Phase 4: Native Standalone Android Application (Jetpack Compose, Room DB, SAF) [NEXT MILESTONE]   |
 +---------------------------------------------------------------------------------------------------+
 ```
@@ -187,7 +192,37 @@ Ensured the phone server runs reliably in the background without being killed by
 
 ---
 
-## 8. Phase 4: Native Standalone Android Application (Jetpack Compose, Room DB, SAF) [NEXT MILESTONE]
+## 8. Phase 3.5: Unified Grounded Architecture & Temporal / Date-Range Engine [IN PROGRESS / TOMORROW]
+
+Eliminated brittle regex/stopword filters in favor of real on-device storage reconnaissance and unified grounded reasoning. Tomorrow's milestone extends the engine with high-precision temporal querying and date-range file operations.
+
+### 8.1 Tasks & Deliverables
+
+- [x] **3.5.1 Unified Grounded Intelligence Pipeline (Single-Turn Architecture) [COMPLETED]**
+  - Reconnaissance first: Python gathers live manifest (filenames, sizes, dates, PII-sanitized text) before calling LLM.
+  - Single unified Gemini call eliminating two-stage latency and stopword scoring bottlenecks.
+  - Smart Two-Tier Context: 1,000-char rich overview for directory scans + on-demand deep inspection (up to 12,000 chars) for specific document Q&A.
+  - Zero external pip dependencies; strict on-device PII scrubbing in RAM.
+
+- [ ] **3.5.2 Temporal Recency & Relative Ordering Engine [TOMORROW'S MILESTONE]**
+  - Natural language recency queries: *"Show latest files"*, *"What's the newest download?"*, *"List oldest files"*, *"What was modified most recently?"*.
+  - Python mtime extraction & timestamp sorting (ascending / descending) directly reflected in Gemini's candidate ranking.
+
+- [ ] **3.5.3 Exact Calendar Date & Time-Window Filtering [TOMORROW'S MILESTONE]**
+  - Exact calendar matching: *"Find files from today"*, *"What did I download yesterday?"*, *"Show files from October 10"*, *"Files downloaded on 2026-10-12"*.
+  - Device clock grounding (`now_str` & `today_date`) to accurately resolve relative terms (*"today"*, *"yesterday"*, *"last Friday"*).
+
+- [ ] **3.5.4 Duration & Interval Range Queries [TOMORROW'S MILESTONE]**
+  - Natural interval ranges: *"Files from the last 7 days"*, *"Files downloaded in the past 2 weeks"*, *"Files between March 2025 and May 2025"*, *"Files older than 3 months"*.
+  - Python pre-flight date calculation and manifest filtering so Gemini receives the exact matching time bracket.
+
+- [ ] **3.5.5 Temporal Action Directives & Lifecycle Archiving [TOMORROW'S MILESTONE]**
+  - Time-driven action plans: *"Move files older than 30 days to Documents/Archive/"*, *"Sort all files downloaded today into Documents/University/"*, *"Clean downloads older than 6 months"*.
+  - Full atomic review via interactive diff cards and 1-tap rollback in `.ledger.db`.
+
+---
+
+## 9. Phase 4: Native Standalone Android Application (Jetpack Compose, Room DB, SAF) [NEXT MILESTONE]
 
 Transition from the 3-tier hybrid developer prototype (Termux + Python + Cloudflare Tunnel + Desktop CLI) into an **All-in-One Standalone Android App**.
 
