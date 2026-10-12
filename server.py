@@ -114,6 +114,20 @@ def handle_options():
         resp.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization, X-Requested-With, Accept"
         return resp
 
+@app.errorhandler(Exception)
+def handle_global_exception(e):
+    """Guarantees the bridge server always responds with JSON, never raw HTML error pages."""
+    import traceback
+    err_msg = str(e) or type(e).__name__
+    print(f"[Storage Copilot Error] Unhandled Exception: {err_msg}")
+    traceback.print_exc()
+    return jsonify({
+        "type": "conversation",
+        "message": f"⚠️ Storage Copilot encountered an issue: {err_msg}",
+        "error": err_msg,
+        "version": APP_VERSION
+    }), 500
+
 # ==============================================================================
 # Database Ledger Initialization (SQLite in WAL mode)
 # ==============================================================================
