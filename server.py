@@ -762,9 +762,10 @@ SEARCH_STOPWORDS = {
     "to", "in", "on", "at", "by", "from", "some", "my", "me", "your", "our", "please", 
     "can", "could", "would", "should", "want", "like", "any", "this", "that", "these", 
     "those", "how", "what", "which", "where", "tell", "give", "list", "listing", "show", 
-    "get", "find", "search", "locate", "check", "view", "book", "document", "documents", 
+    "get", "find", "search", "locate", "check", "view", "book", "books", "document", "documents", 
     "paper", "copy", "copies", "download", "downloads", "inside", "here", "there", "of", 
-    "is", "are", "have", "has", "do", "does", "did", "fikes", "vest"
+    "is", "are", "have", "has", "do", "does", "did", "also", "you", "language", "guide",
+    "guides", "looking", "need", "folder", "folders", "directory", "directories", "fikes", "vest"
 }
 
 def parse_query_intent(query: str, default_folder: str = "Download") -> dict:
@@ -779,7 +780,7 @@ def parse_query_intent(query: str, default_folder: str = "Download") -> dict:
 
     # Detect folder constraints
     folder_constraint = None
-    if any(p in lower_q for p in ("in download", "in the download", "in downloads", "in my download", "inside download", "from download", "of download")):
+    if any(p in lower_q for p in ("in download", "in the download", "in downloads", "in the downloads", "in my download", "inside download", "from download", "of download")):
         folder_constraint = "Download"
     elif any(p in lower_q for p in ("in documents", "in the documents", "inside documents", "in my documents", "from documents")):
         folder_constraint = "Documents"
@@ -832,13 +833,19 @@ def parse_query_intent(query: str, default_folder: str = "Download") -> dict:
         target_tokens = []
         cleaned_target = ""
     else:
+        # 1. Strip trailing punctuation first
+        cleaned_target = re.sub(r"[?!.,\"';:]+$", "", lower_q).strip()
+        # 2. Strip conversational inquiry prefixes
         cleaned_target = re.sub(
-            r"^(?:can\s+you\s+)?(?:find(?: me)?|where is|where are|search(?: for)?|locate|show(?: me)?|get(?: me)?|list|check|do\s+i\s+have)\s+",
+            r"^(?:also\s+)?(?:can\s+you\s+)?(?:could\s+you\s+)?(?:please\s+)?(?:find(?: me)?|where is|where are|search(?: for)?|locate|show(?: me)?|get(?: me)?|list|check|do\s+i\s+have|looking\s+for|i\s+need)\s+",
             "",
-            lower_q
+            cleaned_target
         ).strip()
-        cleaned_target = re.sub(r"^(?:the\s+book\s+for|a\s+copy\s+of|the\s+doc\s+for|the\s+file\s+for|my|the)\s+", "", cleaned_target).strip()
-        cleaned_target = re.sub(r"[?!.,\"';:]+$", "", cleaned_target).strip()
+        # 3. Strip noun wrappers ("a book for", "the doc for", etc.)
+        cleaned_target = re.sub(r"^(?:the\s+book\s+for|a\s+book\s+for|the\s+book|a\s+book|the\s+guide\s+for|a\s+guide\s+for|the\s+doc\s+for|the\s+file\s+for|a\s+copy\s+of|my|the|a|an)\s+", "", cleaned_target).strip()
+        # 4. Strip trailing location references
+        cleaned_target = re.sub(r"\s+(?:in|inside|from|of)\s+(?:the\s+)?(?:downloads?|documents?|storage)$", "", cleaned_target).strip()
+        # 5. Extract non-stopword tokens
         target_tokens = [t for t in re.findall(r"\w+", cleaned_target) if len(t) > 1 and t not in SEARCH_STOPWORDS]
 
     return {
@@ -853,7 +860,7 @@ def parse_query_intent(query: str, default_folder: str = "Download") -> dict:
 def score_document_match(query: str, doc: dict) -> tuple[float, str]:
     """
     Calculates semantic relevance score (0.0 - 200.0) for a document.
-    Enforces strict token coverage to eliminate false-positive noise and incidental matches.
+    Enforces robust token matching so meaningful keywords (like 'Java') in filenames match with high confidence.
     """
     parsed = parse_query_intent(query)
     target_tokens = parsed["target_tokens"]
@@ -878,16 +885,21 @@ def score_document_match(query: str, doc: dict) -> tuple[float, str]:
         match_reason = f"Title contains '{cleaned_target}'"
     elif target_tokens:
         matched_fn_tokens = [t for t in target_tokens if t in fn or t in fn_normalized]
-        fn_coverage = len(matched_fn_tokens) / len(target_tokens)
-        if fn_coverage == 1.0 and len(target_tokens) > 1:
-            score += 100.0 + (15.0 * len(matched_fn_tokens))
-            match_reason = f"All query keywords match: {', '.join(matched_fn_tokens)}"
-        elif fn_coverage >= 0.6:
-            score += 50.0 * fn_coverage + (20.0 * len(matched_fn_tokens))
-            match_reason = f"Keywords match: {', '.join(matched_fn_tokens)}"
-        elif len(matched_fn_tokens) == 1 and len(target_tokens) == 1:
-            score += 70.0
-            match_reason = f"Keyword match: {matched_fn_tokens[0]}"
+        if matched_fn_tokens:
+            fn_coverage = len(matched_fn_tokens) / len(target_tokens)
+            if fn_coverage == 1.0:
+                score += 120.0 + (15.0 * len(matched_fn_tokens))
+                match_reason = f"All query keywords match: {', '.join(matched_fn_tokens)}"
+            else:
+                score += 75.0 + (25.0 * len(matched_fn_tokens)) + (20.0 * fn_coverage)
+                match_reason = f"Filename keyword match: {', '.join(matched_fn_tokens)}"
+
+    # 1b. Folder Constraint Alignment Boost
+    if parsed.get("folder_constraint"):
+        fc = parsed["folder_constraint"].lower()
+        doc_p = doc.get("path", "").lower()
+        if doc_p.startswith(fc + "/") or (fc == "download" and not doc_p.startswith("documents/")):
+            score += 25.0
 
     # 2. Content Snippet Matching
     if snip and snip != "none (binary/image)":
