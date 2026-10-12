@@ -6,6 +6,7 @@ import sqlite3
 import uuid
 import hashlib
 import time
+from collections import defaultdict
 from datetime import datetime, timezone
 import requests
 from flask import Flask, request, jsonify, send_from_directory
@@ -253,6 +254,187 @@ def calculate_file_hash(filepath: str) -> str:
         return h.hexdigest()
     except Exception:
         return ""
+
+def format_bytes_human(size_bytes: int) -> str:
+    """Formats raw byte counts into human-readable strings (KB, MB, GB)."""
+    if size_bytes < 1024:
+        return f"{size_bytes} B"
+    elif size_bytes < 1024 * 1024:
+        return f"{size_bytes / 1024:.1f} KB"
+    elif size_bytes < 1024 * 1024 * 1024:
+        return f"{size_bytes / (1024 * 1024):.1f} MB"
+    else:
+        return f"{size_bytes / (1024 * 1024 * 1024):.2f} GB"
+
+def score_keeper_candidate(file_info: dict) -> float:
+    """
+    Evaluates which file in a duplicate cluster should be retained as the original keeper.
+    Higher score indicates higher likelihood of being the original, non-redundant file.
+    """
+    score = 100.0
+    filename = file_info["filename"]
+    stem, _ = os.path.splitext(filename)
+    stem_lower = stem.lower()
+
+    # 1. Heavily penalize copy/duplicate suffixes
+    if re.search(r"\(\d+\)$", stem):
+        score -= 60.0
+    if re.search(r"[-_](?:copy|\d+)$", stem_lower):
+        score -= 40.0
+    if "duplicate" in stem_lower or "copy" in stem_lower:
+        score -= 50.0
+
+    # 2. Prefer clean canonical names over camera/whatsapp raw dumps
+    if re.match(r"^(?:DOC-\d{8}-WA\d{4}|IMG-\d{8}-WA\d{4}|Screenshot_\d{8})", stem):
+        score -= 20.0
+
+    # 3. Prefer files already categorized under Documents over Download
+    if "download" in file_info.get("path", "").lower():
+        score -= 10.0
+
+    # 4. Prefer older file creation/modification (original download)
+    mtime = file_info.get("mtime", 0)
+    if mtime > 0:
+        score -= (mtime % 1000000) * 0.00001
+
+    return score
+
+def find_duplicate_clusters(base_dir: str, target_folder: str = "Download", recursive: bool = True) -> dict:
+    """
+    Phase 1 Core: Scans files within target_folder (or base_dir) to identify exact duplicate clusters via streaming SHA-256.
+    Uses fast size pre-filtering to prevent unnecessary hashing on mobile.
+    Selects the cleanest original copy as keeper and stages redundant copies for cleanup.
+    """
+    target_path = resolve_safe_path(target_folder) if target_folder else base_dir
+    if not os.path.exists(target_path) or not os.path.isdir(target_path):
+        return {
+            "status": "success",
+            "target_folder": target_folder,
+            "total_clusters": 0,
+            "total_duplicates": 0,
+            "reclaimable_bytes": 0,
+            "reclaimable_human": "0 B",
+            "clusters": []
+        }
+
+    # Step 1: Collect non-hidden regular files grouped by size
+    files_by_size = defaultdict(list)
+    if recursive:
+        for root, dirs, files in os.walk(target_path):
+            dirs[:] = [d for d in dirs if not d.startswith(".") and d.lower() != "android" and d != ".agent_trash"]
+            for fname in files:
+                if fname.startswith("."):
+                    continue
+                abs_p = os.path.join(root, fname)
+                try:
+                    st = os.stat(abs_p)
+                    size = st.st_size
+                    if size > 0:
+                        try:
+                            rel_path = os.path.relpath(abs_p, base_dir).replace("\\", "/")
+                        except Exception:
+                            rel_path = fname
+
+                        mtime_str = datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M")
+                        files_by_size[size].append({
+                            "filename": fname,
+                            "path": rel_path,
+                            "abs_path": abs_p,
+                            "size_bytes": size,
+                            "mtime": st.st_mtime,
+                            "modified_date": mtime_str
+                        })
+                except Exception:
+                    continue
+    else:
+        for entry in os.scandir(target_path):
+            if entry.is_file() and not entry.name.startswith("."):
+                try:
+                    st = entry.stat()
+                    size = st.st_size
+                    if size > 0:
+                        try:
+                            rel_path = os.path.relpath(entry.path, base_dir).replace("\\", "/")
+                        except Exception:
+                            rel_path = entry.name
+
+                        mtime_str = datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M")
+                        files_by_size[size].append({
+                            "filename": entry.name,
+                            "path": rel_path,
+                            "abs_path": entry.path,
+                            "size_bytes": size,
+                            "mtime": st.st_mtime,
+                            "modified_date": mtime_str
+                        })
+                except Exception:
+                    continue
+
+    # Step 2: Stream SHA-256 only on files with identical non-zero sizes
+    clusters_by_hash = defaultdict(list)
+    for size, file_list in files_by_size.items():
+        if len(file_list) >= 2:
+            for f_info in file_list:
+                f_hash = calculate_file_hash(f_info["abs_path"])
+                if f_hash:
+                    clusters_by_hash[f_hash].append(f_info)
+
+    # Step 3: Filter true duplicate clusters (>= 2 files with identical hash)
+    clusters = []
+    total_duplicates = 0
+    reclaimable_bytes = 0
+
+    for f_hash, file_list in clusters_by_hash.items():
+        if len(file_list) >= 2:
+            sorted_files = sorted(file_list, key=score_keeper_candidate, reverse=True)
+            keeper = sorted_files[0]
+            keeper_dict = {
+                "filename": keeper["filename"],
+                "path": keeper["path"],
+                "size_bytes": keeper["size_bytes"],
+                "modified_date": keeper["modified_date"],
+                "reason": "Original file with clean canonical naming"
+            }
+
+            redundant_files = []
+            file_size = keeper["size_bytes"]
+            for dup in sorted_files[1:]:
+                reason = "Redundant copy"
+                if re.search(r"\(\d+\)", dup["filename"]):
+                    reason = "Redundant copy with numeric download suffix"
+                elif "copy" in dup["filename"].lower():
+                    reason = "Redundant copy duplicate"
+                redundant_files.append({
+                    "filename": dup["filename"],
+                    "path": dup["path"],
+                    "size_bytes": dup["size_bytes"],
+                    "modified_date": dup["modified_date"],
+                    "reason": reason
+                })
+
+            cluster_reclaimable = file_size * len(redundant_files)
+            reclaimable_bytes += cluster_reclaimable
+            total_duplicates += len(redundant_files)
+
+            clusters.append({
+                "hash": f_hash,
+                "size_bytes": file_size,
+                "size_human": format_bytes_human(file_size),
+                "reclaimable_bytes": cluster_reclaimable,
+                "reclaimable_human": format_bytes_human(cluster_reclaimable),
+                "keeper": keeper_dict,
+                "duplicates": redundant_files
+            })
+
+    return {
+        "status": "success",
+        "target_folder": target_folder,
+        "total_clusters": len(clusters),
+        "total_duplicates": total_duplicates,
+        "reclaimable_bytes": reclaimable_bytes,
+        "reclaimable_human": format_bytes_human(reclaimable_bytes),
+        "clusters": clusters
+    }
 
 def resolve_collision(target_path: str, strategy: str) -> str:
     """Resolves destination collisions according to policy."""
@@ -1317,9 +1499,29 @@ def get_recent_batch():
     finally:
         conn.close()
 
+@app.route("/scan_duplicates", methods=["GET", "POST"])
+def scan_duplicates():
+    """
+    Phase 1 Core Endpoint:
+    Scans target_folder (defaults to Download/) for exact duplicate clusters using streaming SHA-256.
+    Returns designated original keeper, redundant copies, and total reclaimable storage bytes.
+    """
+    data = {}
+    if request.method == "POST":
+        data = request.get_json(silent=True) or {}
+    target_folder = data.get("target_folder") or request.args.get("target_folder") or "Download"
+    
+    try:
+        res = find_duplicate_clusters(BASE_STORAGE_DIR, target_folder)
+        return jsonify(res)
+    except Exception as e:
+        return jsonify({"status": "error", "error": str(e)}), 500
+
 @app.route("/seed_fixtures", methods=["POST"])
 def seed_fixtures():
     """Seeds realistic sample mobile files in Download/ to test instant plan generation, query inspection, and execution."""
+    data = request.get_json(silent=True) or {}
+    include_duplicates = bool(data.get("duplicates") or request.args.get("duplicates"))
     download_dir = os.path.join(BASE_DIR, "Download")
     os.makedirs(download_dir, exist_ok=True)
     sample_files = {
@@ -1334,6 +1536,10 @@ def seed_fixtures():
         "temp_cache_sync.tmp": "[Temporary sync cache file created by updater]",
         "WhatsApp_Doc_Ahmed_Receipt.pdf": "Payment receipt for Ahmed, Department Library Fee."
     }
+    if include_duplicates:
+        sample_files["1508.06576v2_neural_style (1).pdf"] = sample_files["1508.06576v2_neural_style.pdf"]
+        sample_files["DOC-20250413-WA0019 (1)..pdf"] = sample_files["DOC-20250413-WA0019..pdf"]
+
     created = []
     for fname, content in sample_files.items():
         fpath = os.path.join(download_dir, fname)
@@ -1688,6 +1894,8 @@ def normalize_user_prompt(text: str) -> str:
     - 'oragnize' -> 'organize'
     - 'doenload' -> 'download'
     - 'reciept' -> 'receipt'
+    - 'dups' / 'dupes' / 'dupe' -> 'duplicates'
+    - 'dedup' -> 'deduplicate'
     """
     if not text:
         return ""
@@ -1697,6 +1905,8 @@ def normalize_user_prompt(text: str) -> str:
     t = re.sub(r"\boragnize\b", "organize", t, flags=re.I)
     t = re.sub(r"\bdoenload\b", "download", t, flags=re.I)
     t = re.sub(r"\breciept\b", "receipt", t, flags=re.I)
+    t = re.sub(r"\b(?:dups|dupes|dupe|dupplicates)\b", "duplicates", t, flags=re.I)
+    t = re.sub(r"\bdedup\b", "deduplicate", t, flags=re.I)
     return t
 
 @app.route("/propose_plan", methods=["POST"])
@@ -1766,7 +1976,7 @@ Peer Routing:
 YOUR AGENT PERSONA & BOUNDARIES:
 - You are an articulate, capable AI agent (similar to Google DeepMind / Antigravity). You communicate with clarity, intelligence, and empathy directly to {owner_name}.
 - You possess complete self-awareness of your abilities, capabilities, and system boundaries.
-- WHAT YOU CAN DO: Local storage reconnaissance, content inspection with in-memory PII sanitization, intelligent file organization (academic vs peer vs personal bills), interactive diff approval, and 1-tap atomic rollbacks via SQLite WAL.
+- WHAT YOU CAN DO: Local storage reconnaissance, content inspection with in-memory PII sanitization, intelligent file organization (academic vs peer vs personal bills), cryptographic duplicate detection & redundant file cleanup, interactive diff approval, and 1-tap atomic rollbacks via SQLite WAL.
 - WHAT YOU CANNOT DO (OUT OF SCOPE): You cannot send emails, send SMS/WhatsApp messages, browse the live web, access cloud storage directly, launch external apps, or alter Android system configurations.
 
 CLASSIFY THE USER'S PROMPT INTO EXACTLY ONE OF THREE INTENTS:
@@ -1779,12 +1989,13 @@ CLASSIFY THE USER'S PROMPT INTO EXACTLY ONE OF THREE INTENTS:
    - OUT-OF-SCOPE REQUESTS: Any request asking to perform external actions outside local storage (e.g., "Send an email to my professor", "Play music on Spotify", "Browse the web", "Check the weather", "Order food"). You must handle these under CONVERSATION by politely and knowledgeably explaining your sandbox boundaries and redirecting to local file actions.
 
 2. "QUERY_INFO":
-   - Read-only queries asking to find, search, locate, list, inspect, summarize, or check files or dates (e.g., "Find me Sumbal pass", "Where is my degree pass or entry pass?", "Today did I receive any documents?", "List university lectures", "Show fee voucher", "What files are here?").
+   - Read-only queries asking to find, search, locate, list, inspect, audit, summarize, or check files or dates (e.g., "Find duplicate files", "Check for duplicates", "Are there any duplicate files?", "Find me Sumbal pass", "Where is my degree pass or entry pass?", "Today did I receive any documents?", "List university lectures", "Show fee voucher", "What files are here?").
    - ZERO file moves, renames, or deletions.
 
 3. "FILE_OPERATION":
    - Explicit commands, instructions, or confirmations to take action, execute, or stage file moves/renames/deletions right now.
    - Examples:
+     * "Clean duplicate downloads" (or "Clean duplicates", "Remove duplicate files", "Deduplicate my files")
      * "Yes organize all my uni files" (Slang: 'uni' = university / college courseware)
      * "Sort all the other files like docs and pdfs in the download to their best suited places"
      * "Organize all my university files"
@@ -1813,7 +2024,7 @@ Respond STRICTLY with valid JSON adhering to this schema:
         # Action command starters / imperative prefixes
         action_command_starts = (
             "yes ", "yeah ", "sure ", "ok ", "okay ", "please ", "go ahead ", "proceed ",
-            "sort ", "organize ", "clean ", "move ", "put ", "trash ", "delete ", "tidy ", "structure "
+            "sort ", "organize ", "clean ", "move ", "put ", "trash ", "delete ", "tidy ", "structure ", "deduplicate "
         )
         is_action_command = any(lower_p.startswith(p) for p in action_command_starts)
 
@@ -1830,19 +2041,20 @@ Respond STRICTLY with valid JSON adhering to this schema:
             "what else is in", "what files", "how many files", "do i have", 
             "display", "summarize", "view", "inspect", "where is", "where are",
             "tell me about", "locate", "check for", "which files", "today did i",
-            "did i receive", "receive any", "recent"
+            "did i receive", "receive any", "recent", "are there any", "are there"
         )
         file_op_keywords = (
             "sort", "voucher", "fee", "challan", "slip", "peer", "separate", 
             "clean", "download", "screenshot", "trash", "delete", "move", 
-            "organize", "rename", "isolate", "structure", "tidy", "place"
+            "organize", "rename", "isolate", "structure", "tidy", "place",
+            "duplicate", "duplicates", "dedup", "deduplicate"
         )
 
         if is_action_command and any(k in lower_p for k in file_op_keywords):
             intent = "FILE_OPERATION"
         elif any(k in lower_p for k in advice_lead_keywords):
             intent = "CONVERSATION"
-        elif any(k in lower_p for k in query_lead_keywords) and not any(k in lower_p for k in ("sort", "organize", "clean", "trash", "move", "separate", "rename")):
+        elif any(k in lower_p for k in query_lead_keywords) and not any(k in lower_p for k in ("sort", "organize", "clean", "trash", "move", "separate", "rename", "deduplicate")):
             intent = "QUERY_INFO"
         elif any(k in lower_p for k in ("what else", "tell me more", "who are you", "what can you do", "help", "hi", "hello", "hey", "thanks", "email", "mail", "whatsapp", "music")):
             intent = "CONVERSATION"
@@ -1996,8 +2208,58 @@ Keep your response well-structured using clean Markdown formatting (bullet point
                 ]
             })
 
-        # Check if the query is date/recency oriented
+        # Check if the query is asking about duplicates
         lower_prompt = raw_prompt.lower()
+        is_duplicate_query = any(w in lower_prompt for w in ("duplicate", "duplicates", "dedup", "deduplicate", "repeated file", "repeated files"))
+        if is_duplicate_query:
+            dup_res = find_duplicate_clusters(BASE_STORAGE_DIR, target_folder)
+            if dup_res["total_duplicates"] == 0:
+                return jsonify({
+                    "type": "query_info",
+                    "message": f"✨ **No duplicate files detected in `{target_folder}/`!**\n\nI scanned your storage files using cryptographic SHA-256 content hashing. Every document is unique and no redundant copies were found.",
+                    "version": APP_VERSION,
+                    "actions": [],
+                    "query_results": [],
+                    "duplicate_summary": dup_res,
+                    "quick_chips": [
+                        "🧹 Clean duplicate downloads",
+                        "📋 Sort Student Vouchers",
+                        "👥 Separate Peer Documents",
+                        "🏷️ Clean Download Names"
+                    ]
+                })
+            else:
+                lines = [
+                    f"### 🧹 Duplicate File Audit for `{target_folder}/`",
+                    f"Found **{dup_res['total_duplicates']} redundant duplicate file(s)** across **{dup_res['total_clusters']} group(s)**.",
+                    f"**Total Reclaimable Storage:** `{dup_res['reclaimable_human']}`\n",
+                    "#### Detected Groups:"
+                ]
+                for idx, cluster in enumerate(dup_res["clusters"], 1):
+                    k = cluster["keeper"]
+                    lines.append(f"**Group {idx}** (Size: {cluster['size_human']} each, Reclaimable: {cluster['reclaimable_human']}):")
+                    lines.append(f"- 🛡️ **Preserving Keeper:** `{k['path']}` *({k['reason']})*")
+                    for d in cluster["duplicates"]:
+                        lines.append(f"- 🗑️ **Redundant Copy:** `{d['path']}` *({d['reason']})*")
+                    lines.append("")
+                lines.append("💡 *To clean up these redundant copies and reclaim space, say **'Clean duplicate downloads'** or tap **Clean Duplicates** below.*")
+
+                return jsonify({
+                    "type": "query_info",
+                    "message": "\n".join(lines),
+                    "version": APP_VERSION,
+                    "actions": [],
+                    "query_results": dup_res["clusters"],
+                    "duplicate_summary": dup_res,
+                    "quick_chips": [
+                        "🧹 Clean duplicate downloads",
+                        "📋 Sort Student Vouchers",
+                        "👥 Separate Peer Documents",
+                        "🏷️ Clean Download Names"
+                    ]
+                })
+
+        # Check if the query is date/recency oriented
         is_date_query = any(w in lower_prompt for w in ("today", "yesterday", "date", "recent", "new", "received", "downloaded today", "last"))
 
         # Score and classify all files using hybrid matching
@@ -2141,6 +2403,64 @@ INSTRUCTIONS & REASONING RULES:
     # =========================================================================
     # TIER 3: FILE_OPERATION (Reconnaissance & Action Plan Synthesis)
     # =========================================================================
+    # Phase 1: Check if this file operation request is deduplication cleanup
+    is_deduplicate_req = any(k in normalized_prompt.lower() for k in ("duplicate", "duplicates", "dedup", "deduplicate", "repeated file", "repeated files"))
+    if is_deduplicate_req:
+        dup_res = find_duplicate_clusters(BASE_STORAGE_DIR, target_folder)
+        if dup_res["total_duplicates"] == 0:
+            return jsonify({
+                "type": "conversation",
+                "message": (
+                    f"✨ **No duplicate files detected in `{target_folder}/`!**\n\n"
+                    "All documents possess unique cryptographic SHA-256 signatures. No redundant copies were found to clean."
+                ),
+                "version": APP_VERSION,
+                "actions": [],
+                "duplicate_summary": dup_res,
+                "quick_chips": [
+                    "📋 Sort Student Vouchers",
+                    "👥 Separate Peer Documents",
+                    "🏷️ Clean Download Names",
+                    "🗑️ Cleanup Old Screenshots"
+                ]
+            })
+
+        actions = []
+        for cluster in dup_res["clusters"]:
+            keeper = cluster["keeper"]
+            for dup in cluster["duplicates"]:
+                actions.append({
+                    "action_id": f"step-{len(actions) + 1}",
+                    "type": "trash",
+                    "badge": "TRASH",
+                    "badge_label": "Soft Delete",
+                    "source": dup["path"],
+                    "path": dup["path"],
+                    "destination": f".agent_trash/{dup['filename']}",
+                    "rationale": f"Redundant duplicate of '{keeper['filename']}' ({cluster['size_human']} reclaimed)",
+                    "ai_inspected": True,
+                    "inspected_preview": f"Exact SHA-256 match with {keeper['filename']}"
+                })
+
+        plan_id = str(uuid.uuid4())
+        plan_desc = f"Deduplication: Clean {len(actions)} redundant duplicate file(s) ({dup_res['reclaimable_human']})"
+        return jsonify({
+            "type": "plan",
+            "message": (
+                f"Identified **{len(actions)} redundant duplicate file(s)** across {dup_res['total_clusters']} group(s). "
+                f"Cleaning them will reclaim **{dup_res['reclaimable_human']}** of storage while safely preserving all original canonical files.\n\n"
+                "Review the proposed removals below. Tap **Execute Action Plan** to move redundant copies to `.agent_trash` (with 1-tap rollback at any time)."
+            ),
+            "plan": {
+                "plan_id": plan_id,
+                "description": plan_desc,
+                "actions": actions
+            },
+            "actions": actions,
+            "duplicate_summary": dup_res,
+            "version": APP_VERSION
+        })
+
     # 1. Locate target folder
     target_dir = None
     dir_candidates = [
