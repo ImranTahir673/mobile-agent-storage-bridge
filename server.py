@@ -686,85 +686,157 @@ def classify_document(filename: str, snippet: str = "") -> dict:
         "suggested_title": filename
     }
 
+SEARCH_STOPWORDS = {
+    "the", "a", "an", "all", "and", "or", "for", "with", "doc", "pdf", "file", "files", 
+    "to", "in", "on", "at", "by", "from", "some", "my", "me", "your", "our", "please", 
+    "can", "could", "would", "should", "want", "like", "any", "this", "that", "these", 
+    "those", "how", "what", "which", "where", "tell", "give", "list", "listing", "show", 
+    "get", "find", "search", "locate", "check", "view", "book", "document", "documents", 
+    "paper", "copy", "copies", "download", "downloads", "inside", "here", "there", "of", 
+    "is", "are", "have", "has", "do", "does", "did", "fikes", "vest"
+}
+
+def parse_query_intent(query: str, default_folder: str = "Download") -> dict:
+    """
+    Analyzes the user's natural language query to extract:
+    1. Folder constraints (e.g. "in download", "in documents")
+    2. Intent type: "directory_listing" vs "temporal_recency" vs "specific_search"
+    3. Meaningful semantic target keywords (excluding stopwords)
+    """
+    clean_q = query.strip()
+    lower_q = clean_q.lower()
+
+    # Detect folder constraints
+    folder_constraint = None
+    if any(p in lower_q for p in ("in download", "in the download", "in downloads", "in my download", "inside download", "from download", "of download")):
+        folder_constraint = "Download"
+    elif any(p in lower_q for p in ("in documents", "in the documents", "inside documents", "in my documents", "from documents")):
+        folder_constraint = "Documents"
+
+    # Detect directory listing intent vs specific file search
+    is_directory_listing = False
+    listing_patterns = (
+        r"\b(?:list|show|view|display|what(?:\s+is|\s+are|\s+files|\s+all)?)\b.*\b(?:all|files|everything|here|inside|contents|directory)\b",
+        r"\ball\s+files\b",
+        r"\blist\s+of\b",
+        r"\bshow\s+files\b",
+        r"\bwhat\s+(?:files|is)\s+in\b"
+    )
+    for pat in listing_patterns:
+        if re.search(pat, lower_q, re.I):
+            is_directory_listing = True
+            break
+
+    # If the user specifically mentions a category or topic, treat as filtered search
+    filtered_topic = None
+    if is_directory_listing:
+        if any(w in lower_q for w in ("lecture", "lectures", "uni", "university", "study", "assignment", "paper", "course")):
+            filtered_topic = "academic"
+            is_directory_listing = False
+        elif any(w in lower_q for w in ("receipt", "receipts", "voucher", "vouchers", "bill", "bills", "fee")):
+            filtered_topic = "financial"
+            is_directory_listing = False
+        elif any(w in lower_q for w in ("peer", "peers", "friends", "fawad", "sumbal", "ahmed", "yousaf")):
+            filtered_topic = "peer"
+            is_directory_listing = False
+        elif any(w in lower_q for w in ("screenshot", "screenshots", "image", "images")):
+            filtered_topic = "screenshot"
+            is_directory_listing = False
+
+    # Extract target tokens for specific searches
+    cleaned_target = re.sub(
+        r"^(?:can\s+you\s+)?(?:find(?: me)?|where is|where are|search(?: for)?|locate|show(?: me)?|get(?: me)?|list|check|do\s+i\s+have)\s+",
+        "",
+        lower_q
+    ).strip()
+    cleaned_target = re.sub(r"^(?:the\s+book\s+for|a\s+copy\s+of|the\s+doc\s+for|the\s+file\s+for|my|the)\s+", "", cleaned_target).strip()
+    cleaned_target = re.sub(r"[?!.,\"';:]+$", "", cleaned_target).strip()
+
+    target_tokens = [t for t in re.findall(r"\w+", cleaned_target) if len(t) > 1 and t not in SEARCH_STOPWORDS]
+
+    return {
+        "folder_constraint": folder_constraint or (default_folder if is_directory_listing else folder_constraint),
+        "is_directory_listing": is_directory_listing,
+        "filtered_topic": filtered_topic,
+        "target_tokens": target_tokens,
+        "cleaned_target": cleaned_target
+    }
+
 def score_document_match(query: str, doc: dict) -> tuple[float, str]:
     """
-    Calculates a hybrid relevance score (0.0 - 200.0) for a document against a user search query.
-    Prioritizes:
-    1. Exact or clean filename matches
-    2. Substring & token matches in filename
-    3. Inside context snippet matches
-    4. Cautious category relevance
+    Calculates semantic relevance score (0.0 - 200.0) for a document.
+    Enforces strict token coverage to eliminate false-positive noise and incidental matches.
     """
-    query_clean = query.lower().strip()
-    cleaned_target = re.sub(
-        r"^(?:find(?: me)?|where is|where are|search(?: for)?|locate|show(?: me)?|get(?: me)?|list|check)\s+",
-        "",
-        query_clean
-    ).strip()
+    parsed = parse_query_intent(query)
+    target_tokens = parsed["target_tokens"]
+    cleaned_target = parsed["cleaned_target"]
 
-    if not cleaned_target:
-        cleaned_target = query_clean
+    if not target_tokens and not cleaned_target:
+        return 0.0, ""
 
     fn = doc.get("filename", "").lower()
     fn_stem = os.path.splitext(fn)[0].lower()
-    query_stopwords = {
-        "the", "all", "and", "for", "with", "doc", "pdf", "file", "files", "to", "in", "on", 
-        "at", "by", "from", "some", "suggestions", "suggestion", "my", "me", "your", "our", 
-        "fikes", "organize", "organization", "clean", "sort", "please", "would", "could", 
-        "should", "want", "like", "any", "this", "that", "these", "those", "how", "what", 
-        "which", "where", "can", "tell", "give", "ideas", "recommend", "recommendation"
-    }
-    target_tokens = [t for t in re.findall(r"\w+", cleaned_target) if len(t) > 1 and t not in query_stopwords]
-
+    fn_normalized = re.sub(r"[-_.]+", " ", fn_stem).strip()
     snip = (doc.get("snippet") or doc.get("text_snippet") or "").lower()
     score = 0.0
     match_reason = ""
 
-    # A. Filename Matching (Highest Weight)
-    if fn == cleaned_target or fn_stem == cleaned_target:
+    # 1. Exact or Clean Substring Match
+    if cleaned_target and (fn == cleaned_target or fn_stem == cleaned_target or fn_normalized == cleaned_target):
         score += 150.0
-        match_reason = "Exact filename match"
-    elif cleaned_target in fn or cleaned_target in fn_stem:
-        score += 90.0
-        match_reason = f"Filename contains '{cleaned_target}'"
-    else:
-        matched_fn_tokens = [t for t in target_tokens if t in fn]
-        if matched_fn_tokens:
-            token_ratio = len(matched_fn_tokens) / max(len(target_tokens), 1)
-            score += 40.0 * token_ratio + (15.0 * len(matched_fn_tokens))
-            match_reason = f"Filename matches: {', '.join(matched_fn_tokens)}"
+        match_reason = "Exact title match"
+    elif cleaned_target and len(cleaned_target) >= 3 and (cleaned_target in fn or cleaned_target in fn_stem or cleaned_target in fn_normalized):
+        score += 120.0
+        match_reason = f"Title contains '{cleaned_target}'"
+    elif target_tokens:
+        matched_fn_tokens = [t for t in target_tokens if t in fn or t in fn_normalized]
+        fn_coverage = len(matched_fn_tokens) / len(target_tokens)
+        if fn_coverage == 1.0 and len(target_tokens) > 1:
+            score += 100.0 + (15.0 * len(matched_fn_tokens))
+            match_reason = f"All query keywords match: {', '.join(matched_fn_tokens)}"
+        elif fn_coverage >= 0.6:
+            score += 50.0 * fn_coverage + (20.0 * len(matched_fn_tokens))
+            match_reason = f"Keywords match: {', '.join(matched_fn_tokens)}"
+        elif len(matched_fn_tokens) == 1 and len(target_tokens) == 1:
+            score += 70.0
+            match_reason = f"Keyword match: {matched_fn_tokens[0]}"
 
-    # B. Content Snippet Matching
+    # 2. Content Snippet Matching
     if snip and snip != "none (binary/image)":
-        if cleaned_target in snip:
-            score += 45.0
+        if cleaned_target and len(cleaned_target) >= 4 and cleaned_target in snip:
+            score += 60.0
             if not match_reason:
-                match_reason = f"Content contains '{cleaned_target}'"
-        else:
+                match_reason = f"Content mentions '{cleaned_target}'"
+        elif target_tokens:
             matched_snip_tokens = [t for t in target_tokens if t in snip]
-            if matched_snip_tokens:
-                score += 15.0 * len(matched_snip_tokens)
+            snip_coverage = len(matched_snip_tokens) / len(target_tokens)
+            if snip_coverage >= 0.6:
+                score += 40.0 * snip_coverage
                 if not match_reason:
-                    match_reason = f"Content mentions: {', '.join(matched_snip_tokens)}"
+                    match_reason = f"Content keywords: {', '.join(matched_snip_tokens)}"
 
-    # C. Cautionary Document Classification alignment
+    # 3. Document Category & Topic Alignment
     classification = classify_document(doc.get("filename", ""), snip)
     doc_cat = classification.get("category", "")
 
-    if any(t in target_tokens for t in ("pass", "entry", "id", "passport")):
+    if any(t in target_tokens for t in ("pass", "entry", "passport")):
         if doc_cat == "IDENTITY_PASS":
-            score += 30.0
+            score += 40.0
     elif any(t in target_tokens for t in ("bill", "electricity", "utility", "invoice")):
         if doc_cat == "FINANCIAL_BILL":
-            score += 30.0
+            score += 40.0
     elif any(t in target_tokens for t in ("voucher", "fee", "challan", "slip")):
         if doc_cat == "ACADEMIC_VOUCHER":
-            score += 30.0
+            score += 40.0
     elif any(t in target_tokens for t in ("lecture", "notes", "assignment", "neural", "course")):
         if doc_cat == "ACADEMIC_STUDY":
-            score += 30.0
+            score += 40.0
         elif doc_cat == "IDENTITY_PASS":
-            score -= 40.0  # Cautionary penalty
+            score = 0.0  # Cautionary penalty: never treat identity pass as academic lecture
+
+    # Filter out weak incidental noise (must achieve meaningful semantic threshold)
+    if score < 45.0:
+        return 0.0, ""
 
     return max(0.0, score), match_reason
 
@@ -1909,6 +1981,166 @@ def normalize_user_prompt(text: str) -> str:
     t = re.sub(r"\bdedup\b", "deduplicate", t, flags=re.I)
     return t
 
+def generate_dynamic_storage_advice(base_dir: str, target_folder: str = "Download", owner_name: str = "Imran Tahir", peer_names: list = None) -> str:
+    """
+    Dynamically audits the REAL storage filesystem and crafts articulate, personalized copilot advice.
+    NEVER returns a static canned template.
+    """
+    peer_names = peer_names or ["Fawad", "Sumbal", "Ahmed", "Yousaf"]
+    target_path = resolve_safe_path(target_folder) if target_folder else base_dir
+    
+    files = []
+    if os.path.exists(target_path) and os.path.isdir(target_path):
+        for entry in os.scandir(target_path):
+            if entry.is_file() and not entry.name.startswith("."):
+                files.append(entry)
+
+    total_files = len(files)
+    total_bytes = sum(f.stat().st_size for f in files) if files else 0
+    total_human = format_bytes_human(total_bytes)
+
+    # Analyze real categories present right now
+    academic_files = []
+    peer_files = defaultdict(list)
+    voucher_files = []
+    temp_files = []
+
+    for f in files:
+        fname = f.name
+        is_peer = False
+        for p in peer_names:
+            if p.lower() in fname.lower():
+                peer_files[p].append(fname)
+                is_peer = True
+                break
+        if is_peer:
+            continue
+
+        if any(w in fname.lower() for w in ("voucher", "challan", "fee", "receipt")):
+            voucher_files.append(fname)
+        elif any(w in fname.lower() for w in ("lecture", "notes", "assignment", "wa0017", "wa0018", "neural", "1508", "paper", "bsai")):
+            academic_files.append(fname)
+        elif fname.endswith(".tmp") or "screenshot" in fname.lower() or fname.startswith("temp_"):
+            temp_files.append(fname)
+
+    dup_info = find_duplicate_clusters(base_dir, target_folder)
+    dup_count = dup_info.get("total_duplicates", 0)
+    dup_human = dup_info.get("reclaimable_human", "0 B")
+
+    lines = [
+        f"I just audited your **`{target_folder}/`** folder, {owner_name}. You currently have **{total_files} file(s)** ({total_human}) on your device.\n\n"
+        "Here are my personalized recommendations based on your actual files:\n"
+    ]
+
+    action_items = []
+    if peer_files:
+        p_list = ", ".join([f"{len(flist)} from **{p}**" for p, flist in peer_files.items()])
+        sample_p = list(peer_files.values())[0][0]
+        action_items.append(
+            f"1. 👥 **Isolate Peer Documents**: You have files belonging to classmates ({p_list}, like `{sample_p}`). "
+            f"I recommend separating these into dedicated `Documents/Peers/<Name>/` folders so your workspace stays private."
+        )
+
+    if academic_files:
+        sample_acad = academic_files[0]
+        action_items.append(
+            f"2. 📚 **Organize University Courseware**: Detected {len(academic_files)} academic materials (e.g. `{sample_acad}`). "
+            f"We should group lectures and coursework under `Documents/University/AI/`."
+        )
+
+    if voucher_files:
+        sample_vouch = voucher_files[0]
+        action_items.append(
+            f"3. 🧾 **Archive Fee Slips & Vouchers**: Found {len(voucher_files)} financial record(s) like `{sample_vouch}`. "
+            f"Let's preserve these in `Documents/University/Vouchers/`."
+        )
+
+    if dup_count > 0:
+        action_items.append(
+            f"4. 🧹 **Reclaim Duplicate Storage**: Found **{dup_count} redundant duplicate copies** taking up **{dup_human}**. "
+            f"Sweeping these to `.agent_trash` will free up space immediately."
+        )
+
+    if temp_files:
+        action_items.append(
+            f"5. 🗑️ **Clean Temporary Cache**: Found {len(temp_files)} temporary cache/screen capture files that can be cleared safely."
+        )
+
+    if not action_items:
+        lines.append(
+            f"Your `{target_folder}/` directory looks fairly clean with {total_files} document(s). "
+            "You can ask me to search for any specific document, inspect files by date, or clean duplicates at any time."
+        )
+    else:
+        lines.extend(action_items)
+        lines.append(
+            "\n💡 *Which would you like to start with? You can say **\"Separate peer documents\"**, **\"Clean duplicates\"**, or **\"Organize all university files\"** and I'll generate a review plan for you.*"
+        )
+
+    return "\n\n".join(lines)
+
+@app.route("/api_status", methods=["GET"])
+def api_status():
+    """Returns AI intelligence engine status and active Gemini configuration."""
+    api_key = os.getenv("GEMINI_API_KEY", "").strip()
+    is_configured = bool(api_key and len(api_key) > 5)
+    masked_key = f"{api_key[:4]}...{api_key[-4:]}" if is_configured and len(api_key) > 8 else ""
+    return jsonify({
+        "status": "online",
+        "gemini_configured": is_configured,
+        "masked_key": masked_key,
+        "active_models": GEMINI_MODELS,
+        "app_version": APP_VERSION
+    })
+
+@app.route("/configure_api_key", methods=["POST"])
+def configure_api_key():
+    """Allows setting the Google Gemini API key directly from the Web UI."""
+    data = request.get_json(force=True) or {}
+    new_key = (data.get("api_key") or "").strip()
+    if not new_key:
+        return jsonify({"error": "API key cannot be empty"}), 400
+
+    test_url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODELS[0]}:generateContent?key={new_key}"
+    test_payload = {
+        "contents": [{"role": "user", "parts": [{"text": "ping"}]}],
+        "generationConfig": {"maxOutputTokens": 5}
+    }
+    try:
+        resp = requests.post(test_url, json=test_payload, timeout=10)
+        if resp.status_code != 200:
+            err_msg = resp.json().get("error", {}).get("message", f"HTTP {resp.status_code}")
+            return jsonify({"error": f"Invalid Gemini API Key: {err_msg}"}), 400
+    except Exception as e:
+        return jsonify({"error": f"Connection to Gemini API failed: {str(e)}"}), 500
+
+    os.environ["GEMINI_API_KEY"] = new_key
+
+    env_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+    try:
+        env_lines = []
+        key_found = False
+        if os.path.exists(env_file):
+            with open(env_file, "r", encoding="utf-8") as f:
+                for line in f:
+                    if line.strip().startswith("GEMINI_API_KEY="):
+                        env_lines.append(f"GEMINI_API_KEY={new_key}\n")
+                        key_found = True
+                    else:
+                        env_lines.append(line)
+        if not key_found:
+            env_lines.append(f"GEMINI_API_KEY={new_key}\n")
+        with open(env_file, "w", encoding="utf-8") as f:
+            f.writelines(env_lines)
+    except Exception as e:
+        print(f"[Storage Copilot] Warning: Could not write .env file: {e}")
+
+    return jsonify({
+        "status": "success",
+        "message": "Google Gemini API key successfully verified and activated!",
+        "masked_key": f"{new_key[:4]}...{new_key[-4:]}"
+    })
+
 @app.route("/propose_plan", methods=["POST"])
 def propose_plan():
     """
@@ -2066,7 +2298,10 @@ Respond STRICTLY with valid JSON adhering to this schema:
     # =========================================================================
     # TIER 1: CONVERSATION (Dynamic Gemini Reply - Zero Canned Strings)
     # =========================================================================
+    # TIER 1: CONVERSATION (Dynamic Gemini Reply & Live Storage Audit - Zero Canned Strings)
+    # =========================================================================
     if intent == "CONVERSATION":
+        dynamic_audit = generate_dynamic_storage_advice(BASE_STORAGE_DIR, target_folder, owner_name, peer_names)
         if not conv_reply:
             conv_sys = f"""You are Storage Copilot, an advanced on-device AI agent running locally via Termux on Android for {owner_name} (Roll/ID: {identifiers}, Major: Artificial Intelligence).
 Current Device Time: {now_str} (Today's Date: {today_date}).
@@ -2075,10 +2310,14 @@ Known Peers: {", ".join(peer_names)}.
 Peer Routing:
 {peer_matrix_lines}
 
+LIVE REAL-TIME STORAGE AUDIT ({target_folder}/):
+{dynamic_audit}
+
 YOUR AGENT PERSONA:
 - You are an elite, highly capable AI agent (similar to Google DeepMind / Antigravity). You speak articulately, intelligently, and directly to {owner_name}.
 - You are warm, confident, and professional. Never robotic or generic.
 - CRITICAL: Never output a generic boilerplate template or canned greeting unless the user gave a simple one-word greeting like "hi".
+- Ground your suggestions in the LIVE REAL-TIME STORAGE AUDIT above. Refer to real filenames, actual counts, and real storage categories currently on the device.
 
 CAPABILITIES & BOUNDARIES:
 - WHAT YOU CAN DO (Your Core Superpowers):
@@ -2096,12 +2335,8 @@ CAPABILITIES & BOUNDARIES:
 
 ADVICE & RECOMMENDATIONS:
 - If {owner_name} is asking for suggestions, ideas, or recommendations on how to organize his files:
-  Provide an articulate, structured recommendation explaining 4 key areas:
-  1. Academic Courseware -> Documents/University/<Subject>/
-  2. Tuition & Vouchers -> Documents/University/Vouchers/
-  3. Peer Separation -> Documents/Peers/<Name>/ (for {", ".join(peer_names)})
-  4. Cryptic WhatsApp & Generic Downloads -> Clean content-derived naming.
-  Explain each clearly and invite him to pick which one to execute (e.g., "Organize all my university files" or "Sort student vouchers").
+  Use the live audit above to provide an articulate, personalized roadmap citing his actual files and sizes.
+  Invite him to pick which action to execute (e.g. "Separate peer documents", "Clean duplicates", or "Organize all university files").
 
 HANDLING OUT-OF-SCOPE REQUESTS:
 - If the user asks you to do something out of scope (e.g. sending emails, messaging, internet search, system modifications), do NOT pretend to do it or hallucinate an action.
@@ -2112,18 +2347,11 @@ Keep your response well-structured using clean Markdown formatting (bullet point
 """
             conv_reply = call_gemini_text(conv_sys, raw_prompt)
 
+        # Dynamic fallback: audit live files on disk instead of returning static strings
         if not conv_reply:
             lp = normalized_prompt.lower()
-            if any(w in lp for w in ("suggestion", "suggest", "recommend", "idea", "how should i", "how to organize", "advice", "tip", "options", "best way", "what can we do", "what can i do", "fikes", "vest")):
-                conv_reply = (
-                    f"Here are my top recommendations for organizing your storage, {owner_name}:\n\n"
-                    f"1. 📚 **Academic Courseware**: Consolidate university lecture slides, assignments, and AI notes into `Documents/University/<Subject>/` (e.g. `Documents/University/AI/`).\n"
-                    f"2. 🧾 **Tuition & Vouchers**: Consolidate semester fee vouchers into `Documents/University/Vouchers/`.\n"
-                    f"3. 👥 **Peer Separation**: Automatically isolate shared classmate documents ({', '.join(peer_names)}) into `Documents/Peers/<PeerName>/` so they don't clutter your personal files.\n"
-                    f"4. 🏷️ **Clean WhatsApp & Generic Downloads**: Rename cryptic `DOC-*.pdf` files with descriptive, content-derived titles.\n"
-                    f"5. 🗑️ **Storage Cleanup**: Soft-delete temporary cache files and obsolete screenshots into `.agent_trash` with 1-tap rollback.\n\n"
-                    f"Whenever you'd like to proceed with any of these, just let me know (for example: *\"Organize all my university files\"* or *\"Sort student vouchers\"*), and I will generate an Action Plan for your review!"
-                )
+            if any(w in lp for w in ("suggestion", "suggest", "recommend", "recommendation", "idea", "how should i", "how to organize", "advice", "tip", "options", "best way", "what can we do", "what can i do", "fikes", "vest")):
+                conv_reply = dynamic_audit
             elif any(w in lp for w in ("email", "mail", "whatsapp", "call", "sms", "spotify", "music", "flight", "weather", "browse", "internet", "hack")):
                 conv_reply = (
                     f"I cannot perform external actions like sending emails or accessing web services, {owner_name}.\n\n"
@@ -2136,11 +2364,11 @@ Keep your response well-structured using clean Markdown formatting (bullet point
             elif any(w in lp for w in ("what else", "more", "next")):
                 conv_reply = (
                     f"Here are several other tasks I can help you with, {owner_name}:\n\n"
-                    f"- **Inspect & Query**: Ask *\"List university lectures\"* or *\"today did I receive any documents?\"* to search file contents without moving them.\n"
+                    f"- **Inspect & Query**: Ask *\"List files in download\"* or *\"today did I receive any documents?\"* to inspect files without moving them.\n"
                     f"- **Sort Academic Vouchers**: Separate your BSAI fee slips into `Documents/University/Vouchers`.\n"
                     f"- **Isolate Peer Documents**: Route incoming files for {', '.join(peer_names)} to `Documents/Peers/<Name>`.\n"
                     f"- **Clean Cryptic Downloads**: Standardize messy WhatsApp or arXiv downloads with descriptive, content-derived names.\n"
-                    f"- **Cleanup**: Safely soft-delete obsolete screenshots into `.agent_trash` with 1-tap rollback."
+                    f"- **Deduplication**: Safely identify and clean redundant files to free up storage."
                 )
             elif any(w in lp for w in ("who are you", "what can you do", "help", "role", "abilities", "capabilities", "boundaries")):
                 conv_reply = (
@@ -2154,7 +2382,7 @@ Keep your response well-structured using clean Markdown formatting (bullet point
                     f"### ⚠️ Boundaries & Scope:\n"
                     f"- I run strictly on your local Android device without cloud file uploads.\n"
                     f"- I cannot send emails, browse the live internet, or access apps/accounts outside your local storage.\n\n"
-                    f"Try asking: *\"List university lectures\"*, *\"Find me Sumbal pass\"*, or *\"today did I receive any documents?\"*"
+                    f"Try asking: *\"List files in download\"*, *\"Find me Sumbal pass\"*, or *\"today did I receive any documents?\"*"
                 )
             elif any(w in lp for w in ("peer", "peers", "friends", "fawad", "sumbal", "ahmed", "yousaf")):
                 conv_reply = (
@@ -2164,12 +2392,10 @@ Keep your response well-structured using clean Markdown formatting (bullet point
             elif any(w in lp for w in ("hi", "hello", "hey", "salam", "morning", "afternoon", "evening")):
                 conv_reply = (
                     f"👋 Hello {owner_name}! Storage Copilot is online and connected to your storage root (`/storage/emulated/0`).\n\n"
-                    f"How can I help with your files today? You can ask me to search documents, organize downloads, or check today's received files."
+                    f"How can I help with your files today? You can ask me to search documents, organize downloads, or audit storage."
                 )
             else:
-                conv_reply = (
-                    f"I'm ready to assist with your storage, {owner_name}. You can ask me informational questions like *\"List university lectures\"* or request operations like *\"Sort student vouchers\"* and *\"Clean download names\"*."
-                )
+                conv_reply = dynamic_audit
 
         return jsonify({
             "type": "conversation",
@@ -2177,10 +2403,10 @@ Keep your response well-structured using clean Markdown formatting (bullet point
             "version": APP_VERSION,
             "actions": [],
             "quick_chips": [
+                "🧹 Clean Duplicates",
                 "📋 Sort Student Vouchers",
                 "👥 Separate Peer Documents",
-                "🏷️ Clean Download Names",
-                "🗑️ Cleanup Old Screenshots"
+                "🏷️ Clean Download Names"
             ]
         })
 
@@ -2189,6 +2415,8 @@ Keep your response well-structured using clean Markdown formatting (bullet point
     # =========================================================================
     if intent == "QUERY_INFO":
         all_files = collect_storage_files(BASE_STORAGE_DIR, target_folder)
+        lower_prompt = raw_prompt.lower()
+        parsed_intent = parse_query_intent(raw_prompt, target_folder)
 
         if not all_files:
             return jsonify({
@@ -2201,15 +2429,14 @@ Keep your response well-structured using clean Markdown formatting (bullet point
                 "actions": [],
                 "query_results": [],
                 "quick_chips": [
+                    "🧹 Clean Duplicates",
                     "📋 Sort Student Vouchers",
                     "👥 Separate Peer Documents",
-                    "🏷️ Clean Download Names",
-                    "🗑️ Cleanup Old Screenshots"
+                    "🏷️ Clean Download Names"
                 ]
             })
 
         # Check if the query is asking about duplicates
-        lower_prompt = raw_prompt.lower()
         is_duplicate_query = any(w in lower_prompt for w in ("duplicate", "duplicates", "dedup", "deduplicate", "repeated file", "repeated files"))
         if is_duplicate_query:
             dup_res = find_duplicate_clusters(BASE_STORAGE_DIR, target_folder)
@@ -2259,10 +2486,134 @@ Keep your response well-structured using clean Markdown formatting (bullet point
                     ]
                 })
 
-        # Check if the query is date/recency oriented
+        # ---------------------------------------------------------------------
+        # SUB-CASE A: Directory Listing / Inventory Request (e.g. "Give me list of all the files in download")
+        # ---------------------------------------------------------------------
+        if parsed_intent["is_directory_listing"]:
+            dir_name = parsed_intent["folder_constraint"] or target_folder
+            dir_files = [
+                f for f in all_files 
+                if f["path"].startswith(f"{dir_name}/") or (f["path"] == f["filename"] and dir_name.lower() in ("download", "downloads"))
+            ]
+            if not dir_files and dir_name.lower() in ("download", "downloads"):
+                dir_files = [f for f in all_files if not f["path"].startswith("Documents/")]
+
+            # Group files in directory by semantic category
+            grouped_acad = []
+            grouped_peers = defaultdict(list)
+            grouped_fin = []
+            grouped_trash = []
+            grouped_general = []
+
+            for f in dir_files:
+                fn = f["filename"]
+                is_p = False
+                for p in peer_names:
+                    if p.lower() in fn.lower():
+                        grouped_peers[p].append(f)
+                        is_p = True
+                        break
+                if is_p:
+                    continue
+
+                if any(w in fn.lower() for w in ("voucher", "challan", "fee", "receipt", "bill", "invoice")):
+                    grouped_fin.append(f)
+                elif any(w in fn.lower() for w in ("lecture", "notes", "assignment", "wa0017", "wa0018", "neural", "1508", "paper", "bsai")):
+                    grouped_acad.append(f)
+                elif fn.endswith(".tmp") or "screenshot" in fn.lower() or fn.startswith("temp_"):
+                    grouped_trash.append(f)
+                else:
+                    grouped_general.append(f)
+
+            total_bytes = sum(f.get("size_bytes", 0) for f in dir_files)
+            total_human = format_bytes_human(total_bytes)
+
+            # Try generating articulate inventory via Gemini if online
+            dir_manifest = [
+                {"filename": f["filename"], "path": f["path"], "size_kb": f.get("size_kb", 0)}
+                for f in dir_files[:25]
+            ]
+            gemini_dir_prompt = f"""You are Storage Copilot, an advanced on-device AI agent for {owner_name}.
+User Query: "{raw_prompt}"
+Target Directory: {dir_name}/
+Total Files in Folder: {len(dir_files)} ({total_human}).
+Files Manifest:
+{json.dumps(dir_manifest, indent=2)}
+
+INSTRUCTIONS:
+Provide a clear, articulate, structured inventory of the files in `{dir_name}/`.
+Group them logically (e.g. Academic, Peer Classmates, Vouchers/Finances, General Downloads).
+Cite filenames with bold text and paths in code spans.
+Give a brief, intelligent copilot recommendation at the end on what can be organized.
+Never output robotic database strings like 'Match: Filename matches:'.
+"""
+            query_reply = call_gemini_text(gemini_dir_prompt, raw_prompt)
+
+            if not query_reply:
+                # High-fidelity local inventory synthesis
+                lines = [
+                    f"Here is the complete inventory of your **`{dir_name}/`** folder (**{len(dir_files)} file(s)**, {total_human}):\n"
+                ]
+                if grouped_acad:
+                    lines.append(f"📚 **Academic Courseware ({len(grouped_acad)} file(s)):**")
+                    for f in grouped_acad[:6]:
+                        lines.append(f"- 📄 **{f['filename']}** (`{f['path']}` • {f.get('size_kb', 0)} KB)")
+                    if len(grouped_acad) > 6:
+                        lines.append(f"- *...and {len(grouped_acad) - 6} more academic file(s)*")
+                    lines.append("")
+
+                if grouped_peers:
+                    peer_summary = ", ".join([f"{len(fl)} from **{p}**" for p, fl in grouped_peers.items()])
+                    lines.append(f"👥 **Peer Classmate Documents ({peer_summary}):**")
+                    for p, fl in grouped_peers.items():
+                        for f in fl[:4]:
+                            lines.append(f"- 📄 **{f['filename']}** (`{f['path']}` • {f.get('size_kb', 0)} KB)")
+                    lines.append("")
+
+                if grouped_fin:
+                    lines.append(f"🧾 **Tuition & Financial Records ({len(grouped_fin)} file(s)):**")
+                    for f in grouped_fin[:6]:
+                        lines.append(f"- 📄 **{f['filename']}** (`{f['path']}` • {f.get('size_kb', 0)} KB)")
+                    lines.append("")
+
+                if grouped_general:
+                    lines.append(f"📄 **General Documents & Downloads ({len(grouped_general)} file(s)):**")
+                    for f in grouped_general[:8]:
+                        lines.append(f"- 📄 **{f['filename']}** (`{f['path']}` • {f.get('size_kb', 0)} KB)")
+                    if len(grouped_general) > 8:
+                        lines.append(f"- *...and {len(grouped_general) - 8} more document(s)*")
+                    lines.append("")
+
+                if grouped_trash:
+                    lines.append(f"🗑️ **Temporary Cache & Screen Captures ({len(grouped_trash)} file(s)):**")
+                    for f in grouped_trash[:4]:
+                        lines.append(f"- 📄 `{f['filename']}` ({f.get('size_kb', 0)} KB)")
+                    lines.append("")
+
+                lines.append(
+                    f"💡 *Copilot Analysis: I can organize these files for you. Say **\"Organize all university files\"** or **\"Separate peer documents\"** to review a staged Action Plan.*"
+                )
+                query_reply = "\n".join(lines)
+
+            return jsonify({
+                "type": "query_info",
+                "message": query_reply,
+                "version": APP_VERSION,
+                "actions": [],
+                "query_results": [],
+                "quick_chips": [
+                    "🧹 Clean Duplicates",
+                    "📋 Sort Student Vouchers",
+                    "👥 Separate Peer Documents",
+                    "🏷️ Clean Download Names"
+                ]
+            })
+
+        # ---------------------------------------------------------------------
+        # SUB-CASE B: Specific Document Lookup, Topic Filter, or Date Search
+        # ---------------------------------------------------------------------
         is_date_query = any(w in lower_prompt for w in ("today", "yesterday", "date", "recent", "new", "received", "downloaded today", "last"))
 
-        # Score and classify all files using hybrid matching
         scored_files = []
         for f in all_files:
             match_score, match_reason = score_document_match(raw_prompt, f)
@@ -2275,12 +2626,14 @@ Keep your response well-structured using clean Markdown formatting (bullet point
                 "type_label": classification["type_label"]
             })
 
-        # Rank files: if date query, prioritize files modified today / recent; otherwise by score
         if is_date_query:
             scored_files.sort(key=lambda x: (x.get("is_today", False), x.get("modified_timestamp", 0)), reverse=True)
+            top_matches = [f for f in scored_files if f.get("is_today") or f.get("score", 0) >= 45.0]
         else:
             scored_files.sort(key=lambda x: x["score"], reverse=True)
+            top_matches = [f for f in scored_files if f["score"] >= 45.0]
 
+        # Compact manifest for Gemini (top 15 candidates max to keep network payload light & fast)
         gemini_manifest = [
             {
                 "filename": f["filename"],
@@ -2290,101 +2643,101 @@ Keep your response well-structured using clean Markdown formatting (bullet point
                 "is_today": f.get("is_today", False),
                 "category": f["type_label"],
                 "match_score": f["score"],
-                "match_reason": f["match_reason"],
-                "text_snippet": f["text_snippet"]
+                "snippet": (f.get("snippet") or "")[:80]
             }
-            for f in scored_files[:100]
+            for f in top_matches[:15]
         ]
 
-        query_system_prompt = f"""You are Storage Copilot, an advanced on-device AI agent running locally via Termux on Android for {owner_name} (Roll/ID: {identifiers}, Major: Artificial Intelligence).
-Current Device Time: {now_str} (Today's Date: {today_date}).
+        query_system_prompt = f"""You are Storage Copilot, an articulate on-device AI agent for {owner_name} (BSAI-182).
+Current Device Time: {now_str}.
 Storage Root: /storage/emulated/0 (Downloads, Documents).
 Total Files Indexed: {len(all_files)}.
 Known Peers: {", ".join(peer_names)}.
 Peer Routing:
 {peer_matrix_lines}
 
-USER QUERY (Read-Only Inspection / Search):
+USER SEARCH QUERY:
 "{raw_prompt}"
 
-Indexed Device Files Manifest (Sanitized for PII, ranked by relevance):
+CANDIDATE MATCHES (Ranked by semantic score, filtered for PII):
 {json.dumps(gemini_manifest, indent=2)}
 
 INSTRUCTIONS & REASONING RULES:
-1. ADVANCED AGENT PERSONA:
-   - Act as an elite, articulate AI agent (like Google DeepMind / Antigravity). Speak with intelligence, clarity, and precision directly to {owner_name}.
-   - Never sound robotic or output boilerplate greetings. Give direct, insightful, and natural explanations.
-
-2. DATE & TEMPORAL QUERIES (e.g. "today did I receive any documents", "recent downloads", "what came in today"):
-   - Reason over the `is_today` boolean and `modified_date` of the files relative to today's date ({today_date}).
-   - If documents were received/modified today: List each one clearly with bold filename, timestamp, path, category, and what it contains.
-   - If NO documents were received or downloaded today: Explicitly tell {owner_name} that no new documents were received or downloaded today ({now_dt.strftime("%B %d, %Y")}). Then highlight their most recent files from previous days for convenience.
-
-3. SPECIFIC DOCUMENT LOOKUPS & IDENTITY PASS CAUTION:
-   - If the user asks for a specific document (e.g., "where is my degree pass or entry pass", "find electricity bill", "1508 paper"):
-     - If the file exists for {owner_name}: State its exact bold filename, `path` in code spans, size, and summarize its contents.
-     - If an entry pass or document exists on the device but belongs to a peer (e.g., peer Sumbal in "Sumbal pass.pdf"):
-       Clearly distinguish this! Explain:
-       "I searched your storage. I found an entry pass for your peer **Sumbal** (`Download/Sumbal pass.pdf`), but I did not find a degree pass or entry pass issued in your name ({owner_name}, BSAI-182). If you recently received it, check if it was downloaded into your Downloads folder or saved under another name."
-     - If no matching document exists at all: Explain clearly that you searched across the {len(all_files)} indexed files on their storage and could not find it.
-
-4. SCOPE & BOUNDARIES:
-   - If the query asks for something out of scope (like sending an email, checking online email inboxes, or accessing cloud drives):
-     Explain that you are an on-device local storage agent managing `/storage/emulated/0` without live internet or email access. Offer to locate or inspect the local file so they can use it.
-
-5. FORMATTING:
-   - Use clean Markdown: bold for file names, code spans for paths (e.g. `Download/filename.pdf`), bullet points, and category headers when presenting multiple items.
-   - Read-only inspection: do NOT stage file mutation actions.
+1. Act as an intelligent, articulate AI agent (like Google DeepMind / Antigravity). Speak directly to {owner_name}.
+2. SPECIFIC BOOK OR DOCUMENT SEARCH (e.g. 'Can you find me the book for 48 laws of power?'):
+   - If a matching book/document is present in candidates: highlight ONLY that specific file with its exact name, path in code spans, size, and category.
+   - Do NOT list unrelated files like peer passes or random text files!
+   - Offer a helpful next step (e.g. moving it to `Documents/Books/`).
+3. IDENTITY PASS CAUTION:
+   - If the user asks for their entry pass/degree and only a classmate pass exists: explain that a pass for peer {peer_names} was found, but not one in {owner_name}'s name.
+4. If no genuine match exists: explain politely that you searched across the {len(all_files)} indexed files on their storage and could not find it.
+5. NEVER output robotic database strings like 'Match: Filename matches:' or 'Category: General Document • Match: ...'.
 """
 
         query_reply = call_gemini_text(query_system_prompt, raw_prompt)
 
-        # Offline heuristic search if Gemini is offline
+        # High-precision local fallback search if Gemini is offline
         if not query_reply:
             if is_date_query:
                 today_matches = [f for f in all_files if f.get("is_today")]
                 if today_matches:
-                    lines = [f"### 📅 Documents Received Today ({now_dt.strftime('%B %d, %Y')}):\n\nFound **{len(today_matches)} document(s)** downloaded today:"]
+                    lines = [f"📅 **Documents Received Today ({now_dt.strftime('%B %d, %Y')}):**\n\nFound **{len(today_matches)} document(s)** downloaded today:"]
                     for m in today_matches[:10]:
-                        snip_preview = m.get("snippet", "")[:120] if m.get("snippet") else "Binary / image document"
+                        snip_preview = f" • *Preview:* \"{m['snippet'][:80]}\"" if m.get("snippet") and m['snippet'] != "none (binary/image)" else ""
                         time_display = m.get("modified_str") or "Today"
-                        lines.append(f"- 📄 **{m['filename']}** (`{m['path']}` • {m.get('size_kb', 0)} KB • *{time_display}*)\n  *Category:* **{m.get('type_label', 'Document')}**\n  *Preview:* \"{snip_preview}\"")
+                        lines.append(f"- 📄 **{m['filename']}** (`{m['path']}` • {m.get('size_kb', 0)} KB • *{time_display}*){snip_preview}")
                     query_reply = "\n\n".join(lines)
                 else:
                     recent_files = sorted(all_files, key=lambda x: x.get("modified_timestamp", 0), reverse=True)[:5]
-                    lines = [f"📅 You have not received or downloaded any new documents today ({now_dt.strftime('%B %d, %Y')}).\n\nHere are your most recently modified files from earlier:"]
+                    lines = [f"📅 You have not received or downloaded any new documents today ({now_dt.strftime('%B %d, %Y')}).\n\nHere are your most recently modified files:"]
                     for m in recent_files:
                         time_display = m.get("modified_str") or "Earlier"
                         lines.append(f"- 📄 **{m['filename']}** (`{m['path']}` • *{time_display}*)")
                     query_reply = "\n\n".join(lines)
-            elif any(w in lower_prompt for w in ("pass", "degree", "entry")):
-                # Check for Sumbal pass vs user pass
-                peer_passes = [f for f in all_files if "sumbal" in f["filename"].lower() or "pass" in f["filename"].lower()]
-                if peer_passes:
-                    found_p = peer_passes[0]
-                    query_reply = (
-                        f"ℹ️ I searched your storage ({len(all_files)} files indexed).\n\n"
-                        f"I found an entry pass for your peer **Sumbal** (`{found_p['path']}` • {found_p.get('size_kb', 0)} KB), "
-                        f"but I did not find a degree or entry pass issued for you ({owner_name}, {identifiers[0] if identifiers else 'BSAI-182'}).\n\n"
-                        f"If you received it recently, make sure it has finished downloading into `{target_folder}/`."
-                    )
+            elif top_matches:
+                # If there is a single standout match (e.g. specific book lookup like 48 laws of power)
+                best = top_matches[0]
+                if len(top_matches) == 1 or (best["score"] >= 120.0 and (len(top_matches) == 1 or best["score"] - top_matches[1]["score"] >= 35.0)):
+                    lines = [
+                        f"I found the document you were looking for on your device:\n\n"
+                        f"- 📄 **{best['filename']}**\n"
+                        f"  * Location: `{best['path']}`\n"
+                        f"  * Size: {best['size_kb']} KB\n"
+                        f"  * Category: **{best['type_label']}**"
+                    ]
+                    if best.get("snippet") and best["snippet"] != "none (binary/image)":
+                        lines.append(f"  * Preview: *\"{best['snippet'][:150]}\"*")
+                    lines.append(f"\n💡 *Would you like me to organize, move, or inspect this file further?*")
+                    query_reply = "\n".join(lines)
                 else:
-                    query_reply = f"ℹ️ I searched your storage ({len(all_files)} files indexed), but found no degree or entry pass matching **\"{raw_prompt}\"**."
-            else:
-                top_matches = [f for f in scored_files if f["score"] >= 20.0]
-                if not top_matches and scored_files:
-                    if any(w in lower_prompt for w in ("what", "list", "show", "all", "here", "inside", "view", "files")):
-                        top_matches = scored_files[:10]
-
-                if top_matches:
-                    lines = [f"### 🔍 Inspected Storage Query: \"{raw_prompt}\"\n\nFound **{len(top_matches)} matching document(s)** on your device:"]
+                    lines = [f"I found **{len(top_matches)} matching document(s)** on your device:\n"]
                     for m in top_matches[:8]:
-                        snip_preview = m["snippet"][:130] if m["snippet"] else "Binary / image fixture"
-                        reason_info = f" • *Match:* {m['match_reason']}" if m.get("match_reason") else ""
-                        lines.append(f"- 📄 **{m['filename']}** (`{m['path']}` • {m['size_kb']} KB)\n  *Category:* **{m['type_label']}**{reason_info}\n  *Inspected Content:* \"{snip_preview}\"")
+                        snip_preview = f" • *Preview:* \"{m['snippet'][:90]}\"" if m.get("snippet") and m['snippet'] != "none (binary/image)" else ""
+                        lines.append(f"- 📄 **{m['filename']}** (`{m['path']}` • {m['size_kb']} KB)\n  *Category:* **{m['type_label']}**{snip_preview}")
                     query_reply = "\n\n".join(lines)
+            else:
+                # No matches found: check identity pass distinction
+                if any(w in lower_prompt for w in ("pass", "degree", "entry")):
+                    peer_passes = [
+                        f for f in all_files 
+                        if any(p.lower() in f["filename"].lower() for p in peer_names) and "pass" in f["filename"].lower()
+                    ]
+                    if peer_passes:
+                        found_p = peer_passes[0]
+                        query_reply = (
+                            f"I searched your storage ({len(all_files)} files indexed).\n\n"
+                            f"I found an entry pass for your classmate (`{found_p['path']}` • {found_p.get('size_kb', 0)} KB), "
+                            f"but I did not find a degree or entry pass issued for you ({owner_name}, {identifiers[0] if identifiers else 'BSAI-182'}).\n\n"
+                            f"If you received it recently, make sure it has finished downloading into `{target_folder}/`."
+                        )
+                    else:
+                        query_reply = f"I searched your storage ({len(all_files)} files indexed), but found no degree or entry pass matching **\"{raw_prompt}\"**."
                 else:
-                    query_reply = f"ℹ️ I searched your storage ({len(all_files)} files indexed), but found no files matching **\"{raw_prompt}\"**.\n\nTry asking *\"List university lectures\"*, *\"Find me Sumbal pass\"*, or *\"Find receipts\"*."
+                    target_disp = parsed_intent.get("cleaned_target") or raw_prompt
+                    query_reply = (
+                        f"I searched across your storage ({len(all_files)} files indexed), but couldn't find any documents matching **\"{target_disp}\"**.\n\n"
+                        f"Please check if the file was downloaded under a different name or if the download is still in progress."
+                    )
 
         return jsonify({
             "type": "query_info",
@@ -2393,10 +2746,10 @@ INSTRUCTIONS & REASONING RULES:
             "actions": [],
             "query_results": [],
             "quick_chips": [
+                "🧹 Clean Duplicates",
                 "📋 Sort Student Vouchers",
                 "👥 Separate Peer Documents",
-                "🏷️ Clean Download Names",
-                "🗑️ Cleanup Old Screenshots"
+                "🏷️ Clean Download Names"
             ]
         })
 

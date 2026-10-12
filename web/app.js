@@ -43,7 +43,19 @@ document.addEventListener('DOMContentLoaded', () => {
     promptInput: document.getElementById('prompt-input'),
     sendBtn: document.getElementById('send-btn'),
     toast: document.getElementById('toast'),
-    toastMessage: document.getElementById('toast-message')
+    toastMessage: document.getElementById('toast-message'),
+    aiStatusPill: document.getElementById('ai-status-pill'),
+    aiStatusLabel: document.getElementById('ai-status-label'),
+    apiKeyModal: document.getElementById('api-key-modal'),
+    closeApiModalBtn: document.getElementById('close-api-modal-btn'),
+    cancelApiBtn: document.getElementById('cancel-api-btn'),
+    geminiKeyInput: document.getElementById('gemini-key-input'),
+    toggleKeyVisibility: document.getElementById('toggle-key-visibility'),
+    saveApiKeyBtn: document.getElementById('save-api-key-btn'),
+    saveKeySpinner: document.getElementById('save-key-spinner'),
+    saveKeyBtnText: document.getElementById('save-key-btn-text'),
+    keyCurrentStatus: document.getElementById('key-current-status'),
+    apiFeedbackMsg: document.getElementById('api-feedback-msg')
   };
 
   // ==============================================================================
@@ -97,6 +109,30 @@ document.addEventListener('DOMContentLoaded', () => {
       elements.engineStatusText.textContent = 'Bridge Offline';
       elements.storageBasePath.textContent = 'Offline (Check server)';
       return null;
+    }
+  }
+
+  async function fetchAiStatus() {
+    try {
+      const resp = await fetch('/api_status');
+      if (!resp.ok) return;
+      const data = await resp.json();
+      state.geminiConfigured = data.gemini_configured;
+
+      if (elements.aiStatusPill) {
+        if (data.gemini_configured) {
+          elements.aiStatusPill.className = 'ai-status-pill configured';
+          if (elements.aiStatusLabel) elements.aiStatusLabel.textContent = '✨ Gemini AI Active';
+          if (elements.keyCurrentStatus) elements.keyCurrentStatus.textContent = `Active (${data.masked_key})`;
+        } else {
+          elements.aiStatusPill.className = 'ai-status-pill unconfigured';
+          if (elements.aiStatusLabel) elements.aiStatusLabel.textContent = '⚡ Setup Gemini Key';
+          if (elements.keyCurrentStatus) elements.keyCurrentStatus.textContent = 'Not Configured (Offline Mode)';
+        }
+      }
+      return data;
+    } catch (err) {
+      console.warn('Could not fetch AI status:', err);
     }
   }
 
@@ -971,6 +1007,92 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   });
 
+  // 6. Gemini AI Key Modal Interactions
+  if (elements.aiStatusPill) {
+    elements.aiStatusPill.addEventListener('click', () => {
+      if (elements.apiKeyModal) {
+        elements.apiKeyModal.style.display = 'flex';
+        if (elements.apiFeedbackMsg) elements.apiFeedbackMsg.style.display = 'none';
+        if (elements.geminiKeyInput) elements.geminiKeyInput.focus();
+      }
+    });
+  }
+
+  function closeApiKeyModal() {
+    if (elements.apiKeyModal) {
+      elements.apiKeyModal.style.display = 'none';
+    }
+  }
+
+  if (elements.closeApiModalBtn) elements.closeApiModalBtn.addEventListener('click', closeApiKeyModal);
+  if (elements.cancelApiBtn) elements.cancelApiBtn.addEventListener('click', closeApiKeyModal);
+
+  if (elements.toggleKeyVisibility) {
+    elements.toggleKeyVisibility.addEventListener('click', () => {
+      if (!elements.geminiKeyInput) return;
+      const isPassword = elements.geminiKeyInput.type === 'password';
+      elements.geminiKeyInput.type = isPassword ? 'text' : 'password';
+      elements.toggleKeyVisibility.textContent = isPassword ? '🔒' : '👁️';
+    });
+  }
+
+  if (elements.saveApiKeyBtn) {
+    elements.saveApiKeyBtn.addEventListener('click', async () => {
+      const keyVal = (elements.geminiKeyInput ? elements.geminiKeyInput.value : '').trim();
+      if (!keyVal) {
+        if (elements.apiFeedbackMsg) {
+          elements.apiFeedbackMsg.className = 'api-feedback-msg error';
+          elements.apiFeedbackMsg.textContent = 'Please enter a valid Gemini API key.';
+          elements.apiFeedbackMsg.style.display = 'block';
+        }
+        return;
+      }
+
+      if (elements.saveKeySpinner) elements.saveKeySpinner.style.display = 'inline-block';
+      if (elements.saveKeyBtnText) elements.saveKeyBtnText.textContent = 'Verifying...';
+      elements.saveApiKeyBtn.disabled = true;
+
+      try {
+        const resp = await fetch('/configure_api_key', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ api_key: keyVal })
+        });
+        const resData = await resp.json();
+
+        if (resp.ok) {
+          if (elements.apiFeedbackMsg) {
+            elements.apiFeedbackMsg.className = 'api-feedback-msg success';
+            elements.apiFeedbackMsg.textContent = '✓ ' + (resData.message || 'Key verified and saved!');
+            elements.apiFeedbackMsg.style.display = 'block';
+          }
+          showToast('✨ Gemini AI intelligence successfully activated!', 'success');
+          await fetchAiStatus();
+          setTimeout(() => {
+            closeApiKeyModal();
+            if (elements.geminiKeyInput) elements.geminiKeyInput.value = '';
+          }, 1200);
+        } else {
+          if (elements.apiFeedbackMsg) {
+            elements.apiFeedbackMsg.className = 'api-feedback-msg error';
+            elements.apiFeedbackMsg.textContent = resData.error || 'Verification failed. Please check key.';
+            elements.apiFeedbackMsg.style.display = 'block';
+          }
+        }
+      } catch (err) {
+        if (elements.apiFeedbackMsg) {
+          elements.apiFeedbackMsg.className = 'api-feedback-msg error';
+          elements.apiFeedbackMsg.textContent = 'Network error connecting to bridge: ' + err.message;
+          elements.apiFeedbackMsg.style.display = 'block';
+        }
+      } finally {
+        if (elements.saveKeySpinner) elements.saveKeySpinner.style.display = 'none';
+        if (elements.saveKeyBtnText) elements.saveKeyBtnText.textContent = 'Verify & Save';
+        elements.saveApiKeyBtn.disabled = false;
+      }
+    });
+  }
+
   // ==============================================================================
   // Helper Utilities
   // ==============================================================================
@@ -996,6 +1118,7 @@ document.addEventListener('DOMContentLoaded', () => {
         versionEl.textContent = `Android Bridge ${healthData.version}`;
       }
     }
+    await fetchAiStatus();
     await fetchUserProfile();
     await fetchRecentBatch();
   }
