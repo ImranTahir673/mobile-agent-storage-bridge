@@ -555,7 +555,15 @@ def extract_file_snippet(file_path: str, max_chars: int = 400) -> str:
             try:
                 import pypdf
                 reader = pypdf.PdfReader(file_path)
-                parts = [p.extract_text() or "" for p in reader.pages[:2]]
+                page_limit = 15 if max_chars > 2000 else 4
+                parts = []
+                cur_len = 0
+                for p in reader.pages[:page_limit]:
+                    txt = p.extract_text() or ""
+                    parts.append(txt)
+                    cur_len += len(txt)
+                    if cur_len >= max_chars:
+                        break
                 return "\n".join(parts)[:max_chars]
             except Exception:
                 try:
@@ -2332,7 +2340,7 @@ def propose_plan():
         except Exception:
             mtime_str = ""
 
-        raw_text = extract_file_snippet(entry.path, 300)
+        raw_text = extract_file_snippet(entry.path, 1000)
         sanitized_snippet = sanitize_pii(raw_text)
 
         try:
@@ -2354,6 +2362,7 @@ def propose_plan():
             "filename": filename,
             "name": filename,
             "path": rel_path,
+            "full_path": entry.path,
             "extension": ext,
             "size_kb": manifest_item["size_kb"],
             "size_bytes": file_size,
@@ -2463,6 +2472,57 @@ def propose_plan():
         effective_request = raw_prompt
 
     # =========================================================================
+    # TIER 2: ON-DEMAND DEEP DOCUMENT INSPECTION (Content Q&A & Summaries)
+    # =========================================================================
+    deep_inspected_doc = None
+    deep_inspected_content = ""
+    deep_context_block = ""
+
+    content_inquiry_keywords = (
+        "summarize", "summary", "read", "explain", "what is inside", "what does it say",
+        "tell me about", "topics", "content of", "details of", "about this", "due date",
+        "amount", "bill amount", "questions", "chapters", "findings", "methodology",
+        "what's inside", "whats inside", "preview of", "inspect", "show me content", "what does the"
+    )
+    is_content_inquiry = any(k in lower_raw for k in content_inquiry_keywords) or any(k in lower_norm for k in content_inquiry_keywords)
+
+    target_candidate = None
+    best_match_score = 0
+    for item in manifest:
+        fn_clean = item["filename"].lower()
+        stem = os.path.splitext(fn_clean)[0]
+        clean_stem = re.sub(r"[-_.]+", " ", stem)
+        words = [w for w in re.findall(r"\w+", clean_stem) if len(w) > 3]
+        matched_words = [w for w in words if w in lower_raw]
+
+        score = 0
+        if stem in lower_raw or fn_clean in lower_raw:
+            score = 100
+        elif len(matched_words) >= 2:
+            score = 50 + (10 * len(matched_words))
+        elif len(matched_words) == 1 and len(words) <= 2:
+            score = 40
+
+        if score > best_match_score:
+            best_match_score = score
+            target_candidate = item
+
+    if target_candidate and (is_content_inquiry or best_match_score >= 50):
+        try:
+            target_full_path = target_candidate.get("full_path") or resolve_safe_path(target_candidate.get("path", ""))
+            if os.path.exists(target_full_path):
+                raw_deep = extract_file_snippet(target_full_path, 12000)
+                deep_inspected_content = sanitize_pii(raw_deep)
+                if deep_inspected_content:
+                    deep_inspected_doc = target_candidate["filename"]
+                    deep_context_block = f"""
+TARGET DOCUMENT DEEP INSPECTION FOR '{deep_inspected_doc}' (Up to 12,000 characters with PII sanitized in RAM):
+{deep_inspected_content}
+"""
+        except Exception:
+            pass
+
+    # =========================================================================
     # UNIFIED GROUNDED GEMINI REASONING (Single Unified Pipeline Turn)
     # =========================================================================
     unified_system_prompt = f"""You are Storage Copilot, an elite, articulate on-device AI agent running locally via Termux on Android for {owner_name} (Roll/ID: {identifiers}, Major: Artificial Intelligence).
@@ -2479,6 +2539,7 @@ LIVE DIRECTORY STATUS FOR '{target_folder}/':
 - Top-level subfolders: {", ".join(subfolders) if subfolders else "None"}
 - Direct files on disk ({len(manifest)} files indexed):
 {json.dumps(manifest_for_gemini[:60], indent=2)}
+{deep_context_block}
 
 YOUR AGENT PERSONA & CAPABILITIES:
 - You are an articulate, highly capable AI agent (similar to Google DeepMind / Antigravity). You communicate with clarity, intelligence, and empathy directly to {owner_name}.
@@ -2490,8 +2551,9 @@ REASONING RULES & UNIFIED CONTRACT:
 Analyze the operational request and dialogue history with full, direct access to the live files manifest above.
 Determine your response type natively:
 
-1. "query_info" (SEARCH / LOOKUP / INSPECT / LIST):
-   - Triggered when the user asks to find, list, search, view, audit, check, or inspect documents or categories (e.g. "find Java book", "list lectures", "find receipts", "what is inside Download", "what files are here?", "any more sorting for download?").
+1. "query_info" (SEARCH / LOOKUP / INSPECT / LIST / DEEP DOCUMENT Q&A):
+   - Triggered when the user asks to find, list, search, view, audit, check, summarize, explain, or inspect documents or categories (e.g. "find Java book", "list lectures", "summarize neural style paper", "what is inside Download", "what is this document about?").
+   - If a 'TARGET DOCUMENT DEEP INSPECTION' block is provided above for a file, use its deep text to answer the user's detailed questions (summarize main findings/methodology, extract due dates, explain topics, cite questions).
    - Directly inspect the real files manifest above. If matching documents exist (e.g. JavaTheCompleteReference.pdf for Java language), cite them with bold names, paths in code spans, sizes, and helpful details.
    - For folder listing or inventory requests, provide a clean, grouped markdown overview of the files.
    - For status or audit checks ("any more sorting for download?"), summarize what unorganized files remain or praise the clean state.
