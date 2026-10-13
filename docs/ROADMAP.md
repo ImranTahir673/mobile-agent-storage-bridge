@@ -36,7 +36,7 @@ This roadmap details the engineering phases required to evolve the **Mobile Agen
                                                   |
                                                   v
 +---------------------------------------------------------------------------------------------------+
-| Phase 3.5: Unified Grounded Architecture & Temporal / Date-Range Engine [IN PROGRESS / TOMORROW]   |
+| Phase 3.5: Unified Grounded Architecture & Temporal / Date-Range Engine [COMPLETED]               |
 +---------------------------------------------------------------------------------------------------+
                                                   |
                                                   v
@@ -192,9 +192,9 @@ Ensured the phone server runs reliably in the background without being killed by
 
 ---
 
-## 8. Phase 3.5: Unified Grounded Architecture & Temporal / Date-Range Engine [IN PROGRESS / TOMORROW]
+## 8. Phase 3.5: Unified Grounded Architecture & Temporal / Date-Range Engine [COMPLETED]
 
-Eliminated brittle regex/stopword filters in favor of real on-device storage reconnaissance and unified grounded reasoning. Tomorrow's milestone extends the engine with high-precision temporal querying and date-range file operations.
+Eliminated brittle regex/stopword filters in favor of real on-device storage reconnaissance, smart two-tier snippet inspection, and a unified grounded intelligence pipeline with full temporal date-range querying and lifecycle archiving.
 
 ### 8.1 Tasks & Deliverables
 
@@ -204,19 +204,19 @@ Eliminated brittle regex/stopword filters in favor of real on-device storage rec
   - Smart Two-Tier Context: 1,000-char rich overview for directory scans + on-demand deep inspection (up to 12,000 chars) for specific document Q&A.
   - Zero external pip dependencies; strict on-device PII scrubbing in RAM.
 
-- [ ] **3.5.2 Temporal Recency & Relative Ordering Engine [TOMORROW'S MILESTONE]**
+- [x] **3.5.2 Temporal Recency & Relative Ordering Engine [COMPLETED]**
   - Natural language recency queries: *"Show latest files"*, *"What's the newest download?"*, *"List oldest files"*, *"What was modified most recently?"*.
   - Python mtime extraction & timestamp sorting (ascending / descending) directly reflected in Gemini's candidate ranking.
 
-- [ ] **3.5.3 Exact Calendar Date & Time-Window Filtering [TOMORROW'S MILESTONE]**
+- [x] **3.5.3 Exact Calendar Date & Time-Window Filtering [COMPLETED]**
   - Exact calendar matching: *"Find files from today"*, *"What did I download yesterday?"*, *"Show files from October 10"*, *"Files downloaded on 2026-10-12"*.
   - Device clock grounding (`now_str` & `today_date`) to accurately resolve relative terms (*"today"*, *"yesterday"*, *"last Friday"*).
 
-- [ ] **3.5.4 Duration & Interval Range Queries [TOMORROW'S MILESTONE]**
-  - Natural interval ranges: *"Files from the last 7 days"*, *"Files downloaded in the past 2 weeks"*, *"Files between March 2025 and May 2025"*, *"Files older than 3 months"*.
+- [x] **3.5.4 Duration & Interval Range Queries [COMPLETED]**
+  - Natural interval ranges: *"Files from the past 7 days"*, *"Files downloaded in the past 2 weeks"*, *"Files between March 2025 and May 2025"*, *"Files older than 30 days"*.
   - Python pre-flight date calculation and manifest filtering so Gemini receives the exact matching time bracket.
 
-- [ ] **3.5.5 Temporal Action Directives & Lifecycle Archiving [TOMORROW'S MILESTONE]**
+- [x] **3.5.5 Temporal Action Directives & Lifecycle Archiving [COMPLETED]**
   - Time-driven action plans: *"Move files older than 30 days to Documents/Archive/"*, *"Sort all files downloaded today into Documents/University/"*, *"Clean downloads older than 6 months"*.
   - Full atomic review via interactive diff cards and 1-tap rollback in `.ledger.db`.
 

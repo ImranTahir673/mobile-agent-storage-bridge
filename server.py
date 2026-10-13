@@ -8,7 +8,7 @@ import hashlib
 import time
 import zipfile
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import requests
 from flask import Flask, request, jsonify, send_from_directory
 
@@ -1820,18 +1820,20 @@ def format_plan_badges(plan_actions: list, peer_names: list, manifest_lookup: di
     return formatted_actions
 
 GEMINI_MODELS = [
-    "gemini-3.5-flash-lite",
-    "gemini-3.5-flash",
-    "gemini-3.8-flash",
+    "gemini-3.1-flash-lite",
+    "gemini-3.1-flash-lite-preview",
+    "gemini-3-flash-preview",
     "gemini-flash-latest",
-    "gemini-2.5-flash"
+    "gemini-3.5-flash-lite",
+    "gemini-3.5-flash"
 ]
 
 def call_gemini_json(system_prompt: str, user_prompt: str) -> dict:
     """
     Sends structured JSON prompt to Gemini API with robust model fallback:
-    1. gemini-3.5-flash-lite (fast, high throughput, active)
-    2. gemini-3.5-flash
+    1. gemini-3.1-flash-lite (fastest, active)
+    2. gemini-3.1-flash-lite-preview
+    3. gemini-3-flash-preview
     """
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
@@ -1847,7 +1849,7 @@ def call_gemini_json(system_prompt: str, user_prompt: str) -> dict:
     for model in GEMINI_MODELS:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
         try:
-            resp = requests.post(url, json=payload, timeout=30)
+            resp = requests.post(url, json=payload, timeout=15)
             if resp.status_code == 200:
                 data = resp.json()
                 candidates = data.get("candidates", [])
@@ -1862,6 +1864,10 @@ def call_gemini_json(system_prompt: str, user_prompt: str) -> dict:
                                 return parsed
                         except Exception:
                             continue
+            elif resp.status_code in (429, 503):
+                print(f"[Storage Copilot Gemini] Model '{model}' returned HTTP {resp.status_code} (throttled). Backing off 1s...")
+                time.sleep(1.0)
+                continue
             else:
                 print(f"[Storage Copilot Gemini] Model '{model}' returned HTTP {resp.status_code}.")
                 continue
@@ -2336,9 +2342,31 @@ def propose_plan():
 
         try:
             mtime = entry.stat().st_mtime
-            mtime_str = datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M")
+            mtime_dt = datetime.fromtimestamp(mtime)
+            mtime_str = mtime_dt.strftime("%Y-%m-%d %H:%M")
+            date_str = mtime_dt.strftime("%Y-%m-%d")
+
+            age_seconds = (now_dt - mtime_dt).total_seconds()
+            age_days = round(max(0.0, age_seconds / 86400.0), 1)
+
+            if mtime_dt.date() == now_dt.date():
+                rel_age = "Today"
+            elif mtime_dt.date() == (now_dt.date() - timedelta(days=1)):
+                rel_age = "Yesterday"
+            elif age_days < 7:
+                rel_age = f"{int(age_days)} days ago"
+            elif age_days < 30:
+                rel_age = f"{max(1, int(age_days / 7))} weeks ago"
+            elif age_days < 365:
+                rel_age = f"{max(1, int(age_days / 30))} months ago"
+            else:
+                rel_age = f"{max(1, int(age_days / 365))} years ago"
         except Exception:
+            mtime = 0.0
             mtime_str = ""
+            date_str = ""
+            rel_age = "Unknown"
+            age_days = 9999.0
 
         raw_text = extract_file_snippet(entry.path, 1000)
         sanitized_snippet = sanitize_pii(raw_text)
@@ -2353,6 +2381,9 @@ def propose_plan():
             "path": rel_path,
             "size_kb": round(file_size / 1024, 1),
             "modified_date": mtime_str,
+            "relative_age": rel_age,
+            "age_days": age_days,
+            "mtime": mtime,
             "text_snippet": sanitized_snippet if sanitized_snippet else "None (binary/image)",
             "has_content": bool(sanitized_snippet)
         }
@@ -2367,6 +2398,9 @@ def propose_plan():
             "size_kb": manifest_item["size_kb"],
             "size_bytes": file_size,
             "modified_date": mtime_str,
+            "relative_age": rel_age,
+            "age_days": age_days,
+            "mtime": mtime,
             "snippet": sanitized_snippet,
             "text_snippet": manifest_item["text_snippet"],
             "has_content": manifest_item["has_content"]
@@ -2374,6 +2408,20 @@ def propose_plan():
         manifest.append(internal_item)
         manifest_lookup[rel_path.lower()] = internal_item
         manifest_lookup[filename.lower()] = internal_item
+
+    # Chronological Ordering & Temporal Audit Computation (Phase 3.5)
+    is_oldest_req = any(w in lower_raw or w in lower_norm for w in ("oldest", "earliest", "first downloaded", "longest ago"))
+    manifest.sort(key=lambda x: x.get("mtime", 0.0), reverse=not is_oldest_req)
+    manifest_for_gemini.sort(key=lambda x: x.get("mtime", 0.0), reverse=not is_oldest_req)
+
+    today_files = [f["filename"] for f in manifest if f.get("relative_age") == "Today"]
+    yesterday_files = [f["filename"] for f in manifest if f.get("relative_age") == "Yesterday"]
+    week_files = [f["filename"] for f in manifest if f.get("age_days", 999) <= 7]
+    month_old_files = [f["filename"] for f in manifest if f.get("age_days", 0) >= 30]
+
+    sorted_by_newest = sorted(manifest, key=lambda x: x.get("mtime", 0.0), reverse=True)
+    newest_file_name = sorted_by_newest[0]["filename"] if sorted_by_newest else "None"
+    oldest_file_name = sorted_by_newest[-1]["filename"] if sorted_by_newest else "None"
 
     # Fast-path for Deduplication Commands & Queries
     is_deduplicate_req = any(k in normalized_prompt.lower() for k in ("duplicate", "duplicates", "dedup", "deduplicate", "repeated file", "repeated files"))
@@ -2535,29 +2583,40 @@ Peer Routing:
 RECENT CONVERSATION HISTORY (Last turns):
 {conversation_context_block}
 
-LIVE DIRECTORY STATUS FOR '{target_folder}/':
+TEMPORAL DIRECTORY AUDIT STATS (for target folder '{target_folder}/'):
+- Files downloaded Today ({today_date}): {len(today_files)} files ({', '.join(today_files[:10]) if today_files else 'None'})
+- Files downloaded Yesterday: {len(yesterday_files)} files ({', '.join(yesterday_files[:10]) if yesterday_files else 'None'})
+- Files from past 7 days: {len(week_files)} files
+- Files older than 30 days: {len(month_old_files)} files ({', '.join(month_old_files[:10]) if month_old_files else 'None'})
+- Single Most Recent File: {newest_file_name}
+- Single Oldest File: {oldest_file_name}
+
+LIVE DIRECTORY STATUS FOR '{target_folder}/' (Sorted {'oldest first' if is_oldest_req else 'newest first'}):
 - Top-level subfolders: {", ".join(subfolders) if subfolders else "None"}
 - Direct files on disk ({len(manifest)} files indexed):
-{json.dumps(manifest_for_gemini[:60], indent=2)}
+{json.dumps([{k: v for k, v in f.items() if k != 'mtime'} for f in manifest_for_gemini[:60]], indent=2)}
 {deep_context_block}
 
 YOUR AGENT PERSONA & CAPABILITIES:
 - You are an articulate, highly capable AI agent (similar to Google DeepMind / Antigravity). You communicate with clarity, intelligence, and empathy directly to {owner_name}.
 - You possess complete self-awareness of your abilities and system boundaries.
-- WHAT YOU CAN DO: Local storage reconnaissance, content inspection with in-memory PII sanitization, intelligent file organization (academic vs peer vs personal bills), cryptographic duplicate detection, interactive diff approval, and 1-tap atomic rollbacks via SQLite WAL.
+- WHAT YOU CAN DO: Local storage reconnaissance, content inspection with in-memory PII sanitization, intelligent file organization (academic vs peer vs personal bills), cryptographic duplicate detection, temporal recency & date-range queries, interactive diff approval, and 1-tap atomic rollbacks via SQLite WAL.
 - WHAT YOU CANNOT DO: You cannot send emails, send SMS/WhatsApp messages, browse the live web, access cloud storage directly, launch external apps, or alter Android system configurations. If asked to do something out-of-scope, politely state your local storage boundaries and explain what local storage task you can help with instead.
 
 REASONING RULES & UNIFIED CONTRACT:
 Analyze the operational request and dialogue history with full, direct access to the live files manifest above.
 Determine your response type natively:
 
-1. "query_info" (SEARCH / LOOKUP / INSPECT / LIST / DEEP DOCUMENT Q&A):
-   - Triggered when the user asks to find, list, search, view, audit, check, summarize, explain, or inspect documents or categories (e.g. "find Java book", "list lectures", "summarize neural style paper", "what is inside Download", "what is this document about?").
+1. "query_info" (SEARCH / LOOKUP / INSPECT / LIST / DEEP DOCUMENT Q&A / TEMPORAL RECENCY & DATES):
+   - Triggered when the user asks to find, list, search, view, audit, check, summarize, explain, inspect, or query documents or recency (e.g. "find Java book", "list lectures", "summarize neural style paper", "what is my latest download?", "did I download anything today?", "what did I receive yesterday?", "show files from past 7 days", "what are my oldest files?").
    - If a 'TARGET DOCUMENT DEEP INSPECTION' block is provided above for a file, use its deep text to answer the user's detailed questions (summarize main findings/methodology, extract due dates, explain topics, cite questions).
+   - TEMPORAL RECENCY & DATES:
+     * If user asks about recency (e.g. "latest files", "newest download", "oldest files"), cite the exact matching files with bold names, paths in code spans, sizes, and exact modified timestamps / relative age.
+     * If user asks about exact dates or durations (e.g. "files from today", "yesterday", "past 7 days", "older than 30 days"), use the temporal audit stats and `relative_age`/`age_days` from the manifest to accurately answer.
    - Directly inspect the real files manifest above. If matching documents exist (e.g. JavaTheCompleteReference.pdf for Java language), cite them with bold names, paths in code spans, sizes, and helpful details.
    - For folder listing or inventory requests, provide a clean, grouped markdown overview of the files.
    - For status or audit checks ("any more sorting for download?"), summarize what unorganized files remain or praise the clean state.
-   - Set "actions": []
+   - CRITICAL RULE: For "query_info", "actions" MUST ALWAYS be an empty list []. NEVER propose file mutations or actions for read-only queries!
 
 2. "conversation" (ADVICE / GREETINGS / CAPABILITIES / FOLLOW-UPS / OUT-OF-SCOPE):
    - Triggered for greetings ("Hi", "Hello"), capabilities ("What can you do?", "Who are you?"), conversational follow-ups ("What else?", "Tell me more", "What other things can you do?"), suggestions/advice ("What suggestions do you have for my files?", "How can I organize?"), or out-of-scope requests (emails, web search).
@@ -2565,14 +2624,17 @@ Determine your response type natively:
    - Ground your advice in the actual live directory status above. Cite real filenames and real categories.
    - Set "actions": []
 
-3. "plan" (ACTIONS / CONFIRMATIONS / ORGANIZING):
-   - Triggered when the user explicitly commands an action ("Clean Download Names", "Sort student vouchers", "Separate peer documents", "How about we first sort...") OR confirms a previous suggestion ("Yes", "Proceed", "Do it").
+3. "plan" (ACTIONS / CONFIRMATIONS / ORGANIZING / TEMPORAL LIFECYCLE ARCHIVING):
+   - Triggered when the user explicitly commands an action ("Clean Download Names", "Sort student vouchers", "Separate peer documents", "Move files older than 30 days to Documents/Archive/") OR confirms a previous suggestion ("Yes", "Proceed", "Do it").
+   - TEMPORAL ACTIONS & LIFECYCLE ARCHIVING:
+     * If user commands an action based on age or dates (e.g. "archive files older than 30 days", "sort today's downloads into University/"), target EXACTLY the files matching that age criterion from the manifest.
    - Synthesize move/rename/trash actions referencing exact filenames from the manifest.
    - Academic Taxonomy:
      * Academic study materials (lectures, assignments, notes) -> Documents/University/<Subject>/
      * Personal tuition vouchers -> Documents/University/Vouchers/
      * Peer documents for classmates ({", ".join(peer_names)}) -> Documents/Peers/<PeerName>/
      * Utility/electricity bills -> Documents/Finances/
+     * MANDATORY TAXONOMY ROUTING: ALL move/rename destinations (including for 'Clean Download Names') MUST route the file into its designated taxonomy folder under 'Documents/' (e.g. 'Documents/University/AI/Knowledge_Representation_Lecture_04.pdf' or 'Documents/Finances/Electricity_Bill.pdf'). NEVER leave destination paths inside 'Download/'.
    - Content-Derived Naming: Standardize ambiguous WhatsApp (DOC-*.pdf) or cryptic downloads into clean, descriptive titles (e.g. 'Knowledge_Representation_Lecture_04.pdf'). NEVER use generic 'Document_2025-04-13.pdf'.
    - Ensure every proposed action has a unique, collision-free destination.
 
@@ -2657,9 +2719,10 @@ Target Folder: "{target_folder}"
                     "quick_chips": quick_chips
                 })
 
-        elif resp_type in ("query_info", "conversation"):
+        elif resp_type in ("query_info", "conversation") or (resp_type == "plan" and not raw_actions):
+            final_type = resp_type if resp_type in ("query_info", "conversation") else "conversation"
             return jsonify({
-                "type": resp_type,
+                "type": final_type,
                 "message": resp_message or f"I've reviewed your storage in `{target_folder}/`.",
                 "version": APP_VERSION,
                 "actions": [],
@@ -2951,6 +3014,51 @@ Target Folder: "{target_folder}"
                 })
                 step_idx += 1
         else:
+            # Check for informational query / temporal search intent in offline mode
+            is_query_intent = any(k in lower_p for k in (
+                "find", "search", "list", "show", "what", "where", "how many", "which",
+                "latest", "newest", "oldest", "recent", "today", "yesterday", "receipt", "lecture", "book", "voucher"
+            )) and not any(k in lower_p for k in ("what else", "what can you do", "who are you", "what other", "suggestions"))
+
+            if is_query_intent and not has_action_intent:
+                matched_items = []
+                if any(w in lower_p for w in ("latest", "newest", "most recent")):
+                    matched_items = sorted_by_newest[:5]
+                elif any(w in lower_p for w in ("oldest", "earliest")):
+                    matched_items = sorted_by_newest[-5:] if sorted_by_newest else []
+                elif "today" in lower_p:
+                    matched_items = [f for f in manifest if f.get("relative_age") == "Today"]
+                elif "yesterday" in lower_p:
+                    matched_items = [f for f in manifest if f.get("relative_age") == "Yesterday"]
+                elif any(w in lower_p for w in ("receipt", "voucher", "fee", "bill", "invoice")):
+                    matched_items = [f for f in manifest if any(k in f["name"].lower() or k in (f.get("snippet") or "").lower() for k in ("receipt", "voucher", "bill", "invoice", "fee"))]
+                elif any(w in lower_p for w in ("lecture", "notes", "assignment", "academic", "university")):
+                    matched_items = [f for f in manifest if classify_document(f["name"], f.get("snippet") or "")["is_academic_study"]]
+                else:
+                    words = [w for w in re.findall(r"\w+", lower_p) if len(w) > 3 and w not in ("find", "search", "list", "show", "files", "download", "documents")]
+                    matched_items = [f for f in manifest if any(w in f["name"].lower() or w in (f.get("snippet") or "").lower() for w in words)]
+
+                if matched_items:
+                    lines = [f"Found **{len(matched_items)} matching document(s)** in `{target_folder}/`:\n"]
+                    for m in matched_items[:10]:
+                        lines.append(f"- **{m['name']}** (`{m['path']}`, {m['size_kb']} KB, {m.get('relative_age', 'Unknown')})")
+                    msg = "\n".join(lines)
+                else:
+                    msg = f"I scanned `{target_folder}/` ({len(manifest)} files indexed) but could not locate documents matching '{raw_prompt}'."
+
+                return jsonify({
+                    "type": "query_info",
+                    "message": msg,
+                    "version": APP_VERSION,
+                    "actions": [],
+                    "quick_chips": [
+                        "📋 Sort Student Vouchers",
+                        "👥 Separate Peer Documents",
+                        "🏷️ Clean Download Names",
+                        "🧹 Clean Duplicates"
+                    ]
+                })
+
             # Prompt is general or advice-seeking: provide articulate guidance response, ZERO unneeded file mutations
             return jsonify({
                 "type": "conversation",
