@@ -1821,19 +1821,20 @@ def format_plan_badges(plan_actions: list, peer_names: list, manifest_lookup: di
 
 GEMINI_MODELS = [
     "gemini-3.1-flash-lite",
-    "gemini-3.1-flash-lite-preview",
     "gemini-3-flash-preview",
-    "gemini-flash-latest",
+    "gemini-3.1-flash-lite-preview",
+    "gemini-3.5-flash",
     "gemini-3.5-flash-lite",
-    "gemini-3.5-flash"
+    "gemini-flash-latest"
 ]
 
 def call_gemini_json(system_prompt: str, user_prompt: str) -> dict:
     """
     Sends structured JSON prompt to Gemini API with robust model fallback:
-    1. gemini-3.1-flash-lite (fastest, active)
-    2. gemini-3.1-flash-lite-preview
-    3. gemini-3-flash-preview
+    1. gemini-2.5-flash (high-availability stable production workhorse)
+    2. gemini-3.1-flash-lite (fastest, active)
+    3. gemini-3.1-flash-lite-preview
+    4. gemini-2.5-flash-lite
     """
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
@@ -1860,6 +1861,8 @@ def call_gemini_json(system_prompt: str, user_prompt: str) -> dict:
                         try:
                             parsed = extract_json_plan(text)
                             if parsed:
+                                parsed["_model_used"] = model
+                                parsed["_is_llm"] = True
                                 print(f"[Storage Copilot Gemini] Successfully received response via model '{model}'.")
                                 return parsed
                         except Exception:
@@ -2210,6 +2213,70 @@ def configure_api_key():
         "masked_key": f"{new_key[:4]}...{new_key[-4:]}"
     })
 
+def compute_query_relevance_score(prompt: str, item: dict) -> float:
+    """
+    Computes an intelligent relevance score between a user's prompt and a file item
+    to guarantee that searched files (by name, keyword, or date) are prioritized
+    at the very top of candidate slices sent to Gemini and offline fallback.
+    """
+    if not prompt or not item:
+        return 0.0
+
+    p_clean = prompt.lower()
+    fn = item.get("filename", item.get("name", "")).lower()
+    fn_stem = os.path.splitext(fn)[0]
+    clean_stem = re.sub(r"[-_.]+", " ", fn_stem)
+    snip = (item.get("snippet") or item.get("text_snippet") or "").lower()
+    mod_date = item.get("modified_date", "")
+    date_str = item.get("date_str", "")
+
+    score = 0.0
+
+    # 1. Exact phrase or stem match
+    if fn in p_clean or fn_stem in p_clean:
+        score += 250.0
+
+    # 2. Key phrase tokens (e.g. '48 laws', 'complete reference', 'snapinsta')
+    p_tokens = [w for w in re.findall(r"\w+", p_clean) if len(w) > 2 and w not in ("find", "search", "show", "list", "what", "where", "which", "file", "files", "download", "documents", "cant", "cannot", "give", "could")]
+    matched_tokens = 0
+    for tok in p_tokens:
+        if tok in fn or tok in clean_stem:
+            score += 60.0
+            matched_tokens += 1
+        elif tok in snip:
+            score += 25.0
+
+    # Strong boost if multiple query tokens match the filename
+    if matched_tokens >= 2:
+        score += 100.0
+
+    # 3. Specific Date matching (e.g., '12 sep 2023', 'sep 12 2023', '2023-09-12', '12 sep', 'sep 2023')
+    months = {
+        "jan": "01", "feb": "02", "mar": "03", "apr": "04", "may": "05", "jun": "06",
+        "jul": "07", "aug": "08", "sep": "09", "oct": "10", "nov": "11", "dec": "12"
+    }
+    date_pattern = re.search(r"(\d{1,2})?\s*([a-zA-Z]{3,9})\s*(\d{2,4})?", p_clean)
+    if date_pattern:
+        day_g, month_g, year_g = date_pattern.groups()
+        month_prefix = (month_g or "")[:3].lower()
+        if month_prefix in months:
+            m_num = months[month_prefix]
+            if day_g and year_g:
+                day_padded = day_g.zfill(2)
+                expected_iso = f"{year_g}-{m_num}-{day_padded}"
+                if expected_iso in mod_date or expected_iso in date_str:
+                    score += 300.0
+                elif f"{year_g}-{m_num}" in mod_date or f"{year_g}-{m_num}" in date_str:
+                    score += 150.0
+            elif year_g and f"{year_g}-{m_num}" in (mod_date or date_str):
+                score += 150.0
+
+    iso_match = re.search(r"\b(\d{4}-\d{2}-\d{2})\b", p_clean)
+    if iso_match and iso_match.group(1) in (mod_date or date_str):
+        score += 300.0
+
+    return score
+
 @app.route("/propose_plan", methods=["POST"])
 def propose_plan():
     """
@@ -2323,19 +2390,24 @@ def propose_plan():
     if os.path.exists(target_dir) and os.path.isdir(target_dir):
         for entry in os.scandir(target_dir):
             if entry.is_dir() and not entry.name.startswith("."):
+                cnt = 0
                 try:
-                    cnt = len([f for f in os.scandir(entry.path) if not f.name.startswith(".")])
+                    # Scan 1st-level subdirectory files deeply so downloads in subfolders are fully analyzed
+                    for sub_entry in os.scandir(entry.path):
+                        if sub_entry.is_file() and not sub_entry.name.startswith("."):
+                            cnt += 1
+                            scanned_entries.append(sub_entry)
                     subfolders.append(f"{entry.name} ({cnt} items)")
                 except Exception:
                     subfolders.append(entry.name)
             elif entry.is_file() and not entry.name.startswith("."):
                 scanned_entries.append(entry)
 
-    # Snippet inspection & PII scrubbing (up to 300 candidate files)
+    # Snippet inspection & PII scrubbing (up to 1000 candidate files)
     manifest = []
     manifest_for_gemini = []
     manifest_lookup = {}
-    for entry in scanned_entries[:300]:
+    for entry in scanned_entries[:1000]:
         filename = entry.name
         file_size = entry.stat().st_size
         ext = os.path.splitext(filename)[1].lower()
@@ -2409,10 +2481,18 @@ def propose_plan():
         manifest_lookup[rel_path.lower()] = internal_item
         manifest_lookup[filename.lower()] = internal_item
 
+    # Pre-flight query relevance scoring
+    for item in manifest:
+        item["query_relevance"] = compute_query_relevance_score(raw_prompt, item)
+    for item in manifest_for_gemini:
+        item["query_relevance"] = compute_query_relevance_score(raw_prompt, item)
+
     # Chronological Ordering & Temporal Audit Computation (Phase 3.5)
     is_oldest_req = any(w in lower_raw or w in lower_norm for w in ("oldest", "earliest", "first downloaded", "longest ago"))
-    manifest.sort(key=lambda x: x.get("mtime", 0.0), reverse=not is_oldest_req)
-    manifest_for_gemini.sort(key=lambda x: x.get("mtime", 0.0), reverse=not is_oldest_req)
+    
+    # Priority sorting: items matching user's keywords/dates first (highest relevance score), followed by chronological
+    manifest.sort(key=lambda x: (x.get("query_relevance", 0.0) > 0, x.get("query_relevance", 0.0), x.get("mtime", 0.0) if not is_oldest_req else -x.get("mtime", 0.0)), reverse=True)
+    manifest_for_gemini.sort(key=lambda x: (x.get("query_relevance", 0.0) > 0, x.get("query_relevance", 0.0), x.get("mtime", 0.0) if not is_oldest_req else -x.get("mtime", 0.0)), reverse=True)
 
     today_files = [f["filename"] for f in manifest if f.get("relative_age") == "Today"]
     yesterday_files = [f["filename"] for f in manifest if f.get("relative_age") == "Yesterday"]
@@ -2594,7 +2674,7 @@ TEMPORAL DIRECTORY AUDIT STATS (for target folder '{target_folder}/'):
 LIVE DIRECTORY STATUS FOR '{target_folder}/' (Sorted {'oldest first' if is_oldest_req else 'newest first'}):
 - Top-level subfolders: {", ".join(subfolders) if subfolders else "None"}
 - Direct files on disk ({len(manifest)} files indexed):
-{json.dumps([{k: v for k, v in f.items() if k != 'mtime'} for f in manifest_for_gemini[:60]], indent=2)}
+{json.dumps([{k: v for k, v in f.items() if k not in ('mtime', 'query_relevance')} for f in manifest_for_gemini[:250]], indent=2)}
 {deep_context_block}
 
 YOUR AGENT PERSONA & CAPABILITIES:
@@ -2608,12 +2688,12 @@ Analyze the operational request and dialogue history with full, direct access to
 Determine your response type natively:
 
 1. "query_info" (SEARCH / LOOKUP / INSPECT / LIST / DEEP DOCUMENT Q&A / TEMPORAL RECENCY & DATES):
-   - Triggered when the user asks to find, list, search, view, audit, check, summarize, explain, inspect, or query documents or recency (e.g. "find Java book", "list lectures", "summarize neural style paper", "what is my latest download?", "did I download anything today?", "what did I receive yesterday?", "show files from past 7 days", "what are my oldest files?").
+   - Triggered when the user asks to find, list, search, view, audit, check, summarize, explain, inspect, or query documents or recency (e.g. "find Java book", "48 laws of power", "list lectures", "summarize neural style paper", "what is my latest download?", "did I download anything today?", "what did I receive yesterday?", "show files from past 7 days", "what are my oldest files?", "can you give me the list of files on 12 sep 2023").
    - If a 'TARGET DOCUMENT DEEP INSPECTION' block is provided above for a file, use its deep text to answer the user's detailed questions (summarize main findings/methodology, extract due dates, explain topics, cite questions).
    - TEMPORAL RECENCY & DATES:
      * If user asks about recency (e.g. "latest files", "newest download", "oldest files"), cite the exact matching files with bold names, paths in code spans, sizes, and exact modified timestamps / relative age.
-     * If user asks about exact dates or durations (e.g. "files from today", "yesterday", "past 7 days", "older than 30 days"), use the temporal audit stats and `relative_age`/`age_days` from the manifest to accurately answer.
-   - Directly inspect the real files manifest above. If matching documents exist (e.g. JavaTheCompleteReference.pdf for Java language), cite them with bold names, paths in code spans, sizes, and helpful details.
+     * If user asks about exact dates or durations (e.g. "files from today", "yesterday", "past 7 days", "older than 30 days", "files on 12 sep 2023"), use the temporal audit stats and `relative_age`/`modified_date` from the manifest to accurately answer.
+   - Directly inspect the real files manifest above. If matching documents exist (e.g. JavaTheCompleteReference.pdf for Java, the-48-laws-of-power... for 48 laws), cite them with bold names, paths in code spans, sizes, and helpful details.
    - For folder listing or inventory requests, provide a clean, grouped markdown overview of the files.
    - For status or audit checks ("any more sorting for download?"), summarize what unorganized files remain or praise the clean state.
    - CRITICAL RULE: For "query_info", "actions" MUST ALWAYS be an empty list []. NEVER propose file mutations or actions for read-only queries!
@@ -2664,7 +2744,7 @@ Target Folder: "{target_folder}"
     gemini_resp = call_gemini_json(unified_system_prompt, user_query_text)
 
     # Process Unified Gemini Output
-    if gemini_resp and isinstance(gemini_resp, dict):
+    if gemini_resp and isinstance(gemini_resp, dict) and gemini_resp.get("type"):
         resp_type = (gemini_resp.get("type") or "conversation").lower()
         resp_message = gemini_resp.get("message") or ""
         raw_actions = gemini_resp.get("actions") or []
@@ -2674,6 +2754,14 @@ Target Folder: "{target_folder}"
             "👥 Separate Peer Documents",
             "🏷️ Clean Download Names"
         ]
+
+        model_source = gemini_resp.get("_model_used") or "gemini-2.5-flash"
+        is_llm = True
+        model_footer = f"\n\n---\n*⚡ Model: {model_source}*"
+        if resp_message and model_footer not in resp_message:
+            resp_message += model_footer
+
+        print(f"[Storage Copilot Response] Prompt: '{raw_prompt}' -> Model: '{model_source}' (is_llm={is_llm}) | Type: '{resp_type}'")
 
         if resp_type == "plan" and raw_actions:
             manifest_paths = {m["path"].lower(): m["path"] for m in manifest}
@@ -2714,6 +2802,8 @@ Target Folder: "{target_folder}"
                     "type": "plan",
                     "message": resp_message or f"I've inspected your storage ({len(manifest)} real files on disk) and synthesized an Action Plan.",
                     "version": APP_VERSION,
+                    "model_source": model_source,
+                    "is_llm": is_llm,
                     "actions": formatted_actions,
                     "plan": action_plan,
                     "quick_chips": quick_chips
@@ -2725,6 +2815,8 @@ Target Folder: "{target_folder}"
                 "type": final_type,
                 "message": resp_message or f"I've reviewed your storage in `{target_folder}/`.",
                 "version": APP_VERSION,
+                "model_source": model_source,
+                "is_llm": is_llm,
                 "actions": [],
                 "quick_chips": quick_chips
             })
@@ -2980,9 +3072,16 @@ Target Folder: "{target_folder}"
             step_idx += 1
 
     else:
-        # Check if user prompt targets a specific document by name with an action verb
-        action_verbs = ("move", "rename", "put", "transfer", "trash", "delete", "file", "place")
-        has_action_intent = any(v in lower_p for v in action_verbs) or "." in raw_prompt
+        # Check if user prompt is an explicit informational query or content inquiry
+        is_explicit_query = any(lower_p.startswith(q) for q in (
+            "can you", "could you", "what", "which", "where", "how many", "list", "show", "find", "search", "tell me", "is there", "do i have"
+        )) or any(k in lower_p for k in (
+            "what's the oldest", "whats the oldest", "what is the oldest", "oldest file", "newest file", "latest file", "list of files", "list files", "law of power", "laws of power", "java", "complete reference"
+        )) or is_oldest_req or ("today" in lower_p) or ("yesterday" in lower_p)
+
+        true_action_verbs = ("move", "rename", "relocate", "transfer", "trash", "delete", "organize", "sort", "tidy", "clean")
+        has_action_verb = any(re.search(rf"\b{v}\b", lower_p) for v in true_action_verbs)
+        has_action_intent = has_action_verb and not is_explicit_query
 
         specific_matches = []
         if has_action_intent:
@@ -3014,18 +3113,19 @@ Target Folder: "{target_folder}"
                 })
                 step_idx += 1
         else:
-            # Check for informational query / temporal search intent in offline mode
-            is_query_intent = any(k in lower_p for k in (
+            # Informational query / temporal search intent in offline mode
+            is_query_intent = is_explicit_query or any(k in lower_p for k in (
                 "find", "search", "list", "show", "what", "where", "how many", "which",
                 "latest", "newest", "oldest", "recent", "today", "yesterday", "receipt", "lecture", "book", "voucher"
             )) and not any(k in lower_p for k in ("what else", "what can you do", "who are you", "what other", "suggestions"))
 
-            if is_query_intent and not has_action_intent:
+            if is_query_intent:
                 matched_items = []
-                if any(w in lower_p for w in ("latest", "newest", "most recent")):
-                    matched_items = sorted_by_newest[:5]
-                elif any(w in lower_p for w in ("oldest", "earliest")):
-                    matched_items = sorted_by_newest[-5:] if sorted_by_newest else []
+                if is_oldest_req or any(w in lower_p for w in ("oldest", "earliest")):
+                    matched_items = sorted_by_newest[-10:] if sorted_by_newest else []
+                    matched_items.reverse()
+                elif any(w in lower_p for w in ("latest", "newest", "most recent")):
+                    matched_items = sorted_by_newest[:10]
                 elif "today" in lower_p:
                     matched_items = [f for f in manifest if f.get("relative_age") == "Today"]
                 elif "yesterday" in lower_p:
@@ -3035,21 +3135,31 @@ Target Folder: "{target_folder}"
                 elif any(w in lower_p for w in ("lecture", "notes", "assignment", "academic", "university")):
                     matched_items = [f for f in manifest if classify_document(f["name"], f.get("snippet") or "")["is_academic_study"]]
                 else:
-                    words = [w for w in re.findall(r"\w+", lower_p) if len(w) > 3 and w not in ("find", "search", "list", "show", "files", "download", "documents")]
-                    matched_items = [f for f in manifest if any(w in f["name"].lower() or w in (f.get("snippet") or "").lower() for w in words)]
+                    # Query relevance and keyword matching
+                    matched_items = [f for f in manifest if f.get("query_relevance", 0.0) > 0]
+                    if not matched_items:
+                        words = [w for w in re.findall(r"\w+", lower_p) if len(w) > 2 and w not in ("find", "search", "list", "show", "files", "download", "documents", "give", "can", "you", "the")]
+                        matched_items = [f for f in manifest if any(w in f["name"].lower() or w in (f.get("snippet") or "").lower() for w in words)]
+
+                offline_source = "offline-heuristic"
+                offline_is_llm = False
+                offline_footer = "\n\n---\n*⚠️ Mode: Local Offline Heuristic (Gemini bypassed or unavailable)*"
 
                 if matched_items:
                     lines = [f"Found **{len(matched_items)} matching document(s)** in `{target_folder}/`:\n"]
-                    for m in matched_items[:10]:
-                        lines.append(f"- **{m['name']}** (`{m['path']}`, {m['size_kb']} KB, {m.get('relative_age', 'Unknown')})")
-                    msg = "\n".join(lines)
+                    for m in matched_items[:15]:
+                        lines.append(f"- **{m['name']}** (`{m['path']}`, {m['size_kb']} KB, {m.get('modified_date') or m.get('relative_age', 'Unknown')})")
+                    msg = "\n".join(lines) + offline_footer
                 else:
-                    msg = f"I scanned `{target_folder}/` ({len(manifest)} files indexed) but could not locate documents matching '{raw_prompt}'."
+                    msg = f"I scanned `{target_folder}/` ({len(manifest)} files indexed) but could not locate documents matching '{raw_prompt}'." + offline_footer
 
+                print(f"[Storage Copilot Response] Prompt: '{raw_prompt}' -> Model: '{offline_source}' (is_llm={offline_is_llm}) | Type: 'query_info'")
                 return jsonify({
                     "type": "query_info",
                     "message": msg,
                     "version": APP_VERSION,
+                    "model_source": offline_source,
+                    "is_llm": offline_is_llm,
                     "actions": [],
                     "quick_chips": [
                         "📋 Sort Student Vouchers",
@@ -3060,6 +3170,10 @@ Target Folder: "{target_folder}"
                 })
 
             # Prompt is general or advice-seeking: provide articulate guidance response, ZERO unneeded file mutations
+            offline_source = "offline-heuristic"
+            offline_is_llm = False
+            offline_footer = "\n\n---\n*⚠️ Mode: Local Offline Heuristic (Gemini bypassed or unavailable)*"
+            print(f"[Storage Copilot Response] Prompt: '{raw_prompt}' -> Model: '{offline_source}' (is_llm={offline_is_llm}) | Type: 'conversation'")
             return jsonify({
                 "type": "conversation",
                 "message": (
@@ -3071,8 +3185,11 @@ Target Folder: "{target_folder}"
                     f"- 🏷️ **Clean Cryptic Downloads**: Standardize messy WhatsApp downloads (`DOC-*.pdf`) into descriptive names.\n"
                     f"- 🗑️ **Cleanup**: Soft-delete temporary cache files and old screenshots into `.agent_trash`.\n\n"
                     f"Whenever you'd like me to formulate a plan, simply ask (e.g., *\"Organize all my university files\"* or *\"Sort student vouchers\"*)!"
+                    + offline_footer
                 ),
                 "version": APP_VERSION,
+                "model_source": offline_source,
+                "is_llm": offline_is_llm,
                 "actions": [],
                 "quick_chips": [
                     "📋 Sort Student Vouchers",
@@ -3082,14 +3199,22 @@ Target Folder: "{target_folder}"
                 ]
             })
 
+    offline_source = "offline-heuristic"
+    offline_is_llm = False
+    offline_footer = "\n\n---\n*⚠️ Mode: Local Offline Heuristic (Gemini bypassed or unavailable)*"
+
     if not plan_actions:
+        print(f"[Storage Copilot Response] Prompt: '{raw_prompt}' -> Model: '{offline_source}' (is_llm={offline_is_llm}) | Type: 'conversation'")
         return jsonify({
             "type": "conversation",
             "message": (
                 f"ℹ️ No eligible documents found in '{target_folder}/' matching \"{raw_prompt}\".\n\n"
                 f"Inspected {len(manifest)} real files on disk. None required modification under this criteria."
+                + offline_footer
             ),
             "version": APP_VERSION,
+            "model_source": offline_source,
+            "is_llm": offline_is_llm,
             "actions": [],
             "quick_chips": [
                 "📋 Sort Student Vouchers",
@@ -3111,10 +3236,13 @@ Target Folder: "{target_folder}"
         "actions": formatted_actions
     }
 
+    print(f"[Storage Copilot Response] Prompt: '{raw_prompt}' -> Model: '{offline_source}' (is_llm={offline_is_llm}) | Type: 'plan'")
     return jsonify({
         "type": "plan",
-        "message": f"I've inspected your storage ({len(manifest)} real files on disk) and synthesized an Action Plan for: \"{plan_desc}\"",
+        "message": f"I've inspected your storage ({len(manifest)} real files on disk) and synthesized an Action Plan for: \"{plan_desc}\"" + offline_footer,
         "version": APP_VERSION,
+        "model_source": offline_source,
+        "is_llm": offline_is_llm,
         "actions": formatted_actions,
         "plan": action_plan,
         "quick_chips": [
