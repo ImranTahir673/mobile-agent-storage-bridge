@@ -1251,6 +1251,16 @@ def execute_plan():
                 "timestamp": now_ts
             })
 
+        batch_info = plan.get("batch_info")
+        if batch_info and isinstance(batch_info, dict):
+            target_f = batch_info.get("target_folder", "Download")
+            try:
+                t_dir = resolve_safe_path(target_f)
+                unorg_cnt = sum(1 for e in os.scandir(t_dir) if e.is_file() and not e.name.startswith("."))
+                batch_info["remaining_files"] = unorg_cnt
+            except Exception:
+                pass
+
         return jsonify({
             "status": "success",
             "batch_id": plan_id,
@@ -1259,7 +1269,8 @@ def execute_plan():
             "chunks_processed": len(chunks),
             "chunk_size": EXECUTION_CHUNK_SIZE,
             "gradual_execution": True,
-            "execution_summary": execution_summary
+            "execution_summary": execution_summary,
+            "batch_info": batch_info
         })
 
     except Exception as e:
@@ -1820,21 +1831,22 @@ def format_plan_badges(plan_actions: list, peer_names: list, manifest_lookup: di
     return formatted_actions
 
 GEMINI_MODELS = [
-    "gemini-3.1-flash-lite",
-    "gemini-3-flash-preview",
-    "gemini-3.1-flash-lite-preview",
     "gemini-3.5-flash",
+    "gemini-3.6-flash",
     "gemini-3.5-flash-lite",
+    "gemini-3.1-flash-lite",
+    "gemini-3.7-flash",
+    "gemini-3.8-flash",
     "gemini-flash-latest"
 ]
 
 def call_gemini_json(system_prompt: str, user_prompt: str) -> dict:
     """
-    Sends structured JSON prompt to Gemini API with robust model fallback:
-    1. gemini-2.5-flash (high-availability stable production workhorse)
-    2. gemini-3.1-flash-lite (fastest, active)
-    3. gemini-3.1-flash-lite-preview
-    4. gemini-2.5-flash-lite
+    Sends structured JSON prompt to Gemini API with robust model fallback and backoff retry:
+    1. gemini-3.5-flash (primary stable workhorse)
+    2. gemini-3.6-flash (secondary high-throughput)
+    3. gemini-3.5-flash-lite (fast)
+    4. gemini-3.1-flash-lite
     """
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
@@ -1850,7 +1862,7 @@ def call_gemini_json(system_prompt: str, user_prompt: str) -> dict:
     for model in GEMINI_MODELS:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
         try:
-            resp = requests.post(url, json=payload, timeout=15)
+            resp = requests.post(url, json=payload, timeout=20)
             if resp.status_code == 200:
                 data = resp.json()
                 candidates = data.get("candidates", [])
@@ -1868,8 +1880,25 @@ def call_gemini_json(system_prompt: str, user_prompt: str) -> dict:
                         except Exception:
                             continue
             elif resp.status_code in (429, 503):
-                print(f"[Storage Copilot Gemini] Model '{model}' returned HTTP {resp.status_code} (throttled). Backing off 1s...")
-                time.sleep(1.0)
+                print(f"[Storage Copilot Gemini] Model '{model}' returned HTTP {resp.status_code} (throttled). Retrying with 2s backoff...")
+                time.sleep(2.0)
+                try:
+                    retry_resp = requests.post(url, json=payload, timeout=20)
+                    if retry_resp.status_code == 200:
+                        data = retry_resp.json()
+                        candidates = data.get("candidates", [])
+                        if candidates:
+                            parts = candidates[0].get("content", {}).get("parts", [])
+                            if parts:
+                                text = parts[0].get("text", "")
+                                parsed = extract_json_plan(text)
+                                if parsed:
+                                    parsed["_model_used"] = model
+                                    parsed["_is_llm"] = True
+                                    print(f"[Storage Copilot Gemini] Successfully received response on retry via model '{model}'.")
+                                    return parsed
+                except Exception:
+                    pass
                 continue
             else:
                 print(f"[Storage Copilot Gemini] Model '{model}' returned HTTP {resp.status_code}.")
@@ -1908,6 +1937,24 @@ def call_gemini_text(system_prompt: str, user_prompt: str) -> str:
                         if text and text.strip():
                             print(f"[Storage Copilot Gemini] Successfully received conversational text via model '{model}'.")
                             return text.strip()
+            elif resp.status_code in (429, 503):
+                print(f"[Storage Copilot Gemini] Model '{model}' returned HTTP {resp.status_code} (throttled). Retrying with 2s backoff...")
+                time.sleep(2.0)
+                try:
+                    retry_resp = requests.post(url, json=payload, timeout=30)
+                    if retry_resp.status_code == 200:
+                        data = retry_resp.json()
+                        candidates = data.get("candidates", [])
+                        if candidates:
+                            parts = candidates[0].get("content", {}).get("parts", [])
+                            if parts:
+                                text = parts[0].get("text", "")
+                                if text and text.strip():
+                                    print(f"[Storage Copilot Gemini] Successfully received conversational text on retry via model '{model}'.")
+                                    return text.strip()
+                except Exception:
+                    pass
+                continue
             else:
                 print(f"[Storage Copilot Gemini] Model '{model}' returned HTTP {resp.status_code}.")
                 continue
@@ -2052,6 +2099,84 @@ def normalize_user_prompt(text: str) -> str:
     t = re.sub(r"\b(?:dups|dupes|dupe|dupplicates)\b", "duplicates", t, flags=re.I)
     t = re.sub(r"\bdedup\b", "deduplicate", t, flags=re.I)
     return t
+
+# ==============================================================================
+# File Format Categorization & Unorganized File Detection
+# ==============================================================================
+FORMAT_CATEGORIES = {
+    "PDFs": {
+        "folder": "PDFs",
+        "label": "PDF Documents",
+        "emoji": "📄",
+        "extensions": {".pdf"}
+    },
+    "APKs": {
+        "folder": "APKs",
+        "label": "Android Packages (APK)",
+        "emoji": "📦",
+        "extensions": {".apk", ".xapk", ".apks"}
+    },
+    "Images": {
+        "folder": "Images",
+        "label": "Photos & Images",
+        "emoji": "🖼️",
+        "extensions": {".jpg", ".jpeg", ".png", ".webp", ".gif", ".svg", ".bmp", ".heic"}
+    },
+    "Audio": {
+        "folder": "Audio",
+        "label": "Audio & Voice Notes",
+        "emoji": "🎵",
+        "extensions": {".mp3", ".m4a", ".wav", ".aac", ".ogg", ".opus", ".amr", ".flac"}
+    },
+    "Videos": {
+        "folder": "Videos",
+        "label": "Videos & Clips",
+        "emoji": "🎬",
+        "extensions": {".mp4", ".mkv", ".mov", ".avi", ".webm", ".3gp"}
+    },
+    "Documents": {
+        "folder": "Documents",
+        "label": "Word & Office Docs",
+        "emoji": "📝",
+        "extensions": {".docx", ".doc", ".pptx", ".ppt", ".xlsx", ".xls", ".txt", ".csv"}
+    },
+    "Archives": {
+        "folder": "Archives",
+        "label": "Compressed Archives",
+        "emoji": "🗜️",
+        "extensions": {".zip", ".rar", ".7z", ".tar", ".gz"}
+    }
+}
+
+def get_format_category(filename: str) -> dict:
+    """Matches a filename to its format category dictionary."""
+    ext = os.path.splitext(filename)[1].lower()
+    for cat_name, info in FORMAT_CATEGORIES.items():
+        if ext in info["extensions"]:
+            return info
+    return {
+        "folder": "Other",
+        "label": "Other Files",
+        "emoji": "📁",
+        "extensions": set()
+    }
+
+def get_unorganized_download_files(target_dir: str) -> list:
+    """
+    Returns list of unorganized loose files directly in the root of target_dir.
+    Files already placed in subfolders (e.g. Download/PDFs/) are considered organized.
+    """
+    if not os.path.exists(target_dir) or not os.path.isdir(target_dir):
+        return []
+    unorganized = []
+    try:
+        for entry in os.scandir(target_dir):
+            if entry.is_file() and not entry.name.startswith("."):
+                unorganized.append(entry)
+    except Exception:
+        pass
+    unorganized.sort(key=lambda e: e.name.lower())
+    return unorganized
 
 def generate_dynamic_storage_advice(base_dir: str, target_folder: str = "Download", owner_name: str = "Imran Tahir", peer_names: list = None) -> str:
     """
@@ -2325,6 +2450,8 @@ def propose_plan():
             normalized_prompt = "separate peer documents"
         elif any(p in lower_asst for p in ("tuition voucher", "fee voucher", "fee slip", "student voucher", "student vouchers")):
             normalized_prompt = "sort student vouchers"
+        elif any(p in lower_asst for p in ("file format", "format subfolders", "group by format", "by format", "respective folders", "format", "unorganized files", "files ready to organize")):
+            normalized_prompt = "process next batch of files in download"
         else:
             normalized_prompt = "organize all my university files"
 
@@ -2590,6 +2717,207 @@ def propose_plan():
                 ]
             })
 
+    # =========================================================================
+    # FAST-PATH 1: View Organized Folders Reconnaissance
+    # =========================================================================
+    is_view_organized_folders = any(k in lower_norm or k in lower_raw for k in (
+        "view organized folders", "view organized folder", "see organized folders",
+        "show organized folders", "check organized folders", "list organized folders",
+        "inspect organized folders", "organized folders"
+    ))
+    if is_view_organized_folders:
+        dl_subfolders = []
+        if os.path.exists(target_dir) and os.path.isdir(target_dir):
+            for entry in os.scandir(target_dir):
+                if entry.is_dir() and not entry.name.startswith("."):
+                    cnt = sum(1 for e in os.scandir(entry.path) if e.is_file() and not e.name.startswith("."))
+                    dl_subfolders.append((entry.name, cnt))
+        
+        doc_dir = os.path.join(BASE_STORAGE_DIR, "Documents")
+        doc_subfolders = []
+        if os.path.exists(doc_dir) and os.path.isdir(doc_dir):
+            for root, dirs, files_in_dir in os.walk(doc_dir):
+                dirs[:] = [d for d in dirs if not d.startswith(".")]
+                rel_root = os.path.relpath(root, BASE_STORAGE_DIR).replace("\\", "/")
+                file_count = sum(1 for f in files_in_dir if not f.startswith("."))
+                if file_count > 0:
+                    doc_subfolders.append((rel_root, file_count))
+
+        unorg_files = get_unorganized_download_files(target_dir)
+        
+        lines = [
+            f"### 📂 Organized Folders Status for {owner_name}\n",
+            "Here is the verified status of organized folders across your storage:\n"
+        ]
+        if dl_subfolders:
+            lines.append(f"#### 📥 `{target_folder}/` Format Subfolders:")
+            for sname, scnt in dl_subfolders:
+                cat = FORMAT_CATEGORIES.get(sname, {"emoji": "📁"})
+                lines.append(f"- {cat.get('emoji', '📁')} `{target_folder}/{sname}/`: **{scnt} files**")
+            lines.append("")
+        else:
+            lines.append(f"#### 📥 `{target_folder}/` Subfolders:\n- *No format subfolders created yet.*")
+
+        if doc_subfolders:
+            lines.append("#### 📁 `Documents/` Academic & Personal Taxonomy:")
+            for proot, pcnt in doc_subfolders[:15]:
+                lines.append(f"- 📂 `{proot}/`: **{pcnt} files**")
+            lines.append("")
+
+        if unorg_files:
+            lines.append(f"📊 **Unorganized files remaining in `{target_folder}/` root:** **{len(unorg_files)} files**.")
+            lines.append("💡 *Say **'Sort all the file types together in the downloads'** to group them into dedicated subfolders.*")
+        else:
+            lines.append(f"✨ **All files in `{target_folder}/` are organized!** No loose unorganized files remain.")
+
+        chips = ["⏩ Process Next Batch", "🧹 Clean Duplicates", "📋 Sort Student Vouchers"] if unorg_files else ["🧹 Clean Duplicates", "📋 Sort Student Vouchers", "👥 Separate Peer Documents"]
+        return jsonify({
+            "type": "query_info",
+            "message": "\n".join(lines),
+            "version": APP_VERSION,
+            "actions": [],
+            "quick_chips": chips
+        })
+
+    # =========================================================================
+    # FAST-PATH 2: Format-Based Sorting & Gradual Micro-Batch Execution
+    # =========================================================================
+    format_sorting_keywords = (
+        "file types together", "file types", "by format", "by file type", "by type",
+        "group by format", "group files by format", "sort files by format",
+        "group by type", "sort by format", "sort format", "group format",
+        "format subfolders", "group all files by format"
+    )
+    is_format_sorting_intent = any(k in lower_norm or k in lower_raw for k in format_sorting_keywords) and any(w in lower_norm or w in lower_raw for w in ("sort", "group", "organize", "consolidate", "together", "separate", "move"))
+    is_next_batch_req = any(k in lower_norm or k in lower_raw for k in ("next batch", "process next batch", "continue batch", "run next batch"))
+    is_format_affirmative = is_pure_affirmative and any(k in lower_asst for k in ("format", "respective", "subfolders", "unorganized files", "files ready to organize"))
+
+    if is_format_sorting_intent or is_next_batch_req or is_format_affirmative:
+        unorg_files = get_unorganized_download_files(target_dir)
+
+        # EXECUTION MODE: Triggered on user confirmation ("yes", "proceed") or explicit "next batch" request
+        if is_next_batch_req or is_format_affirmative or "proceed" in lower_norm or "yes" in lower_norm or "go ahead" in lower_norm:
+            if not unorg_files:
+                return jsonify({
+                    "type": "conversation",
+                    "message": f"✨ **All files in `{target_folder}/` are already organized!**\n\nEvery file has been grouped into its dedicated format subfolder.",
+                    "version": APP_VERSION,
+                    "actions": [],
+                    "quick_chips": [
+                        "View organized folders",
+                        "🧹 Clean Duplicates",
+                        "📋 Sort Student Vouchers"
+                    ]
+                })
+
+            batch_size = 25
+            batch_slice = unorg_files[:batch_size]
+            remaining = len(unorg_files) - len(batch_slice)
+
+            actions = []
+            for idx, f in enumerate(batch_slice, 1):
+                cat = get_format_category(f.name)
+                dest_folder = cat["folder"]
+                actions.append({
+                    "action_id": f"step-{idx}",
+                    "type": "move",
+                    "badge": "FILE_MOVE",
+                    "badge_label": f"Move to {dest_folder}",
+                    "source": f"{target_folder}/{f.name}",
+                    "destination": f"{target_folder}/{dest_folder}/{f.name}",
+                    "rationale": f"Sort {cat['label']} into dedicated {target_folder}/{dest_folder}/ subfolder",
+                    "ai_inspected": False
+                })
+
+            plan_id = str(uuid.uuid4())
+            batch_info = {
+                "batch_size": len(actions),
+                "remaining_files": remaining,
+                "total_unorganized": len(unorg_files),
+                "target_folder": target_folder,
+                "mode": "format_sorting"
+            }
+            plan_desc = f"Format Sorting: Batch of {len(actions)} files into {target_folder}/ subfolders ({remaining} remaining)"
+            msg = (
+                f"Staging **Batch of {len(actions)} files** to move into dedicated format folders (`{target_folder}/PDFs/`, `{target_folder}/APKs/`, etc.).\n\n"
+                f"- **Remaining files after this batch:** **{remaining} files**\n\n"
+                "Review the proposed moves below and tap **Approve Selected** to execute."
+            )
+            return jsonify({
+                "type": "plan",
+                "message": msg,
+                "plan": {
+                    "plan_id": plan_id,
+                    "description": plan_desc,
+                    "actions": actions,
+                    "batch_info": batch_info
+                },
+                "actions": actions,
+                "batch_info": batch_info,
+                "version": APP_VERSION,
+                "quick_chips": [
+                    "⏩ Process Next Batch",
+                    "View organized folders",
+                    "🧹 Clean Duplicates"
+                ]
+            })
+
+        # PROPOSAL MODE: Show high-level summary breakdown and ask user permission
+        else:
+            if not unorg_files:
+                return jsonify({
+                    "type": "conversation",
+                    "message": f"✨ **All files in `{target_folder}/` are already organized!**\n\nNo loose unorganized files remain in the root directory.",
+                    "version": APP_VERSION,
+                    "actions": [],
+                    "quick_chips": [
+                        "View organized folders",
+                        "🧹 Clean Duplicates",
+                        "📋 Sort Student Vouchers"
+                    ]
+                })
+
+            cat_counts = defaultdict(int)
+            for f in unorg_files:
+                cat = get_format_category(f.name)
+                cat_counts[cat["folder"]] += 1
+
+            rows = []
+            for cat_name, info in FORMAT_CATEGORIES.items():
+                cnt = cat_counts.get(info["folder"], 0)
+                if cnt > 0:
+                    rows.append(f"| {info['emoji']} **{info['label']}** | `{target_folder}/{info['folder']}/` | **{cnt} files** |")
+            if cat_counts.get("Other", 0) > 0:
+                rows.append(f"| 📁 **Other Files** | `{target_folder}/Other/` | **{cat_counts['Other']} files** |")
+
+            table_md = "\n".join(rows)
+            msg = f"""Hello {owner_name}. I have analyzed your `{target_folder}/` directory and identified **{len(unorg_files)} unorganized files**.
+
+Here is the breakdown of files by format and their destination subfolders:
+
+| Format | Destination | Files Count |
+| :--- | :--- | :--- |
+{table_md}
+
+**Total:** **{len(unorg_files)} files** ready to organize.
+
+To ensure system stability and safety, files will be moved in batches (25 files per batch) with 1-Tap Undo available for every batch.
+
+**Would you like me to proceed with moving these files into their respective folders?**"""
+
+            return jsonify({
+                "type": "conversation",
+                "message": msg,
+                "actions": [],
+                "format_sorting_active": True,
+                "version": APP_VERSION,
+                "quick_chips": [
+                    "✅ Yes, Move All Files",
+                    "View organized folders",
+                    "❌ Cancel"
+                ]
+            })
+
     # Effective request context
     if is_pure_affirmative:
         last_asst_snippet = last_asst[:400].replace('\n', ' ') if last_asst else normalized_prompt
@@ -2650,6 +2978,23 @@ TARGET DOCUMENT DEEP INSPECTION FOR '{deep_inspected_doc}' (Up to 12,000 charact
         except Exception:
             pass
 
+    # Compact file manifest optimized for low token consumption and high Gemini throughput
+    compact_manifest = []
+    snippet_count = 0
+    for f in manifest_for_gemini[:120]:
+        item = {
+            "name": f["filename"],
+            "path": f["path"],
+            "size_kb": f["size_kb"],
+            "date": f["modified_date"],
+            "age": f["relative_age"]
+        }
+        if snippet_count < 6 and f.get("query_relevance", 0) > 0 and f.get("text_snippet") and f["text_snippet"] != "None (binary/image)":
+            item["snippet"] = f["text_snippet"][:250]
+            snippet_count += 1
+        compact_manifest.append(item)
+    compact_manifest_json = json.dumps(compact_manifest, separators=(',', ':'))
+
     # =========================================================================
     # UNIFIED GROUNDED GEMINI REASONING (Single Unified Pipeline Turn)
     # =========================================================================
@@ -2674,7 +3019,7 @@ TEMPORAL DIRECTORY AUDIT STATS (for target folder '{target_folder}/'):
 LIVE DIRECTORY STATUS FOR '{target_folder}/' (Sorted {'oldest first' if is_oldest_req else 'newest first'}):
 - Top-level subfolders: {", ".join(subfolders) if subfolders else "None"}
 - Direct files on disk ({len(manifest)} files indexed):
-{json.dumps([{k: v for k, v in f.items() if k not in ('mtime', 'query_relevance')} for f in manifest_for_gemini[:250]], indent=2)}
+{compact_manifest_json}
 {deep_context_block}
 
 YOUR AGENT PERSONA & CAPABILITIES:
@@ -2828,6 +3173,65 @@ Target Folder: "{target_folder}"
     plan_desc = ""
     created_dirs = set()
     step_idx = 1
+
+    # Check if user prompt is an explicit informational query or search intent FIRST
+    is_explicit_query = any(lower_p.startswith(q) for q in (
+        "can you", "could you", "what", "which", "where", "how many", "list", "show", "find", "search", "tell me", "is there", "do i have"
+    )) or any(k in lower_p for k in (
+        "what's the oldest", "whats the oldest", "what is the oldest", "oldest file", "newest file", "latest file", "list of files", "list files", "law of power", "laws of power", "java", "complete reference"
+    )) or is_oldest_req or ("today" in lower_p) or ("yesterday" in lower_p)
+
+    true_action_verbs = ("move", "rename", "relocate", "transfer", "trash", "delete", "organize", "sort", "tidy", "clean")
+    has_action_verb = any(re.search(rf"\b{v}\b", lower_p) for v in true_action_verbs)
+
+    if is_explicit_query and not has_action_verb:
+        matched_items = []
+        if is_oldest_req or any(w in lower_p for w in ("oldest", "earliest")):
+            matched_items = sorted_by_newest[-10:] if sorted_by_newest else []
+            matched_items.reverse()
+        elif any(w in lower_p for w in ("latest", "newest", "most recent")):
+            matched_items = sorted_by_newest[:10]
+        elif "today" in lower_p:
+            matched_items = [f for f in manifest if f.get("relative_age") == "Today"]
+        elif "yesterday" in lower_p:
+            matched_items = [f for f in manifest if f.get("relative_age") == "Yesterday"]
+        elif any(w in lower_p for w in ("receipt", "voucher", "fee", "bill", "invoice")):
+            matched_items = [f for f in manifest if any(k in f["name"].lower() or k in (f.get("snippet") or "").lower() for k in ("receipt", "voucher", "bill", "invoice", "fee"))]
+        elif any(w in lower_p for w in ("lecture", "notes", "assignment", "academic", "university")):
+            matched_items = [f for f in manifest if classify_document(f["name"], f.get("snippet") or "")["is_academic_study"]]
+        else:
+            matched_items = [f for f in manifest if f.get("query_relevance", 0.0) > 0]
+            if not matched_items:
+                words = [w for w in re.findall(r"\w+", lower_p) if len(w) > 2 and w not in ("find", "search", "list", "show", "files", "download", "documents", "give", "can", "you", "the")]
+                matched_items = [f for f in manifest if any(w in f["name"].lower() or w in (f.get("snippet") or "").lower() for w in words)]
+
+        offline_source = "offline-heuristic"
+        offline_is_llm = False
+        offline_footer = "\n\n---\n*⚠️ Mode: Local Offline Heuristic (Gemini bypassed or unavailable)*"
+
+        if matched_items:
+            lines = [f"Found **{len(matched_items)} matching document(s)** in `{target_folder}/`:\n"]
+            for m in matched_items[:15]:
+                lines.append(f"- **{m['name']}** (`{m['path']}`, {m['size_kb']} KB, {m.get('modified_date') or m.get('relative_age', 'Unknown')})")
+            msg = "\n".join(lines) + offline_footer
+        else:
+            msg = f"I scanned `{target_folder}/` ({len(manifest)} files indexed) but could not locate documents matching '{raw_prompt}'." + offline_footer
+
+        print(f"[Storage Copilot Response] Prompt: '{raw_prompt}' -> Model: '{offline_source}' (is_llm={offline_is_llm}) | Type: 'query_info'")
+        return jsonify({
+            "type": "query_info",
+            "message": msg,
+            "version": APP_VERSION,
+            "model_source": offline_source,
+            "is_llm": offline_is_llm,
+            "actions": [],
+            "quick_chips": [
+                "📋 Sort Student Vouchers",
+                "👥 Separate Peer Documents",
+                "🏷️ Clean Download Names",
+                "🧹 Clean Duplicates"
+            ]
+        })
 
     if "voucher" in lower_p or "fee" in lower_p or "challan" in lower_p:
         plan_desc = "Organize student fee vouchers into academic and peer directories"
