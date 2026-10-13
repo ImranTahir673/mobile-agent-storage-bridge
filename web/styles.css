@@ -812,6 +812,57 @@ html, body {
   height: 4px;
 }
 
+/* Responsive Markdown Table Styling */
+.table-responsive {
+  width: 100%;
+  overflow-x: auto;
+  margin: 10px 0;
+  border-radius: var(--radius-sm);
+  -webkit-overflow-scrolling: touch;
+}
+
+.md-table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: 12px;
+  background: rgba(15, 23, 42, 0.7);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+
+.md-table th {
+  background: rgba(30, 41, 59, 0.9);
+  color: #94A3B8;
+  font-weight: 700;
+  text-transform: uppercase;
+  font-size: 10.5px;
+  letter-spacing: 0.5px;
+  padding: 8px 12px;
+  text-align: left;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.md-table td {
+  padding: 8px 12px;
+  color: #E2E8F0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+  vertical-align: middle;
+}
+
+.md-table tbody tr:nth-child(even) td {
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.md-table tbody tr:hover td {
+  background: rgba(99, 102, 241, 0.08);
+}
+
+.md-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
 /* Query Info Card Special Styling */
 .message-card.query-card {
   border: 1px solid rgba(6, 182, 212, 0.35);
@@ -852,6 +903,12 @@ html, body {
   background: rgba(139, 92, 246, 0.15);
   border: 1px solid rgba(139, 92, 246, 0.4);
   color: #C4B5FD;
+}
+
+.model-badge.badge-deterministic {
+  background: rgba(16, 185, 129, 0.15);
+  border: 1px solid rgba(16, 185, 129, 0.4);
+  color: #6EE7B7;
 }
 
 .model-badge.badge-offline {

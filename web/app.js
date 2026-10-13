@@ -75,7 +75,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }, duration);
   }
 
-  const EXPECTED_VERSION = 'v0.6-live';
+  const EXPECTED_VERSION = 'v0.6.2-live';
 
   async function fetchHealth() {
     try {
@@ -277,10 +277,12 @@ document.addEventListener('DOMContentLoaded', () => {
   // ==============================================================================
   // Conversation History Storage & Dynamic Chips
   // ==============================================================================
-  const STORAGE_KEY = 'storage_bridge_chat_history_v1';
+  const STORAGE_KEY = 'storage_bridge_chat_history_v2';
+  const BUILD_STORAGE_KEY = 'storage_bridge_last_build_id';
 
   function saveChatHistory() {
     try {
+      sessionStorage.setItem(STORAGE_KEY, JSON.stringify(state.conversationHistory));
       localStorage.setItem(STORAGE_KEY, JSON.stringify(state.conversationHistory));
     } catch (e) {
       console.warn('Could not save conversation history:', e);
@@ -289,11 +291,12 @@ document.addEventListener('DOMContentLoaded', () => {
 
   function loadChatHistory() {
     try {
-      const saved = localStorage.getItem(STORAGE_KEY);
+      const saved = sessionStorage.getItem(STORAGE_KEY) || localStorage.getItem(STORAGE_KEY);
       if (!saved) return false;
       const history = JSON.parse(saved);
       if (!Array.isArray(history) || history.length === 0) return false;
       
+      elements.conversationStream.innerHTML = '';
       state.conversationHistory = history;
       history.forEach(item => {
         if (item.role === 'user') {
@@ -318,9 +321,10 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
-  function clearChatHistory() {
+  function clearChatHistory(notifyUser = true) {
     try {
       localStorage.removeItem(STORAGE_KEY);
+      sessionStorage.removeItem(STORAGE_KEY);
     } catch (e) {}
     state.conversationHistory = [];
     state.activePlan = null;
@@ -343,7 +347,9 @@ document.addEventListener('DOMContentLoaded', () => {
         </div>
       </div>
     `;
-    showToast('✓ Chat history cleared', 'info');
+    if (notifyUser) {
+      showToast('🔄 Fresh testing session initialized', 'info');
+    }
   }
 
   function updateQuickChips(chips) {
@@ -421,9 +427,56 @@ document.addEventListener('DOMContentLoaded', () => {
     let html = '';
     let inUl = false;
     let inOl = false;
+    let inTable = false;
+    let tableHeadRendered = false;
 
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i];
+      const trimmed = line.trim();
+
+      // Markdown Table row detection (| cell | cell |)
+      const isTableRow = trimmed.startsWith('|') && trimmed.endsWith('|') && trimmed.length > 2;
+      const isTableDivider = isTableRow && /^\|(\s*:?-+:?\s*\|)+$/.test(trimmed);
+
+      if (isTableRow) {
+        if (inUl) { html += '</ul>'; inUl = false; }
+        if (inOl) { html += '</ol>'; inOl = false; }
+
+        if (!inTable) {
+          html += '<div class="table-responsive"><table class="md-table">';
+          inTable = true;
+          tableHeadRendered = false;
+        }
+
+        if (isTableDivider) {
+          continue;
+        }
+
+        const cells = trimmed.slice(1, -1).split('|').map(c => c.trim());
+        const nextLine = (i + 1 < lines.length) ? lines[i + 1].trim() : '';
+        const nextIsDivider = nextLine.startsWith('|') && /^\|(\s*:?-+:?\s*\|)+$/.test(nextLine);
+
+        if (!tableHeadRendered && nextIsDivider) {
+          html += '<thead><tr>';
+          cells.forEach(c => {
+            html += `<th>${formatInlineMarkdown(c)}</th>`;
+          });
+          html += '</tr></thead><tbody>';
+          tableHeadRendered = true;
+        } else {
+          html += '<tr>';
+          cells.forEach(c => {
+            html += `<td>${formatInlineMarkdown(c)}</td>`;
+          });
+          html += '</tr>';
+        }
+        continue;
+      } else if (inTable) {
+        if (tableHeadRendered) html += '</tbody>';
+        html += '</table></div>';
+        inTable = false;
+        tableHeadRendered = false;
+      }
 
       // Check unordered list item (* or -)
       const ulMatch = line.match(/^(\s*)[*-]\s+(.+)$/);
@@ -464,17 +517,38 @@ document.addEventListener('DOMContentLoaded', () => {
 
     if (inUl) html += '</ul>';
     if (inOl) html += '</ol>';
+    if (inTable) {
+      if (tableHeadRendered) html += '</tbody>';
+      html += '</table></div>';
+    }
 
     return html;
+  }
+
+  function renderModelBadgeHtml(modelSource, isLlm) {
+    if (!modelSource) return '';
+    if (isLlm) {
+      return `
+        <span class="model-badge badge-llm" title="Generated via Google Gemini Cloud AI (${escapeHtml(modelSource)})">
+          ✨ ${escapeHtml(modelSource)}
+        </span>`;
+    }
+    if (modelSource === 'deterministic-engine' || modelSource === 'local-fastpath') {
+      return `
+        <span class="model-badge badge-deterministic" title="Deterministic high-speed on-device engine (0ms latency, 100% reliable)">
+          ⚡ High-Speed Engine
+        </span>`;
+    }
+    return `
+      <span class="model-badge badge-offline" title="Executed via local offline engine">
+        🛡️ Local Engine (Offline)
+      </span>`;
   }
 
   function appendAssistantMessage(text, modelSource = null, isLlm = false, shouldScroll = true) {
     const card = document.createElement('div');
     card.className = 'message-card assistant';
-    const modelBadgeHtml = modelSource ? `
-      <span class="model-badge ${isLlm ? 'badge-llm' : 'badge-offline'}" title="${isLlm ? 'Generated by ' + escapeHtml(modelSource) : 'Local Heuristic Engine'}">
-        ${isLlm ? '✨ ' + escapeHtml(modelSource) : '⚠️ Offline Heuristic'}
-      </span>` : '';
+    const modelBadgeHtml = renderModelBadgeHtml(modelSource, isLlm);
 
     card.innerHTML = `
       <div class="message-header">
@@ -498,10 +572,7 @@ document.addEventListener('DOMContentLoaded', () => {
   function appendQueryInfoMessage(text, queryResults, modelSource = null, isLlm = false, shouldScroll = true) {
     const card = document.createElement('div');
     card.className = 'message-card assistant query-card';
-    const modelBadgeHtml = modelSource ? `
-      <span class="model-badge ${isLlm ? 'badge-llm' : 'badge-offline'}" title="${isLlm ? 'Generated by ' + escapeHtml(modelSource) : 'Local Heuristic Engine'}">
-        ${isLlm ? '✨ ' + escapeHtml(modelSource) : '⚠️ Offline Heuristic'}
-      </span>` : '';
+    const modelBadgeHtml = renderModelBadgeHtml(modelSource, isLlm);
 
     card.innerHTML = `
       <div class="message-header">
@@ -1221,27 +1292,10 @@ document.addEventListener('DOMContentLoaded', () => {
   // ==============================================================================
   // Event Bindings
   // ==============================================================================
-  // Clear Chat History Button (Mobile 2-Tap Safety Pattern)
+  // Clear Chat History Button (1-Tap Fresh Session Reset)
   if (elements.clearChatBtn) {
-    let clearConfirmTimeout = null;
     elements.clearChatBtn.addEventListener('click', () => {
-      if (elements.clearChatBtn.dataset.confirming === 'true') {
-        clearTimeout(clearConfirmTimeout);
-        elements.clearChatBtn.dataset.confirming = 'false';
-        elements.clearChatBtn.classList.remove('confirm-active');
-        elements.clearChatBtn.title = 'Clear Chat History';
-        clearChatHistory();
-      } else {
-        elements.clearChatBtn.dataset.confirming = 'true';
-        elements.clearChatBtn.classList.add('confirm-active');
-        elements.clearChatBtn.title = 'Tap again to confirm clearing chat';
-        showToast('Tap trash icon again to clear conversation', 'info', 2800);
-        clearConfirmTimeout = setTimeout(() => {
-          elements.clearChatBtn.dataset.confirming = 'false';
-          elements.clearChatBtn.classList.remove('confirm-active');
-          elements.clearChatBtn.title = 'Clear Chat History';
-        }, 3000);
-      }
+      clearChatHistory(true);
     });
   }
 
@@ -1392,8 +1446,21 @@ document.addEventListener('DOMContentLoaded', () => {
   // Startup Initialization (initApp)
   // ==============================================================================
   async function initApp() {
-    loadChatHistory();
     const healthData = await fetchHealth();
+    if (healthData && healthData.build_id) {
+      const lastBuildId = localStorage.getItem('storage_bridge_last_build_id');
+      if (lastBuildId && lastBuildId !== healthData.build_id) {
+        console.log(`[Fresh Start] Build updated (${lastBuildId} -> ${healthData.build_id}). Starting clean session.`);
+        clearChatHistory(false);
+        showToast('✨ Fresh testing session ready for new build', 'info', 3000);
+      } else {
+        loadChatHistory();
+      }
+      localStorage.setItem('storage_bridge_last_build_id', healthData.build_id);
+    } else {
+      loadChatHistory();
+    }
+
     if (healthData && healthData.version && healthData.version !== EXPECTED_VERSION) {
       console.warn(`[initApp] Bridge version mismatch: server reported ${healthData.version}, expected ${EXPECTED_VERSION}`);
       const versionEl = document.getElementById('bridge-version');

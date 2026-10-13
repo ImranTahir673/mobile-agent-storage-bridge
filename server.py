@@ -13,7 +13,10 @@ import requests
 from flask import Flask, request, jsonify, send_from_directory
 
 app = Flask("MobileStorageBridge")
-APP_VERSION = "v0.6-live"
+APP_VERSION = "v0.6.2-live"
+SERVER_BOOT_TIME = int(time.time())
+SERVER_BOOT_ID = f"build-v0.6.2-{SERVER_BOOT_TIME}"
+GEMINI_QUOTA_BLOCKED_UNTIL = 0.0
 
 # ==============================================================================
 # Environment Configuration (.env loader)
@@ -491,6 +494,7 @@ def health():
     return jsonify({
         "status": "running",
         "version": APP_VERSION,
+        "build_id": SERVER_BOOT_ID,
         "engine": f"Android Storage Bridge {APP_VERSION}",
         "base_dir": BASE_DIR,
         "ledger_active": True
@@ -501,6 +505,7 @@ def health_check():
     return jsonify({
         "status": "running",
         "version": APP_VERSION,
+        "build_id": SERVER_BOOT_ID,
         "engine": f"Android Storage Bridge {APP_VERSION}",
         "base_dir": BASE_DIR,
         "ledger_active": True
@@ -1842,12 +1847,13 @@ GEMINI_MODELS = [
 
 def call_gemini_json(system_prompt: str, user_prompt: str) -> dict:
     """
-    Sends structured JSON prompt to Gemini API with robust model fallback and backoff retry:
-    1. gemini-3.5-flash (primary stable workhorse)
-    2. gemini-3.6-flash (secondary high-throughput)
-    3. gemini-3.5-flash-lite (fast)
-    4. gemini-3.1-flash-lite
+    Sends structured JSON prompt to Gemini API with robust model fallback and backoff retry.
+    Fast-switches to local deterministic engine if daily project quota (20 req/day) is exhausted.
     """
+    global GEMINI_QUOTA_BLOCKED_UNTIL
+    if time.time() < GEMINI_QUOTA_BLOCKED_UNTIL:
+        return {}
+
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
         print("[Storage Copilot] GEMINI_API_KEY not configured. Running in Local Offline Intelligence mode.")
@@ -1879,9 +1885,14 @@ def call_gemini_json(system_prompt: str, user_prompt: str) -> dict:
                                 return parsed
                         except Exception:
                             continue
-            elif resp.status_code in (429, 503):
-                print(f"[Storage Copilot Gemini] Model '{model}' returned HTTP {resp.status_code} (throttled). Retrying with 2s backoff...")
-                time.sleep(2.0)
+            elif resp.status_code == 429:
+                resp_text = resp.text
+                if "GenerateRequestsPerDay" in resp_text or "quotaId" in resp_text or "RESOURCE_EXHAUSTED" in resp_text:
+                    print(f"[Storage Copilot Gemini] Daily free-tier quota (20 req/day) reached for project on '{model}'. Fast-switching to deterministic local engine.")
+                    GEMINI_QUOTA_BLOCKED_UNTIL = time.time() + 900
+                    return {}
+                print(f"[Storage Copilot Gemini] Model '{model}' returned HTTP 429 (throttled). Retrying with 1s backoff...")
+                time.sleep(1.0)
                 try:
                     retry_resp = requests.post(url, json=payload, timeout=20)
                     if retry_resp.status_code == 200:
@@ -1900,6 +1911,9 @@ def call_gemini_json(system_prompt: str, user_prompt: str) -> dict:
                 except Exception:
                     pass
                 continue
+            elif resp.status_code == 503:
+                print(f"[Storage Copilot Gemini] Model '{model}' temporarily unavailable (503). Trying next model...")
+                continue
             else:
                 print(f"[Storage Copilot Gemini] Model '{model}' returned HTTP {resp.status_code}.")
                 continue
@@ -1911,7 +1925,12 @@ def call_gemini_json(system_prompt: str, user_prompt: str) -> dict:
 def call_gemini_text(system_prompt: str, user_prompt: str) -> str:
     """
     Sends conversational/markdown prompt to Gemini API with robust model fallback and returns raw text.
+    Fast-switches to local deterministic engine if daily project quota (20 req/day) is exhausted.
     """
+    global GEMINI_QUOTA_BLOCKED_UNTIL
+    if time.time() < GEMINI_QUOTA_BLOCKED_UNTIL:
+        return ""
+
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
         print("[Storage Copilot] GEMINI_API_KEY not configured. Running in Local Offline Intelligence mode.")
@@ -1926,7 +1945,7 @@ def call_gemini_text(system_prompt: str, user_prompt: str) -> str:
     for model in GEMINI_MODELS:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
         try:
-            resp = requests.post(url, json=payload, timeout=30)
+            resp = requests.post(url, json=payload, timeout=25)
             if resp.status_code == 200:
                 data = resp.json()
                 candidates = data.get("candidates", [])
@@ -1937,11 +1956,15 @@ def call_gemini_text(system_prompt: str, user_prompt: str) -> str:
                         if text and text.strip():
                             print(f"[Storage Copilot Gemini] Successfully received conversational text via model '{model}'.")
                             return text.strip()
-            elif resp.status_code in (429, 503):
-                print(f"[Storage Copilot Gemini] Model '{model}' returned HTTP {resp.status_code} (throttled). Retrying with 2s backoff...")
-                time.sleep(2.0)
+            elif resp.status_code == 429:
+                resp_text = resp.text
+                if "GenerateRequestsPerDay" in resp_text or "quotaId" in resp_text or "RESOURCE_EXHAUSTED" in resp_text:
+                    print(f"[Storage Copilot Gemini] Daily free-tier quota (20 req/day) reached for project on '{model}'. Fast-switching to deterministic local engine.")
+                    GEMINI_QUOTA_BLOCKED_UNTIL = time.time() + 900
+                    return ""
+                time.sleep(1.0)
                 try:
-                    retry_resp = requests.post(url, json=payload, timeout=30)
+                    retry_resp = requests.post(url, json=payload, timeout=25)
                     if retry_resp.status_code == 200:
                         data = retry_resp.json()
                         candidates = data.get("candidates", [])
@@ -1950,16 +1973,13 @@ def call_gemini_text(system_prompt: str, user_prompt: str) -> str:
                             if parts:
                                 text = parts[0].get("text", "")
                                 if text and text.strip():
-                                    print(f"[Storage Copilot Gemini] Successfully received conversational text on retry via model '{model}'.")
                                     return text.strip()
                 except Exception:
                     pass
                 continue
-            else:
-                print(f"[Storage Copilot Gemini] Model '{model}' returned HTTP {resp.status_code}.")
+            elif resp.status_code == 503:
                 continue
-        except Exception as e:
-            print(f"[Storage Copilot Gemini] Model '{model}' request failed: {e}")
+        except Exception:
             continue
     return ""
 
@@ -2178,6 +2198,42 @@ def get_unorganized_download_files(target_dir: str) -> list:
     unorganized.sort(key=lambda e: e.name.lower())
     return unorganized
 
+def is_format_sorting_query(text: str) -> bool:
+    """
+    Evaluates whether a user prompt represents an intent to sort/group files by format/extension.
+    Handles typos ('Dowlands'), synonyms ('arrange', 'put', 'consolidate'), and compound phrases
+    ('arrange all the same format files in 1 place . From the downloads. And put them inside the folders').
+    """
+    if not text:
+        return False
+    t = text.lower().replace("_", " ").replace("-", " ")
+    
+    direct_patterns = [
+        r"same\s+format",
+        r"same\s+type",
+        r"same\s+extension",
+        r"file\s*types?\s+together",
+        r"by\s+(?:file\s*)?(?:format|type|extension)",
+        r"(?:sort|group|arrange|organize|separate|put|consolidate)\s+(?:all\s+)?(?:the\s+)?(?:by\s+)?(?:file\s*)?(?:format|type|extension)s?",
+        r"(?:format|type)\s+subfolders?",
+        r"(?:format|type)\s+folders?",
+        r"into\s+(?:the\s+)?folders?\s+inside\s+down?loads?",
+        r"(?:arrange|sort|group|put)\s+.*(?:same|format|type).*(?:folder|place|download)",
+        r"(?:same\s+format\s+files|files\s+of\s+same\s+format)",
+        r"(?:all\s+format|each\s+format)\s+in\s+(?:1|one)\s+place"
+    ]
+    for pattern in direct_patterns:
+        if re.search(pattern, t):
+            return True
+            
+    has_format_concept = any(w in t for w in (
+        "format", "formats", "filetype", "file type", "file types", "extension", "extensions", "same type"
+    ))
+    has_grouping_concept = any(w in t for w in (
+        "sort", "group", "arrange", "organize", "consolidate", "separate", "together", "1 place", "one place", "into folders", "in folders", "put"
+    ))
+    return bool(has_format_concept and has_grouping_concept)
+
 def generate_dynamic_storage_advice(base_dir: str, target_folder: str = "Download", owner_name: str = "Imran Tahir", peer_names: list = None) -> str:
     """
     Dynamically audits the REAL storage filesystem and crafts articulate, personalized copilot advice.
@@ -2282,9 +2338,11 @@ def api_status():
     api_key = os.getenv("GEMINI_API_KEY", "").strip()
     is_configured = bool(api_key and len(api_key) > 5)
     masked_key = f"{api_key[:4]}...{api_key[-4:]}" if is_configured and len(api_key) > 8 else ""
+    is_quota_limited = bool(time.time() < GEMINI_QUOTA_BLOCKED_UNTIL)
     return jsonify({
         "status": "online",
         "gemini_configured": is_configured,
+        "quota_limited": is_quota_limited,
         "masked_key": masked_key,
         "active_models": GEMINI_MODELS,
         "app_version": APP_VERSION
@@ -2293,6 +2351,7 @@ def api_status():
 @app.route("/configure_api_key", methods=["POST"])
 def configure_api_key():
     """Allows setting the Google Gemini API key directly from the Web UI."""
+    global GEMINI_QUOTA_BLOCKED_UNTIL
     data = request.get_json(force=True) or {}
     new_key = (data.get("api_key") or "").strip()
     if not new_key:
@@ -2312,6 +2371,7 @@ def configure_api_key():
         return jsonify({"error": f"Connection to Gemini API failed: {str(e)}"}), 500
 
     os.environ["GEMINI_API_KEY"] = new_key
+    GEMINI_QUOTA_BLOCKED_UNTIL = 0.0
 
     env_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
     try:
@@ -2432,7 +2492,12 @@ def propose_plan():
     lower_raw = raw_prompt.lower()
     lower_norm = normalized_prompt.lower()
     affirmative_words = {"yes", "yeah", "yep", "sure", "ok", "okay", "go ahead", "proceed", "do it", "please do", "lets do it", "let's do it"}
-    is_pure_affirmative = lower_raw in affirmative_words or lower_norm in affirmative_words or any(lower_raw.startswith(w + " ") for w in ("yes", "sure", "ok", "okay", "go ahead", "proceed"))
+    clean_p_start = re.sub(r"^[^\w]+", "", lower_raw).strip()
+    is_pure_affirmative = (
+        clean_p_start in affirmative_words or 
+        lower_norm in affirmative_words or 
+        bool(re.search(r"^(?:yes|yeah|yep|sure|ok|okay|go ahead|proceed|do it|please do)\b", clean_p_start))
+    )
     is_polite_action = any(lower_norm.startswith(p) for p in ("how about we sort", "how about we organize", "how about we clean", "can we sort", "can we organize", "let's sort", "lets sort", "first sort")) or "first sort" in lower_norm
 
     last_asst = ""
@@ -2788,7 +2853,11 @@ def propose_plan():
         "group by type", "sort by format", "sort format", "group format",
         "format subfolders", "group all files by format"
     )
-    is_format_sorting_intent = any(k in lower_norm or k in lower_raw for k in format_sorting_keywords) and any(w in lower_norm or w in lower_raw for w in ("sort", "group", "organize", "consolidate", "together", "separate", "move"))
+    is_format_sorting_intent = (
+        is_format_sorting_query(raw_prompt) or
+        is_format_sorting_query(normalized_prompt) or
+        (any(k in lower_norm or k in lower_raw for k in format_sorting_keywords) and any(w in lower_norm or w in lower_raw for w in ("sort", "group", "organize", "consolidate", "together", "separate", "move", "arrange", "put", "place")))
+    )
     is_next_batch_req = any(k in lower_norm or k in lower_raw for k in ("next batch", "process next batch", "continue batch", "run next batch"))
     is_format_affirmative = is_pure_affirmative and any(k in lower_asst for k in ("format", "respective", "subfolders", "unorganized files", "files ready to organize"))
 
@@ -2802,6 +2871,8 @@ def propose_plan():
                     "type": "conversation",
                     "message": f"✨ **All files in `{target_folder}/` are already organized!**\n\nEvery file has been grouped into its dedicated format subfolder.",
                     "version": APP_VERSION,
+                    "model_source": "deterministic-engine",
+                    "is_llm": False,
                     "actions": [],
                     "quick_chips": [
                         "View organized folders",
@@ -2855,6 +2926,8 @@ def propose_plan():
                 "actions": actions,
                 "batch_info": batch_info,
                 "version": APP_VERSION,
+                "model_source": "deterministic-engine",
+                "is_llm": False,
                 "quick_chips": [
                     "⏩ Process Next Batch",
                     "View organized folders",
@@ -2869,6 +2942,8 @@ def propose_plan():
                     "type": "conversation",
                     "message": f"✨ **All files in `{target_folder}/` are already organized!**\n\nNo loose unorganized files remain in the root directory.",
                     "version": APP_VERSION,
+                    "model_source": "deterministic-engine",
+                    "is_llm": False,
                     "actions": [],
                     "quick_chips": [
                         "View organized folders",
@@ -2911,6 +2986,8 @@ To ensure system stability and safety, files will be moved in batches (25 files 
                 "actions": [],
                 "format_sorting_active": True,
                 "version": APP_VERSION,
+                "model_source": "deterministic-engine",
+                "is_llm": False,
                 "quick_chips": [
                     "✅ Yes, Move All Files",
                     "View organized folders",
@@ -3358,6 +3435,27 @@ Target Folder: "{target_folder}"
                     "destination": f"{target_d}/{clean_title}",
                     "badge": "RENAME",
                     "rationale": f"Semantically organized '{fn}' into {target_d} based on inspected content"
+                })
+                step_idx += 1
+
+    elif any(k in lower_p for k in ("older than", "days old", "archive")) and any(v in lower_p for v in ("move", "archive", "transfer", "relocate")):
+        days_match = re.search(r"(\d+)\s*(?:day|days)", lower_p)
+        min_age_days = float(days_match.group(1)) if days_match else 30.0
+        plan_desc = f"Archive files older than {int(min_age_days)} days into Documents/Archive/"
+        target_d = "Documents/Archive"
+        for item in manifest:
+            if item.get("age_days", 0) >= min_age_days and not item["name"].startswith("."):
+                if target_d not in created_dirs:
+                    plan_actions.append({"action_id": f"step-{step_idx}", "type": "make_dir", "path": target_d})
+                    created_dirs.add(target_d)
+                    step_idx += 1
+                plan_actions.append({
+                    "action_id": f"step-{step_idx}",
+                    "type": "move",
+                    "source": item["path"],
+                    "destination": f"{target_d}/{item['name']}",
+                    "badge": "FILE_MOVE",
+                    "rationale": f"Archived older file ({item.get('relative_age', 'older than threshold')}) to {target_d}"
                 })
                 step_idx += 1
 
