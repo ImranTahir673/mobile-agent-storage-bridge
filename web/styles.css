@@ -866,6 +866,66 @@ html, body {
   margin-top: 4px;
 }
 
+/* Multi-Batch Progress & Continuous Runner Controls */
+.batch-progress-card {
+  margin-top: 14px;
+  padding: 12px 14px;
+  background: rgba(30, 41, 59, 0.7);
+  border: 1px solid rgba(99, 102, 241, 0.35);
+  border-radius: var(--radius-md);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.batch-progress-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 12px;
+}
+
+.batch-progress-title {
+  font-weight: 600;
+  color: #C7D2FE;
+}
+
+.batch-progress-count {
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.batch-progress-bar-bg {
+  width: 100%;
+  height: 6px;
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 9999px;
+  overflow: hidden;
+}
+
+.batch-progress-bar-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #6366F1, #10B981);
+  border-radius: 9999px;
+  transition: width 0.4s ease;
+}
+
+.batch-progress-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.batch-progress-actions button {
+  font-size: 12px;
+  padding: 6px 12px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
 /* Typing Indicator Animation */
 .typing-bubble {
   display: flex;

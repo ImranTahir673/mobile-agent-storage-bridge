@@ -16,7 +16,8 @@ document.addEventListener('DOMContentLoaded', () => {
     lastExecutionSummary: [],
     activePlan: null,
     selectedActionIds: new Set(),
-    conversationHistory: []
+    conversationHistory: [],
+    autoBatchActive: false
   };
 
   // ==============================================================================
@@ -347,19 +348,34 @@ document.addEventListener('DOMContentLoaded', () => {
 
   function updateQuickChips(chips) {
     if (!chips || !chips.length || !elements.chipsContainer) return;
-    elements.chipsContainer.innerHTML = chips.map(chipText => {
-      let emoji = '💡';
-      const isNext = chipText.includes('Next Batch');
-      if (chipText.includes('Duplicate') || chipText.includes('Clean Duplicates')) emoji = '🧹';
-      else if (chipText.includes('Voucher') || chipText.includes('Slip')) emoji = '📋';
-      else if (chipText.includes('Peer') || chipText.includes('Student')) emoji = '👥';
-      else if (chipText.includes('Name')) emoji = '🏷️';
-      else if (chipText.includes('Batch')) emoji = '⏩';
-      else if (chipText.includes('Screenshot') || chipText.includes('Cache') || chipText.includes('Trash')) emoji = '🗑️';
+    elements.chipsContainer.innerHTML = chips.map(rawText => {
+      const chipText = String(rawText || '').trim();
+      let emoji = '';
+      let cleanLabel = chipText;
+
+      // Extract leading emoji / pictograph / symbol
+      const emojiMatch = chipText.match(/^([\p{Extended_Pictographic}\u2600-\u27BF\uD83C-\uDBFF\uDC00-\uDFFF\s]+)/u);
+      if (emojiMatch && emojiMatch[1].trim()) {
+        emoji = emojiMatch[1].trim();
+        cleanLabel = chipText.slice(emojiMatch[0].length).trim();
+      }
+
+      if (!emoji) {
+        if (cleanLabel.includes('Next Batch') || cleanLabel.includes('Process Next')) emoji = '⏩';
+        else if (cleanLabel.includes('Duplicate') || cleanLabel.includes('Clean Duplicates')) emoji = '🧹';
+        else if (cleanLabel.includes('Voucher') || cleanLabel.includes('Slip')) emoji = '📋';
+        else if (cleanLabel.includes('Peer') || cleanLabel.includes('Student')) emoji = '👥';
+        else if (cleanLabel.includes('Name')) emoji = '🏷️';
+        else if (cleanLabel.includes('Batch')) emoji = '⏩';
+        else if (cleanLabel.includes('Screenshot') || cleanLabel.includes('Cache') || cleanLabel.includes('Trash')) emoji = '🗑️';
+        else emoji = '💡';
+      }
+
+      const isNext = chipText.includes('Next Batch') || chipText.includes('Process Next');
       return `
         <button class="task-chip ${isNext ? 'highlight-chip' : ''}" data-task="${escapeHtml(chipText)}">
           <span class="chip-emoji">${emoji}</span>
-          <span class="chip-label">${escapeHtml(chipText)}</span>
+          <span class="chip-label">${escapeHtml(cleanLabel)}</span>
         </button>
       `;
     }).join('');
@@ -664,6 +680,8 @@ document.addEventListener('DOMContentLoaded', () => {
         updateDiffActionBarCount();
       });
     }
+
+    return container;
   }
 
   function createDiffCardElement(act) {
@@ -816,7 +834,8 @@ document.addEventListener('DOMContentLoaded', () => {
         plan_id: plan.plan_id,
         description: plan.description,
         collision_strategy: plan.collision_strategy || 'RENAME_NUMERIC',
-        actions: selectedActions
+        actions: selectedActions,
+        batch_info: plan.batch_info
       };
 
       const resp = await fetch('/execute_plan', {
@@ -828,6 +847,11 @@ document.addEventListener('DOMContentLoaded', () => {
       const result = await resp.json();
       if (!resp.ok) {
         throw new Error(result.error || 'Batch execution failed');
+      }
+
+      // Preserve batch_info on result if returned or from original plan
+      if (!result.batch_info && plan.batch_info) {
+        result.batch_info = plan.batch_info;
       }
 
       // Store executed batch audit details
@@ -843,6 +867,25 @@ document.addEventListener('DOMContentLoaded', () => {
         ? ` (${result.chunks_processed} gradual chunks applied)`
         : '';
       showToast(`✓ Batch #${result.batch_id.substring(0, 8)} executed! (${result.executed_actions} changes${chunkMsg}, 1-Tap Undo active)`, 'success', 4500);
+
+      // Continuous Auto-Batch Runner Support
+      const remainingFiles = (result.batch_info && typeof result.batch_info.remaining_files === 'number')
+        ? result.batch_info.remaining_files
+        : ((plan.batch_info && typeof plan.batch_info.remaining_files === 'number') ? plan.batch_info.remaining_files : 0);
+
+      if (state.autoBatchActive) {
+        if (remainingFiles > 0) {
+          showToast(`⚡ Auto-Run: Next batch starting (${remainingFiles} files remaining)...`, 'info', 2500);
+          setTimeout(() => {
+            if (state.autoBatchActive) {
+              submitPrompt("Process next batch of files in Download");
+            }
+          }, 1200);
+        } else {
+          state.autoBatchActive = false;
+          showToast('🎉 All files successfully organized into folders!', 'success', 5000);
+        }
+      }
     } catch (err) {
       showToast(`Execution Error: ${err.message}`, 'error', 5000);
       if (approveBtn) {
@@ -925,6 +968,41 @@ document.addEventListener('DOMContentLoaded', () => {
       ? ` gradually across ${result.chunks_processed} safe micro-chunks (20 files/chunk)`
       : '';
 
+    const batchInfo = result.batch_info || (state.activePlan && state.activePlan.batch_info) || null;
+    let progressHtml = '';
+    if (batchInfo && typeof batchInfo.remaining_files === 'number') {
+      const remaining = batchInfo.remaining_files;
+      const totalUnorg = batchInfo.total_unorganized || (count + remaining);
+      const doneCount = Math.max(0, totalUnorg - remaining);
+      const pct = totalUnorg > 0 ? Math.min(100, Math.round((doneCount / totalUnorg) * 100)) : 100;
+      
+      progressHtml = `
+        <div class="batch-progress-card">
+          <div class="batch-progress-header">
+            <span class="batch-progress-title">Batch Progress (${doneCount} of ${totalUnorg} Files)</span>
+            <span class="batch-progress-count">${remaining > 0 ? `${remaining} files remaining` : '✓ All files organized'}</span>
+          </div>
+          <div class="batch-progress-bar-bg">
+            <div class="batch-progress-bar-fill" style="width: ${pct}%;"></div>
+          </div>
+          ${remaining > 0 ? `
+            <div class="batch-progress-actions">
+              <button class="btn btn-primary" id="btn-next-batch-${batchId}" style="background: var(--primary-gradient); color: #fff; font-size: 12px; padding: 6px 14px; border-radius: 8px; border: none; cursor: pointer; display: inline-flex; align-items: center; gap: 4px;">
+                <span>⏩ Process Next Batch (${Math.min(25, remaining)} files)</span>
+              </button>
+              <button class="btn btn-secondary" id="btn-autorun-batches-${batchId}" style="background: rgba(255,255,255,0.08); color: var(--text-primary); font-size: 12px; padding: 6px 14px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.15); cursor: pointer; display: inline-flex; align-items: center; gap: 4px;">
+                <span>⚡ Auto-Run All Remaining</span>
+              </button>
+            </div>
+          ` : `
+            <div style="font-size: 11px; color: #10B981; font-weight: 500; display: flex; align-items: center; gap: 4px;">
+              <span>✨ Complete! All files in ${escapeHtml(batchInfo.target_folder || 'Download')} are organized into respective format folders.</span>
+            </div>
+          `}
+        </div>
+      `;
+    }
+
     container.innerHTML = `
       <div class="execution-success-card" id="audit-card-${batchId}">
         <div class="success-header-row">
@@ -936,6 +1014,8 @@ document.addEventListener('DOMContentLoaded', () => {
         <p class="success-meta-text">
           Batch <code>#${shortId}</code> applied ${count} atomic changes${chunkText}. Pre-logged to SQLite WAL ledger.
         </p>
+
+        ${progressHtml}
 
         <div class="audit-action-center">
           <button class="audit-toggle-btn" id="audit-toggle-${batchId}" aria-expanded="false" title="Expand Before & After applied changes">
@@ -956,6 +1036,27 @@ document.addEventListener('DOMContentLoaded', () => {
         </div>
       </div>
     `;
+
+    // Wire up batch progress buttons
+    const nextBatchBtn = container.querySelector(`#btn-next-batch-${batchId}`);
+    const autoRunBtn = container.querySelector(`#btn-autorun-batches-${batchId}`);
+    if (nextBatchBtn) {
+      nextBatchBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        submitPrompt("Process next batch of files in Download");
+      });
+    }
+    if (autoRunBtn) {
+      autoRunBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        state.autoBatchActive = true;
+        showToast('⚡ Auto-running all remaining batches...', 'info', 3500);
+        autoRunBtn.disabled = true;
+        autoRunBtn.style.opacity = '0.6';
+        autoRunBtn.textContent = '⚡ Auto-Running...';
+        submitPrompt("Process next batch of files in Download");
+      });
+    }
 
     // Wire up toggle button
     const toggleBtn = container.querySelector(`#audit-toggle-${batchId}`);
@@ -1099,7 +1200,14 @@ document.addEventListener('DOMContentLoaded', () => {
       } else if (data.type === 'plan' && data.plan) {
         // Synthesized Action Plan
         appendAssistantMessage(data.message || 'I have analyzed your request and formulated the following Action Plan:', modelSource, isLlm);
-        renderDiffReview(data.plan, modelSource, isLlm);
+        const reviewContainer = renderDiffReview(data.plan, modelSource, isLlm);
+        if (state.autoBatchActive && reviewContainer) {
+          setTimeout(() => {
+            if (state.autoBatchActive && state.activePlan && state.activePlan.plan_id === data.plan.plan_id) {
+              executeApprovedActions(reviewContainer, data.plan);
+            }
+          }, 900);
+        }
       } else {
         appendAssistantMessage(data.message || 'I processed your request.', modelSource, isLlm);
       }
@@ -1140,6 +1248,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // 1. Form Submit
   elements.promptForm.addEventListener('submit', (e) => {
     e.preventDefault();
+    state.autoBatchActive = false;
     submitPrompt(elements.promptInput.value);
   });
 
