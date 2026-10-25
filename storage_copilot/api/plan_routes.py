@@ -5,6 +5,7 @@ from flask import Blueprint, request, jsonify
 from storage_copilot import config
 from storage_copilot.db.ledger import get_db
 from storage_copilot.execution.executor import execute_action_plan
+from storage_copilot.execution.event_bus import publish_event
 from storage_copilot.intelligence.intent_classifier import UserIntent, classify_intent
 from storage_copilot.execution.tier_handlers import (
     handle_conversation_turn,
@@ -92,24 +93,29 @@ def get_recent_batch():
 @plan_bp.route("/propose_plan", methods=["POST"])
 def propose_plan():
     """
-    Phase 2 Three-Tier Intent Architecture Endpoint:
+    Phase 2 & Phase 4 Three-Tier Intent Architecture Endpoint with SSE Telemetry:
     1. Classifies user intent via Deterministic Fast-Path Gate + Micro-LLM Router.
-    2. Dispatches strictly to dedicated tier handler:
-       - UserIntent.CONVERSATION   -> handle_conversation_turn() (0 deep scans, 0 mutations)
-       - UserIntent.QUERY_INFO     -> handle_query_info_turn()   (Unified relevance search, 0 mutations)
-       - UserIntent.FILE_OPERATION -> handle_file_operation_turn() (Action Plan diff synthesis)
+    2. Emits `classifier_intent` SSE frame.
+    3. Dispatches strictly to dedicated tier handler.
+    4. Emits `plan_synthesized` SSE frame.
     """
     data = request.get_json(force=True) or {}
     raw_prompt = (data.get("prompt") or "").strip()
     target_folder = data.get("target_folder") or "Download"
     conversation_history = data.get("conversation_history") or []
 
-    # 1. Classify intent (resolves affirmative turns & fast-path patterns)
+    # 1. Classify intent
     classification = classify_intent(
         prompt=raw_prompt,
         conversation_history=conversation_history
     )
     intent = classification["intent"]
+
+    publish_event("classifier_intent", {
+        "intent": intent.value if hasattr(intent, "value") else str(intent),
+        "fast_path_matched": classification.get("fast_path_matched", False),
+        "sub_intent": classification.get("sub_intent", "")
+    })
 
     # 2. Route to dedicated tier handler
     if intent == UserIntent.CONVERSATION:
@@ -133,5 +139,11 @@ def propose_plan():
             target_folder=target_folder,
             conversation_history=conversation_history
         )
+
+    publish_event("plan_synthesized", {
+        "type": result.get("type"),
+        "intent": result.get("intent"),
+        "actions_count": len(result.get("actions", []))
+    })
 
     return jsonify(result)
