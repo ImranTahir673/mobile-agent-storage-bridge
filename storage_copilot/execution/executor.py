@@ -1,3 +1,4 @@
+# storage_copilot/execution/executor.py
 import os
 import time
 import uuid
@@ -9,13 +10,24 @@ from storage_copilot.storage.collision_resolver import resolve_collision
 from storage_copilot.storage.deduplication import calculate_file_hash
 from storage_copilot.db.ledger import get_db
 from storage_copilot.execution.rollback import _rollback_internal
+from storage_copilot.execution.event_bus import publish_event
+
+
+def _invalidate_manifest_cache():
+    try:
+        from storage_copilot.storage.scanner import manifest_index_manager
+        _invalidate_manifest_cache()
+    except Exception:
+        pass
+
 
 def execute_action_plan(plan: dict) -> tuple[dict, int]:
     """
     Executes a vetted Action Plan per docs/SCHEMA_SPEC.md:
     1. Validates batch size against safe upper capacity (up to 1,000 actions).
     2. Enforces dry_run mode if requested.
-    3. Executes changes gradually in safe micro-chunks (20 files/chunk) with per-chunk SQLite WAL commits.
+    3. Executes changes gradually in safe micro-chunks (20 files/chunk) with per-chunk SQLite WAL commits
+       and real-time SSE `execution_progress` telemetry.
     4. Auto-rolls back all previous steps if any action fails at any point.
     Returns (response_dict, status_code).
     """
@@ -32,7 +44,6 @@ def execute_action_plan(plan: dict) -> tuple[dict, int]:
     MAX_BATCH_ACTIONS = 1000
     EXECUTION_CHUNK_SIZE = 20
 
-    # Safety guardrail (expanded to 1,000 files with gradual execution technique)
     if len(actions) > MAX_BATCH_ACTIONS:
         return {"error": f"Execution limit exceeded: batch size {len(actions)} > {MAX_BATCH_ACTIONS} maximum"}, 400
 
@@ -63,11 +74,11 @@ def execute_action_plan(plan: dict) -> tuple[dict, int]:
                 dst = resolve_safe_path(act.get("destination", ""))
                 if not os.path.exists(src):
                     return {"error": f"Source not found for move: {act.get('source')}"}, 404
-                
+
                 final_dst = resolve_collision(dst, collision_strategy)
                 if not final_dst:
-                    continue  # SKIP strategy
-                
+                    continue
+
                 size = os.path.getsize(src) if os.path.isfile(src) else 0
                 checksum = calculate_file_hash(src) if os.path.isfile(src) else None
                 prepared_steps.append({
@@ -133,7 +144,6 @@ def execute_action_plan(plan: dict) -> tuple[dict, int]:
         except (ValueError, FileExistsError) as e:
             return {"error": str(e), "failed_step": idx}, 400
 
-    # Handle dry_run simulation
     if dry_run:
         return {
             "dry_run": True,
@@ -150,25 +160,27 @@ def execute_action_plan(plan: dict) -> tuple[dict, int]:
             ]
         }, 200
 
-    # Execution Phase with Pre-Logging and Auto-Rollback
+    publish_event("execution_progress", {
+        "phase": "started",
+        "batch_id": plan_id,
+        "executed": 0,
+        "total": len(prepared_steps)
+    })
+
     conn = get_db()
     cursor = conn.cursor()
     try:
-        # Pre-log batch
         cursor.execute(
             "INSERT INTO batches (batch_id, intent, total_actions, status) VALUES (?, ?, ?, 'RUNNING')",
             (plan_id, intent, len(prepared_steps))
         )
         conn.commit()
 
-        # Technique: Gradual Progressive Execution in safe micro-chunks (20 files/chunk)
-        # Keeps memory footprint low, flushes OS disk cache, and avoids Termux I/O throttling
         chunks = [prepared_steps[i:i + EXECUTION_CHUNK_SIZE] for i in range(0, len(prepared_steps), EXECUTION_CHUNK_SIZE)]
         executed_actions = []
 
         for chunk_idx, chunk in enumerate(chunks):
             for step in chunk:
-                # 1. Pre-log action step
                 cursor.execute("""
                     INSERT INTO action_ledger 
                     (batch_id, step_index, action_type, source_path, destination_path, file_size_bytes, 
@@ -190,7 +202,6 @@ def execute_action_plan(plan: dict) -> tuple[dict, int]:
                         os.path.relpath(step["dst"], config.BASE_DIR), step["size"], step["checksum"]
                     ))
 
-                # 2. Perform Disk Mutation
                 try:
                     if step["action_type"] == "make_dir":
                         os.makedirs(step["dst"], exist_ok=True)
@@ -201,45 +212,61 @@ def execute_action_plan(plan: dict) -> tuple[dict, int]:
                         os.makedirs(os.path.dirname(step["dst"]), exist_ok=True)
                         shutil.copy2(step["src"], step["dst"])
                     elif step["action_type"] == "trash":
+                        os.makedirs(config.TRASH_DIR, exist_ok=True)
                         shutil.move(step["src"], step["dst"])
 
-                    # Mark executed
                     cursor.execute(
                         "UPDATE action_ledger SET status = 'EXECUTED', executed_at = CURRENT_TIMESTAMP WHERE id = ?",
                         (action_id,)
                     )
                     executed_actions.append(step)
                 except Exception as disk_err:
-                    # Mark step failed
                     cursor.execute(
                         "UPDATE action_ledger SET status = 'FAILED', error_message = ? WHERE id = ?",
                         (str(disk_err), action_id)
                     )
                     conn.commit()
-                    # Trigger automatic rollback of already executed steps in this batch
                     _rollback_internal(cursor, plan_id)
                     conn.commit()
+                    _invalidate_manifest_cache()
+                    publish_event("execution_progress", {
+                        "phase": "rolled_back",
+                        "batch_id": plan_id,
+                        "error": str(disk_err)
+                    })
                     return {
                         "error": f"Execution failed at step {step['step_index']}: {disk_err}. Batch automatically rolled back.",
                         "batch_id": plan_id,
                         "rolled_back": True
                     }, 500
 
-            # Commit SQLite WAL after each chunk to persist progress and keep journal size small
             conn.commit()
+            publish_event("execution_progress", {
+                "phase": "chunk_committed",
+                "batch_id": plan_id,
+                "chunk_index": chunk_idx + 1,
+                "total_chunks": len(chunks),
+                "executed": len(executed_actions),
+                "total": len(prepared_steps)
+            })
 
-            # Gradual execution yield: 20ms pause between chunks so OS I/O cache flushes smoothly
             if chunk_idx < len(chunks) - 1:
                 time.sleep(0.02)
 
-        # Mark batch completed
         cursor.execute(
             "UPDATE batches SET status = 'COMPLETED', executed_actions = ?, completed_at = CURRENT_TIMESTAMP WHERE batch_id = ?",
             (len(executed_actions), plan_id)
         )
         conn.commit()
+        _invalidate_manifest_cache()
 
-        # Build executed batch audit summary
+        publish_event("execution_progress", {
+            "phase": "completed",
+            "batch_id": plan_id,
+            "executed": len(executed_actions),
+            "total": len(prepared_steps)
+        })
+
         execution_summary = []
         now_ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
         for step in executed_actions:
@@ -297,6 +324,7 @@ def execute_action_plan(plan: dict) -> tuple[dict, int]:
         return {"error": f"Fatal transaction error: {e}"}, 500
     finally:
         conn.close()
+
 
 def execute_plan_single(action_type: str, params: dict):
     plan_payload = {
