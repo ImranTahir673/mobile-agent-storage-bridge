@@ -1,13 +1,44 @@
+# Python
 __pycache__/
 *.py[cod]
+*.pyo
+*.egg-info/
 .venv/
 venv/
+
+# Environment & Secrets
 .env
+.env.local
+
+# SQLite databases (ledger, WAL, shared memory)
 *.db
 *.db-wal
 *.db-shm
 .ledger.db*
+
+# Runtime artifacts
 logs/
 .run/
 *.pid
 .bridge_url
+.agent_trash/
+
+# User-specific data (contains personal context)
+user_profile.json
+
+# Dev scratch files
+scratch/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS artifacts
+.DS_Store
+Thumbs.db
+
+# Node (if frontend ever uses npm)
+node_modules/
