@@ -168,3 +168,68 @@ stateDiagram-v2
 4. **Ledger Commit**: An active batch is created in SQLite (`ledger.db`) storing undo vectors.
 5. **Execution**: The mobile driver performs disk modifications sequentially.
 6. **Finalization / Recovery**: On success, the batch is marked `COMMITTED`. On error, automatic rollback reverses changes using the pre-logged undo vectors.
+
+---
+
+## 5. Modular Python Package Architecture (`storage_copilot`)
+
+Starting in v0.6.2, the monolithic `server.py` (3,759 lines) was structurally decomposed into the clean, maintainable `storage_copilot/` package. The top-level `server.py` now serves as a slim, 110-line backward-compatible entry point and dynamic attribute synchronization shim.
+
+### 5.1 Package Layout
+
+```
+storage_copilot/
+├── __init__.py                  # Package exports, APP_VERSION, create_app()
+├── app.py                       # Flask application factory (CORS, error handlers, blueprints)
+├── config.py                    # Environment (.env), path resolution, globals, formatting
+├── db/
+│   ├── __init__.py
+│   └── ledger.py                # SQLite WAL connection (get_db), schema migration (init_db)
+├── security/
+│   ├── __init__.py
+│   ├── pii_sanitizer.py         # In-memory regex scrubbing engine (PII_PATTERNS)
+│   └── path_resolver.py         # Path canonicalization & boundary blacklist gatekeeper
+├── storage/
+│   ├── __init__.py
+│   ├── content_extractor.py     # Multi-format text preview parser (PDF, DOCX, PPTX, APK, ZIP)
+│   ├── deduplication.py         # Streaming SHA-256 duplicate cluster detection & keeper scoring
+│   ├── collision_resolver.py    # Naming conflict resolution & batch uniqueness enforcement
+│   └── scanner.py               # Live storage file collection & metadata indexing
+├── intelligence/
+│   ├── __init__.py
+│   ├── gemini_client.py         # Multi-model Gemini failover client with backoff & quota handling
+│   ├── document_classifier.py   # Rule-based academic taxonomy & search query intent parser
+│   └── search_engine.py         # Precision relevance scoring & date-pattern matcher
+├── execution/
+│   ├── __init__.py
+│   ├── plan_builder.py          # LLM JSON plan extraction, UI badges, and prompt normalization
+│   ├── executor.py              # Micro-chunked gradual execution engine with atomic WAL commits
+│   └── rollback.py              # Inverted undo vector applier for 1-tap atomic rollbacks
+├── advice/
+│   ├── __init__.py
+│   └── advisor.py               # Extension categorization, format sorting, and dynamic advice
+└── api/
+    ├── __init__.py              # register_blueprints() registry
+    ├── core_routes.py           # Health, static UI assets, API status, and key configuration
+    ├── file_routes.py           # File listing, snippet reading, writing, and single operations
+    ├── plan_routes.py           # Plan proposal (/propose_plan), execution, and recent batch audit
+    ├── history_routes.py        # Historical ledger queries and rollback endpoints
+    ├── profile_routes.py        # Local user profile configuration and context retrieval
+    ├── dedup_routes.py          # Dedicated duplicate scanning endpoint
+    └── utility_routes.py        # Realistic demo fixture seeding
+```
+
+### 5.2 Dynamic Attribute Synchronization Shim
+
+To maintain 100% backward compatibility with automated test suites and external runners that mutate module globals directly (e.g., `server.BASE_DIR = temp_dir`), `server.py` implements a custom `ModuleType` wrapper:
+
+```python
+class _ServerCompatModule(ModuleType):
+    def __setattr__(self, name, value):
+        super().__setattr__(name, value)
+        if name in ("BASE_DIR", "BASE_STORAGE_DIR", "TRASH_DIR", "LEDGER_DB_PATH", "GEMINI_QUOTA_BLOCKED_UNTIL"):
+            setattr(config, name, value)
+```
+
+This guarantees that any changes to paths or runtime environment flags in `server.py` immediately and transparently propagate to all `storage_copilot` submodules.
+

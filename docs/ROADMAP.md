@@ -222,7 +222,112 @@ Eliminated brittle regex/stopword filters in favor of real on-device storage rec
 
 ---
 
-## 9. Phase 4: Native Standalone Android Application (Jetpack Compose, Room DB, SAF) [NEXT MILESTONE]
+## 9. Production Architecture & Hardening Track (Storage Copilot v0.7+)
+
+In response to the comprehensive Technical Audit, the core Python backend is undergoing an 8-Phase Architectural Modernization to prepare for commercial multi-user deployment on Android.
+
+```
++---------------------------------------------------------------------------------------------------+
+| Phase 1: Structural Decomposition & Package Modularization (storage_copilot/) [COMPLETED]         |
++---------------------------------------------------------------------------------------------------+
+                                                  |
+                                                  v
++---------------------------------------------------------------------------------------------------+
+| Phase 2: Three-Tier Intent Classifier & Grounded Reasoning Engine [NEXT MILESTONE]                |
++---------------------------------------------------------------------------------------------------+
+                                                  |
+                                                  v
++---------------------------------------------------------------------------------------------------+
+| Phase 3: Security Hardening (Bearer Auth for Mutations, Restrict CORS, PII Word-Boundary Regex)   |
++---------------------------------------------------------------------------------------------------+
+                                                  |
+                                                  v
++---------------------------------------------------------------------------------------------------+
+| Phase 4: Performance, Manifest Indexing & Server-Sent Events (SSE Streaming)                      |
++---------------------------------------------------------------------------------------------------+
+                                                  |
+                                                  v
++---------------------------------------------------------------------------------------------------+
+| Phase 5: Content-Derived Collision-Free Naming Engine                                             |
++---------------------------------------------------------------------------------------------------+
+                                                  |
+                                                  v
++---------------------------------------------------------------------------------------------------+
+| Phase 6: Deep Deduplication & "Forgotten Files" Finder                                            |
++---------------------------------------------------------------------------------------------------+
+                                                  |
+                                                  v
++---------------------------------------------------------------------------------------------------+
+| Phase 7: Micro-Batch Architecture & Android OS Watchdog Yields                                    |
++---------------------------------------------------------------------------------------------------+
+                                                  |
+                                                  v
++---------------------------------------------------------------------------------------------------+
+| Phase 8: Mobile Web UI Streaming & Native Standalone Android Application (Jetpack Compose / Room) |
++---------------------------------------------------------------------------------------------------+
+```
+
+### 9.1 Phase 1: Structural Decomposition & Package Modularization [COMPLETED]
+- [x] **Modular Package Scaffolding (`storage_copilot/`)**:
+  - `storage_copilot/config.py`: Centralized `.env` loading, cross-platform storage detection, path constants, and mutable quota tracking.
+  - `storage_copilot/db/ledger.py`: Isolated SQLite WAL operations and schema initialization.
+  - `storage_copilot/security/`: Dedicated PII sanitizer (`pii_sanitizer.py`) and hardened path resolver (`path_resolver.py`).
+  - `storage_copilot/storage/`: Clean separation for content extraction (`content_extractor.py`), streaming deduplication (`deduplication.py`), collision resolution (`collision_resolver.py`), and storage scanning (`scanner.py`).
+  - `storage_copilot/intelligence/`: Gemini client with multi-model failover (`gemini_client.py`), document classification (`document_classifier.py`), and search scoring (`search_engine.py`).
+  - `storage_copilot/execution/`: Batch plan builder (`plan_builder.py`), micro-chunk executor (`executor.py`), and atomic rollback engine (`rollback.py`).
+  - `storage_copilot/advice/`: Dynamic storage advisor and format category matching (`advisor.py`).
+  - `storage_copilot/api/`: Seven clean Blueprint route modules with unified error handling.
+- [x] **Backward-Compatible Entry Point (`server.py`)**:
+  - Slashed `server.py` from 3,759 lines to 110 lines.
+  - Implemented dynamic attribute mutation proxy (`_ServerCompatModule`) ensuring test suites and external runners modifying `server.BASE_DIR` stay 100% in sync with `storage_copilot.config`.
+  - Verified 100% test pass rate across all 162 automated test cases.
+
+### 9.2 Upcoming Implementation Phases
+
+#### Phase 2: Three-Tier Intent Classifier & Grounded Reasoning Engine [NEXT]
+- [ ] Implement standalone `IntentClassifier` module with two-stage resolution:
+  - Fast-path deterministic detection for unambiguous keywords.
+  - Structured, low-latency classification via `gemini-3.5-flash-lite` (~50 tokens, temperature 0.0).
+- [ ] Implement dedicated tier handlers:
+  - `handle_conversation()`: Pure chat/advice, 0 file mutations.
+  - `handle_query_info()`: Read-only search, snippet citations, 0 file mutations.
+  - `handle_file_operation()`: Action plan synthesis with interactive diff previews.
+- [ ] Unify dual relevance scoring functions (`score_document_match` and `compute_query_relevance_score`) into a single calibrated scoring engine.
+- [ ] Eliminate duplicated offline fallback blocks from route handlers.
+
+#### Phase 3: Security Hardening & Zero-Trust Boundary
+- [ ] Add pre-shared Bearer Token authentication (`~/.storage_copilot_token`) required for all mutation endpoints (`/execute_plan`, `/write_file`, `/configure_api_key`, `/trash_file`, `/move_file`).
+- [ ] Restrict CORS from wildcard `*` to verified localhost and Termux WebView origins.
+- [ ] Fix PII regex overmatching (word-boundary guards, 13-digit context, passport vs student ID disambiguation).
+- [ ] Move default `LEDGER_DB_PATH` from Android emulated storage (`/storage/emulated/0/.ledger.db`) to Termux app-private storage (`$HOME/.storage_copilot_ledger.db`) to eliminate SQLite WAL corruption on FUSE.
+
+#### Phase 4: Performance, Manifest Indexing & Server-Sent Events (SSE)
+- [ ] Background manifest indexer thread with file mtime cache invalidation.
+- [ ] Server-Sent Events (`GET /stream`) for real-time progress events during scanning and execution.
+- [ ] Lazy snippet extraction triggered only for relevant search candidates.
+- [ ] Production WSGI server configuration (`waitress` / `gunicorn`).
+
+#### Phase 5: Content-Derived Collision-Free Naming Engine
+- [ ] Deep sequence & title extraction (`ContentDerivedNamer`) for university lectures, assignments, and papers.
+- [ ] Elimination of hardcoded sequence counters (`_04`, `_02`).
+- [ ] User-configurable naming templates via `user_profile.json`.
+
+#### Phase 6: Deduplication & Stale File Reconnaissance
+- [ ] Near-duplicate text detection using 3-gram Jaccard similarity (threshold $\ge 0.85$).
+- [ ] "Forgotten Files Finder" identifying stale downloads (>90 days), temporary files, and orphaned screenshots.
+
+#### Phase 7: Micro-Batch Architecture & Android OS Watchdog Yields
+- [ ] Chunked execution (20 files/batch) with explicit OS sleep yields (50ms) to prevent Android thermal/process killer termination.
+- [ ] Safe partial failure recovery and cancellation handlers.
+
+#### Phase 8: Mobile Web UI Streaming & Native Standalone Android Application
+- [ ] SSE streaming integration in `web/app.js`.
+- [ ] Interactive diff preview cards with individual action checkboxes.
+- [ ] Standalone Kotlin/Compose Android client synchronization.
+
+---
+
+## 10. Native Standalone Android Application (Jetpack Compose, Room DB, SAF)
 
 Transition from the 3-tier hybrid developer prototype (Termux + Python + Cloudflare Tunnel + Desktop CLI) into an **All-in-One Standalone Android App**.
 
