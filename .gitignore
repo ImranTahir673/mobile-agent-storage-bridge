@@ -42,3 +42,7 @@ Thumbs.db
 
 # Node (if frontend ever uses npm)
 node_modules/
+
+
+# Repomix
+repomix-output.*
