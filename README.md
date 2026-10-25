@@ -1,8 +1,9 @@
 # Storage Copilot (Mobile Agent Storage Bridge)
 
 [![Version](https://img.shields.io/badge/version-v0.6.2--live-blue.svg)](file:///d:/Imran%20Tahir/SIDEHUSTLE/bridging-prototype/storage_copilot/config.py)
-[![Phase 1](https://img.shields.io/badge/Phase%201-Decomposition%20Complete%20(162%2F162%20Tests)-green.svg)](file:///d:/Imran%20Tahir/SIDEHUSTLE/bridging-prototype/docs/ROADMAP.md)
-[![Phase 2](https://img.shields.io/badge/Phase%202-Three--Tier%20Routing%20(Ready)-orange.svg)](file:///d:/Imran%20Tahir/SIDEHUSTLE/bridging-prototype/docs/PHASE2_IMPLEMENTATION_PLAN.md)
+[![Phase 1](https://img.shields.io/badge/Phase%201-Decomposition%20Complete-green.svg)](file:///d:/Imran%20Tahir/SIDEHUSTLE/bridging-prototype/docs/ROADMAP.md)
+[![Phase 2](https://img.shields.io/badge/Phase%202-Three--Tier%20Routing%20Complete%20(168%2B%20Tests)-green.svg)](file:///d:/Imran%20Tahir/SIDEHUSTLE/bridging-prototype/docs/PHASE2_IMPLEMENTATION_PLAN.md)
+[![Phase 3](https://img.shields.io/badge/Phase%203-Security%20Hardening%20(Next)-orange.svg)](file:///d:/Imran%20Tahir/SIDEHUSTLE/bridging-prototype/docs/ROADMAP.md)
 
 An intelligent on-device local storage bridge and autonomous file organizer running directly on Android hardware via **Termux** (`/storage/emulated/0`), managed locally through a mobile web UI or remotely via a browser bridge.
 

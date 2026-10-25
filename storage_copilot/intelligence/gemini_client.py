@@ -2,7 +2,6 @@ import os
 import time
 import requests
 from storage_copilot import config
-from storage_copilot.execution.plan_builder import extract_json_plan
 
 GEMINI_MODELS = [
     "gemini-3.5-flash",
@@ -32,6 +31,8 @@ def call_gemini_json(system_prompt: str, user_prompt: str) -> dict:
         "contents": [{"role": "user", "parts": [{"text": user_prompt}]}],
         "generationConfig": {"temperature": 0.1, "responseMimeType": "application/json"}
     }
+
+    from storage_copilot.execution.plan_builder import extract_json_plan
 
     for model in GEMINI_MODELS:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
@@ -160,3 +161,59 @@ def call_gemini_text(system_prompt: str, user_prompt: str) -> str:
 def call_gemini_api(system_prompt: str, user_prompt: str) -> dict:
     """Legacy alias for call_gemini_json."""
     return call_gemini_json(system_prompt, user_prompt)
+
+def call_gemini_micro_classifier(prompt: str, recent_context: str = "") -> dict:
+    """
+    Lightweight, low-latency intent router (~50 tokens, temperature: 0.0).
+    Prioritizes gemini-3.5-flash-lite before falling back to standard models.
+    """
+    if time.time() < config.GEMINI_QUOTA_BLOCKED_UNTIL:
+        return {}
+
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        return {}
+
+    system_prompt = (
+        "Classify the user's intent regarding their mobile phone storage:\n"
+        "- CONVERSATION: greetings, asking for capabilities, advice, suggestions, storage health questions, or out-of-scope requests (e.g. sending emails).\n"
+        "- QUERY_INFO: finding files, searching content, reading notes, listing documents or dates without moving them.\n"
+        "- FILE_OPERATION: moving, renaming, sorting, cleaning, grouping, archiving, or deleting files.\n"
+        'Return JSON: {"intent": "CONVERSATION" | "QUERY_INFO" | "FILE_OPERATION", "target": "extracted subject"}'
+    )
+    user_text = f"Prompt: {prompt}\nRecent Context: {recent_context}" if recent_context else f"Prompt: {prompt}"
+
+    payload = {
+        "system_instruction": {"parts": [{"text": system_prompt}]},
+        "contents": [{"role": "user", "parts": [{"text": user_text}]}],
+        "generationConfig": {
+            "temperature": 0.0,
+            "maxOutputTokens": 60,
+            "responseMimeType": "application/json"
+        }
+    }
+
+    classifier_models = ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemini-3.5-flash"]
+    from storage_copilot.execution.plan_builder import extract_json_plan
+    for model in classifier_models:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+        try:
+            resp = requests.post(url, json=payload, timeout=8)
+            if resp.status_code == 200:
+                data = resp.json()
+                candidates = data.get("candidates", [])
+                if candidates:
+                    parts = candidates[0].get("content", {}).get("parts", [])
+                    if parts:
+                        parsed = extract_json_plan(parts[0].get("text", ""))
+                        if parsed and "intent" in parsed:
+                            parsed["_model_used"] = model
+                            return parsed
+            elif resp.status_code == 429:
+                if "GenerateRequestsPerDay" in resp.text or "RESOURCE_EXHAUSTED" in resp.text:
+                    config.GEMINI_QUOTA_BLOCKED_UNTIL = time.time() + 900
+                    return {}
+        except Exception:
+            continue
+    return {}
+

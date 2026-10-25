@@ -284,18 +284,19 @@ In response to the comprehensive Technical Audit, the core Python backend is und
 
 ### 9.2 Upcoming Implementation Phases
 
-#### Phase 2: Three-Tier Intent Classifier & Grounded Reasoning Engine [NEXT]
-- [ ] Implement standalone `IntentClassifier` module with two-stage resolution:
-  - Fast-path deterministic detection for unambiguous keywords.
-  - Structured, low-latency classification via `gemini-3.5-flash-lite` (~50 tokens, temperature 0.0).
-- [ ] Implement dedicated tier handlers:
-  - `handle_conversation()`: Pure chat/advice, 0 file mutations.
-  - `handle_query_info()`: Read-only search, snippet citations, 0 file mutations.
-  - `handle_file_operation()`: Action plan synthesis with interactive diff previews.
-- [ ] Unify dual relevance scoring functions (`score_document_match` and `compute_query_relevance_score`) into a single calibrated scoring engine.
-- [ ] Eliminate duplicated offline fallback blocks from route handlers.
+#### Phase 2: Three-Tier Intent Classifier & Grounded Reasoning Engine [COMPLETED]
+- [x] Implement standalone `IntentClassifier` module with two-stage resolution:
+  - Fast-path deterministic detection for unambiguous keywords and multi-turn affirmative context ("Yes", "Proceed", "Do it").
+  - Structured, low-latency classification via `call_gemini_micro_classifier()` (`gemini-3.5-flash-lite`, ~50 tokens, temperature 0.0).
+- [x] Implement dedicated tier handlers (`storage_copilot/execution/tier_handlers.py`):
+  - `handle_conversation_turn()`: Pure chat/advice & format breakdown, 0 deep scans, 0 file mutations.
+  - `handle_query_info_turn()`: Read-only search, temporal filters, snippet citations, 0 file mutations.
+  - `handle_file_operation_turn()`: Action plan synthesis with interactive diff previews and collision validation.
+- [x] Unify dual relevance scoring functions (`score_document_match` and `compute_query_relevance_score`) into `score_file_relevance()` (0-100 scale) with backward-compatible wrappers.
+- [x] Slashed `storage_copilot/api/plan_routes.py` from ~1,399 lines to 110 lines by delegating to dedicated tier handlers.
+- [x] Added dedicated Phase 2 test suite (`test_three_tier_intent.py`) with 100% pass rate.
 
-#### Phase 3: Security Hardening & Zero-Trust Boundary
+#### Phase 3: Security Hardening & Zero-Trust Boundary [NEXT]
 - [ ] Add pre-shared Bearer Token authentication (`~/.storage_copilot_token`) required for all mutation endpoints (`/execute_plan`, `/write_file`, `/configure_api_key`, `/trash_file`, `/move_file`).
 - [ ] Restrict CORS from wildcard `*` to verified localhost and Termux WebView origins.
 - [ ] Fix PII regex overmatching (word-boundary guards, 13-digit context, passport vs student ID disambiguation).

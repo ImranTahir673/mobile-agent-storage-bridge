@@ -52,6 +52,7 @@ from storage_copilot.intelligence.document_classifier import (
     SEARCH_STOPWORDS
 )
 from storage_copilot.intelligence.search_engine import (
+    score_file_relevance,
     score_document_match,
     compute_query_relevance_score
 )
@@ -59,7 +60,12 @@ from storage_copilot.intelligence.gemini_client import (
     GEMINI_MODELS,
     call_gemini_json,
     call_gemini_text,
-    call_gemini_api
+    call_gemini_api,
+    call_gemini_micro_classifier
+)
+from storage_copilot.intelligence.intent_classifier import (
+    UserIntent,
+    classify_intent
 )
 
 # Execution
