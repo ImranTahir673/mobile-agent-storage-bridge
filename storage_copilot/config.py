@@ -1,3 +1,4 @@
+# storage_copilot/config.py
 import os
 import time
 
@@ -8,6 +9,7 @@ GEMINI_QUOTA_BLOCKED_UNTIL = 0.0
 
 # Repository Root Directory
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
 
 # ==============================================================================
 # Environment Configuration (.env loader)
@@ -27,11 +29,28 @@ def load_environment():
                         k, v = line.split("=", 1)
                         os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
 
+
 load_environment()
 
+
 # ==============================================================================
-# Dynamic Cross-Platform Storage Path Resolution
+# Dynamic Cross-Platform Storage & FUSE-Safe Ledger Path Resolution
 # ==============================================================================
+def is_android_fuse_mount(path: str) -> bool:
+    """
+    Returns True if the given storage path resides on an Android emulated FUSE / sdcardfs
+    mount (/storage/emulated/0, /sdcard, or ~/storage/shared) where SQLite WAL shared-memory
+    mmap files (-shm) are prone to locking or corruption.
+    """
+    norm = (path or "").replace("\\", "/").rstrip("/")
+    if norm.startswith("/storage/emulated/") or norm.startswith("/sdcard"):
+        return True
+    termux_shared = os.path.expanduser("~/storage/shared").replace("\\", "/").rstrip("/")
+    if norm == termux_shared or (os.path.exists(termux_shared) and norm == os.path.realpath(termux_shared).replace("\\", "/")):
+        return True
+    return False
+
+
 def resolve_base_storage_dir() -> str:
     """
     Dynamically detects and configures the storage base directory across platforms:
@@ -47,10 +66,10 @@ def resolve_base_storage_dir() -> str:
 
     # Android Termux check
     is_android = (
-        os.path.exists("/storage/emulated/0/Download") or 
-        os.path.exists("/storage/emulated/0") or 
-        os.path.exists(os.path.expanduser("~/storage/downloads")) or
-        os.path.exists(os.path.expanduser("~/storage/shared"))
+        os.path.exists("/storage/emulated/0/Download")
+        or os.path.exists("/storage/emulated/0")
+        or os.path.exists(os.path.expanduser("~/storage/downloads"))
+        or os.path.exists(os.path.expanduser("~/storage/shared"))
     )
     if is_android:
         if os.path.exists("/storage/emulated/0"):
@@ -76,11 +95,40 @@ def resolve_base_storage_dir() -> str:
     os.makedirs(fallback_dir, exist_ok=True)
     return os.path.realpath(fallback_dir)
 
+
+def resolve_default_ledger_path(base_storage_dir: str) -> str:
+    """
+    Phase 3 FUSE-Safe SQLite WAL Ledger Resolution:
+    - Honors explicit LEDGER_DB_PATH environment variable if set (used by test suites).
+    - If base_storage_dir is an Android emulated FUSE mount (/storage/emulated/0),
+      relocates the default SQLite WAL ledger to Termux app-private POSIX storage
+      ($HOME/.storage_copilot_ledger.db) to eliminate FUSE mmap corruption.
+    - Otherwise defaults to <base_storage_dir>/.ledger.db.
+    """
+    env_ledger = os.getenv("LEDGER_DB_PATH", "").strip()
+    if env_ledger:
+        return os.path.realpath(env_ledger)
+
+    if is_android_fuse_mount(base_storage_dir):
+        home_dir = os.path.expanduser("~")
+        return os.path.realpath(os.path.join(home_dir, ".storage_copilot_ledger.db"))
+
+    return os.path.realpath(os.path.join(base_storage_dir, ".ledger.db"))
+
+
 BASE_STORAGE_DIR = resolve_base_storage_dir()
 BASE_DIR = BASE_STORAGE_DIR
 TRASH_DIR = os.path.join(BASE_STORAGE_DIR, ".agent_trash")
-LEDGER_DB_PATH = os.path.realpath(os.getenv("LEDGER_DB_PATH", os.path.join(BASE_STORAGE_DIR, ".ledger.db")))
+LEDGER_DB_PATH = resolve_default_ledger_path(BASE_STORAGE_DIR)
 WEB_DIR = os.path.realpath(os.path.join(REPO_ROOT, "web"))
+
+# Phase 3 Security Configuration
+AUTH_TOKEN_FILE = os.path.realpath(
+    os.getenv("COPILOT_TOKEN_FILE", os.path.expanduser("~/.storage_copilot_token"))
+)
+AUTH_TOKEN = os.getenv("COPILOT_AUTH_TOKEN", "").strip()
+ENFORCE_LOCAL_AUTH = os.getenv("COPILOT_ENFORCE_AUTH", "0").strip() in ("1", "true", "yes")
+
 
 def init_storage_dirs():
     """Initializes baseline storage directories."""
@@ -90,7 +138,9 @@ def init_storage_dirs():
     os.makedirs(os.path.join(BASE_STORAGE_DIR, "Download"), exist_ok=True)
     os.makedirs(os.path.join(BASE_STORAGE_DIR, "Documents"), exist_ok=True)
 
+
 init_storage_dirs()
+
 
 def format_bytes_human(size_bytes: int) -> str:
     """Formats raw byte counts into human-readable strings (KB, MB, GB)."""

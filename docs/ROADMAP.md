@@ -296,13 +296,14 @@ In response to the comprehensive Technical Audit, the core Python backend is und
 - [x] Slashed `storage_copilot/api/plan_routes.py` from ~1,399 lines to 110 lines by delegating to dedicated tier handlers.
 - [x] Added dedicated Phase 2 test suite (`test_three_tier_intent.py`) with 100% pass rate.
 
-#### Phase 3: Security Hardening & Zero-Trust Boundary [NEXT]
-- [ ] Add pre-shared Bearer Token authentication (`~/.storage_copilot_token`) required for all mutation endpoints (`/execute_plan`, `/write_file`, `/configure_api_key`, `/trash_file`, `/move_file`).
-- [ ] Restrict CORS from wildcard `*` to verified localhost and Termux WebView origins.
-- [ ] Fix PII regex overmatching (word-boundary guards, 13-digit context, passport vs student ID disambiguation).
-- [ ] Move default `LEDGER_DB_PATH` from Android emulated storage (`/storage/emulated/0/.ledger.db`) to Termux app-private storage (`$HOME/.storage_copilot_ledger.db`) to eliminate SQLite WAL corruption on FUSE.
+#### Phase 3: Security Hardening & Zero-Trust Boundary [COMPLETED]
+- [x] Add pre-shared Bearer Token authentication (`~/.storage_copilot_token`) required for all mutation endpoints (`/execute_plan`, `/write_file`, `/configure_api_key`, `/trash_file`, `/move_file`, `/make_directory`, `/rollback_batch`, `/rollback_last`, `POST /user_profile`).
+- [x] Restrict CORS from wildcard `*` to verified localhost, loopback, and Termux WebView origins (`storage_copilot/security/auth.py`).
+- [x] Fix PII regex overmatching: context guards preserving academic IDs (`BSAI-182`, `CS-301`), ArXiv IDs (`1508.06576v2`), and Unix millisecond timestamps (`1713000000000`) while scrubbing secrets, CNICs, and passports.
+- [x] Move default `LEDGER_DB_PATH` from Android emulated storage (`/storage/emulated/0/.ledger.db`) to Termux app-private storage (`$HOME/.storage_copilot_ledger.db`) to eliminate SQLite WAL corruption on FUSE.
+- [x] Added dedicated Phase 3 security test suite (`test_phase3_security.py`) with 100% pass rate.
 
-#### Phase 4: Performance, Manifest Indexing & Server-Sent Events (SSE)
+#### Phase 4: Performance, Manifest Indexing & Server-Sent Events (SSE) [NEXT]
 - [ ] Background manifest indexer thread with file mtime cache invalidation.
 - [ ] Server-Sent Events (`GET /stream`) for real-time progress events during scanning and execution.
 - [ ] Lazy snippet extraction triggered only for relevant search candidates.
