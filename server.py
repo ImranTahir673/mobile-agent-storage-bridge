@@ -21,8 +21,13 @@ TRASH_DIR = config.TRASH_DIR
 LEDGER_DB_PATH = config.LEDGER_DB_PATH
 WEB_DIR = config.WEB_DIR
 GEMINI_QUOTA_BLOCKED_UNTIL = config.GEMINI_QUOTA_BLOCKED_UNTIL
+AUTH_TOKEN = config.AUTH_TOKEN
+AUTH_TOKEN_FILE = config.AUTH_TOKEN_FILE
+ENFORCE_LOCAL_AUTH = config.ENFORCE_LOCAL_AUTH
 load_environment = config.load_environment
 resolve_base_storage_dir = config.resolve_base_storage_dir
+resolve_default_ledger_path = config.resolve_default_ledger_path
+is_android_fuse_mount = config.is_android_fuse_mount
 format_bytes_human = config.format_bytes_human
 
 # Database
@@ -30,7 +35,16 @@ from storage_copilot.db.ledger import get_db, init_db
 
 # Security
 from storage_copilot.security.path_resolver import resolve_safe_path, PROTECTED_ROOT_PREFIXES
-from storage_copilot.security.pii_sanitizer import sanitize_pii, PII_PATTERNS
+from storage_copilot.security.pii_sanitizer import sanitize_pii, contains_tier1_pii, PII_PATTERNS
+from storage_copilot.security.auth import (
+    PROTECTED_MUTATION_PATHS,
+    load_or_create_auth_token,
+    get_active_auth_token,
+    is_origin_allowed,
+    is_remote_or_tunneled_request,
+    extract_request_token,
+    verify_mutation_auth,
+)
 
 # Storage
 from storage_copilot.storage.content_extractor import extract_file_snippet
@@ -79,6 +93,11 @@ from storage_copilot.execution.executor import (
     execute_plan_single
 )
 from storage_copilot.execution.rollback import _rollback_internal
+from storage_copilot.execution.tier_handlers import (
+    handle_conversation_turn,
+    handle_query_info_turn,
+    handle_file_operation_turn
+)
 
 # Advice
 from storage_copilot.advice.advisor import (
@@ -101,13 +120,24 @@ from storage_copilot.api.plan_routes import execute_plan, get_recent_batch, prop
 # Initialize default Flask app
 app = create_app()
 
+
 # Backward compatibility proxy module
 class _ServerCompatModule(ModuleType):
     """Dynamically synchronizes module attribute mutations with storage_copilot.config."""
     def __setattr__(self, name, value):
         super().__setattr__(name, value)
-        if name in ("BASE_DIR", "BASE_STORAGE_DIR", "TRASH_DIR", "LEDGER_DB_PATH", "GEMINI_QUOTA_BLOCKED_UNTIL"):
+        if name in (
+            "BASE_DIR",
+            "BASE_STORAGE_DIR",
+            "TRASH_DIR",
+            "LEDGER_DB_PATH",
+            "GEMINI_QUOTA_BLOCKED_UNTIL",
+            "AUTH_TOKEN",
+            "AUTH_TOKEN_FILE",
+            "ENFORCE_LOCAL_AUTH",
+        ):
             setattr(config, name, value)
+
 
 sys.modules[__name__].__class__ = _ServerCompatModule
 
