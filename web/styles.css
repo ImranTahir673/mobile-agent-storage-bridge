@@ -19,33 +19,47 @@
   padding: 0;
 }
 
+html {
+  height: 100%;
+  height: 100dvh;
+}
+
 body {
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Inter, sans-serif;
   background-color: var(--bg-dark);
   color: var(--text-main);
-  height: 100vh;
+  height: 100%;
+  height: 100dvh;
+  margin: 0;
+  padding: 0;
   overflow: hidden;
 }
 
 .app-shell {
   display: flex;
   flex-direction: column;
-  height: 100vh;
+  height: 100%;
+  height: 100dvh;
+  width: 100%;
   max-width: 980px;
   margin: 0 auto;
   background: var(--bg-dark);
   border-left: 1px solid var(--border-color);
   border-right: 1px solid var(--border-color);
+  position: relative;
+  overflow: hidden;
 }
 
 /* Header */
 .app-header {
+  flex-shrink: 0;
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 12px 16px;
+  padding: 10px 14px;
   background: var(--bg-panel);
   border-bottom: 1px solid var(--border-color);
+  z-index: 10;
 }
 
 .brand-group {
@@ -114,13 +128,19 @@ body {
 
 /* Toolbar Strip */
 .toolbar-strip {
+  flex-shrink: 0;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 8px 16px;
-  background: rgba(30, 41, 59, 0.75);
+  padding: 8px 12px;
+  background: rgba(30, 41, 59, 0.85);
   border-bottom: 1px solid var(--border-color);
   overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+}
+.toolbar-strip::-webkit-scrollbar {
+  display: none;
 }
 
 .toolbar-left {
@@ -170,11 +190,12 @@ body {
 
 /* Undo Banner */
 .undo-banner {
+  flex-shrink: 0;
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 10px 16px;
-  background: rgba(245, 158, 11, 0.12);
+  padding: 10px 14px;
+  background: rgba(245, 158, 11, 0.14);
   border-bottom: 1px solid rgba(245, 158, 11, 0.35);
 }
 
@@ -208,7 +229,8 @@ body {
 
 /* Live SSE Progress Panel */
 .progress-panel {
-  padding: 10px 16px;
+  flex-shrink: 0;
+  padding: 10px 14px;
   background: #172554;
   border-bottom: 1px solid #1e40af;
 }
@@ -279,12 +301,14 @@ body {
 
 /* Chat Container */
 .chat-container {
-  flex: 1;
+  flex: 1 1 0%;
+  min-height: 0;
   overflow-y: auto;
-  padding: 16px;
+  -webkit-overflow-scrolling: touch;
+  padding: 14px 12px;
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 12px;
 }
 
 .chat-message {
@@ -475,13 +499,20 @@ body {
 
 /* Quick Chips */
 .quick-chips-bar {
+  flex-shrink: 0;
   display: flex;
-  gap: 8px;
-  padding: 8px 16px;
+  gap: 6px;
+  padding: 6px 12px;
   overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
   background: var(--bg-panel);
   border-top: 1px solid var(--border-color);
   white-space: nowrap;
+  scrollbar-width: none;
+}
+
+.quick-chips-bar::-webkit-scrollbar {
+  display: none;
 }
 
 .chip-btn {
@@ -492,6 +523,7 @@ body {
   border-radius: 999px;
   font-size: 12px;
   cursor: pointer;
+  flex-shrink: 0;
 }
 
 .chip-btn:hover {
@@ -501,14 +533,20 @@ body {
 
 /* Composer */
 .composer-bar {
-  padding: 10px 16px;
+  flex-shrink: 0;
+  padding: 8px 12px calc(8px + env(safe-area-inset-bottom, 0px)) 12px;
   background: var(--bg-panel);
   border-top: 1px solid var(--border-color);
+  position: sticky;
+  bottom: 0;
+  z-index: 20;
 }
 
 .composer-form {
   display: flex;
   gap: 8px;
+  align-items: center;
+  width: 100%;
 }
 
 .composer-input {
@@ -518,17 +556,31 @@ body {
   border: 1px solid var(--border-color);
   padding: 10px 14px;
   border-radius: 8px;
-  font-size: 14px;
+  font-size: 16px;
+  height: 44px;
+  min-width: 0;
+  outline: none;
+}
+
+.composer-input:focus {
+  border-color: var(--primary);
 }
 
 .btn-send {
   background: var(--primary);
   color: #0f172a;
   border: none;
-  padding: 0 18px;
+  padding: 0 16px;
+  height: 44px;
   border-radius: 8px;
   font-weight: 700;
+  font-size: 14px;
   cursor: pointer;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  white-space: nowrap;
 }
 
 /* Modal */
@@ -612,4 +664,97 @@ body {
 
 .hidden {
   display: none !important;
+}
+
+/* Mobile Screens Optimization (Phones & Tablets < 640px) */
+@media (max-width: 640px) {
+  .app-shell {
+    border-left: none;
+    border-right: none;
+  }
+
+  .app-header {
+    padding: 8px 10px;
+  }
+
+  .brand-logo {
+    font-size: 20px;
+  }
+
+  .brand-title {
+    font-size: 15px;
+  }
+
+  .brand-subtitle {
+    font-size: 10px;
+  }
+
+  .folder-select, .icon-btn {
+    padding: 4px 8px;
+    font-size: 11px;
+  }
+
+  .toolbar-strip {
+    padding: 6px 10px;
+    gap: 6px;
+  }
+
+  .tool-btn {
+    padding: 4px 8px;
+    font-size: 11px;
+  }
+
+  .inline-toggle {
+    font-size: 10px;
+  }
+
+  .chat-container {
+    padding: 10px 10px;
+    gap: 10px;
+  }
+
+  .chat-message {
+    max-width: 96%;
+    padding: 10px 12px;
+    font-size: 13px;
+  }
+
+  .diff-card {
+    padding: 8px 10px;
+  }
+
+  .diff-paths {
+    font-size: 11px;
+  }
+
+  .quick-chips-bar {
+    padding: 5px 8px;
+    gap: 5px;
+  }
+
+  .chip-btn {
+    font-size: 11px;
+    padding: 4px 9px;
+  }
+
+  .composer-bar {
+    padding: 6px 8px calc(6px + env(safe-area-inset-bottom, 0px)) 8px;
+  }
+
+  .composer-input {
+    font-size: 16px;
+    height: 42px;
+    padding: 8px 12px;
+  }
+
+  .btn-send {
+    height: 42px;
+    padding: 0 14px;
+    font-size: 13px;
+  }
+
+  .modal-card {
+    width: 95%;
+    padding: 14px;
+  }
 }
