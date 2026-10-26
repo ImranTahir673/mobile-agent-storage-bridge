@@ -1,6 +1,6 @@
 """
 Storage Copilot - Mobile Storage Bridge & Intelligent File Organizer
-v0.6.6-live Entry Point, Production Threaded WSGI Runner & Backward Compatibility Shim.
+v0.6.7-live Entry Point, Production Threaded WSGI Runner & Backward Compatibility Shim.
 
 All core modules have been refactored into the `storage_copilot` package.
 This module re-exports all public symbols and synchronizes runtime path overrides
@@ -116,8 +116,17 @@ from storage_copilot.execution.plan_builder import (
     normalize_user_prompt
 )
 from storage_copilot.execution.executor import (
+    DEFAULT_CHUNK_SIZE,
+    DEFAULT_YIELD_MS,
+    MAX_BATCH_ACTIONS,
     execute_action_plan,
     execute_plan_single
+)
+from storage_copilot.execution.cancellation import (
+    CancellationToken,
+    CancellationManager,
+    cancellation_manager,
+    request_batch_cancellation
 )
 from storage_copilot.execution.rollback import _rollback_internal
 from storage_copilot.execution.event_bus import (
@@ -148,7 +157,7 @@ from storage_copilot.api.history_routes import lookup_history, rollback_batch, r
 from storage_copilot.api.profile_routes import get_user_profile_path, get_user_profile, update_user_profile
 from storage_copilot.api.dedup_routes import scan_duplicates, scan_forgotten
 from storage_copilot.api.utility_routes import seed_fixtures
-from storage_copilot.api.plan_routes import execute_plan, get_recent_batch, propose_plan
+from storage_copilot.api.plan_routes import execute_plan, cancel_execution, get_recent_batch, propose_plan
 from storage_copilot.api.stream_routes import stream_events
 
 # Initialize default Flask app

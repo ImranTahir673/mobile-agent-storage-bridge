@@ -1,10 +1,10 @@
-# storage_copilot/api/plan_routes.py
 import os
 from flask import Blueprint, request, jsonify
 
 from storage_copilot import config
 from storage_copilot.db.ledger import get_db
 from storage_copilot.execution.executor import execute_action_plan
+from storage_copilot.execution.cancellation import request_batch_cancellation
 from storage_copilot.execution.event_bus import publish_event
 from storage_copilot.intelligence.intent_classifier import UserIntent, classify_intent
 from storage_copilot.execution.tier_handlers import (
@@ -23,6 +23,25 @@ def execute_plan():
     return jsonify(res_dict), status_code
 
 
+@plan_bp.route("/cancel_execution", methods=["POST"])
+def cancel_execution():
+    """
+    Phase 7 Endpoint: Gracefully signals an in-flight batch execution to stop
+    after the current step commits to SQLite WAL, leaving filesystem state consistent.
+    Accepts optional `{"batch_id": "...", "reason": "..."}`.
+    """
+    data = request.get_json(silent=True) or {}
+    batch_id = (data.get("batch_id") or "").strip() or None
+    reason = (data.get("reason") or "User requested cancellation").strip()
+    res = request_batch_cancellation(batch_id=batch_id, reason=reason)
+    publish_event("execution_progress", {
+        "phase": "cancel_requested",
+        "batch_id": batch_id or "active",
+        "reason": reason
+    })
+    return jsonify(res), 200
+
+
 @plan_bp.route("/recent_batch", methods=["GET"])
 def get_recent_batch():
     """Returns the most recent completed or rolled-back batch for the persistent Undo banner."""
@@ -32,7 +51,7 @@ def get_recent_batch():
         cursor.execute("""
             SELECT batch_id, intent, total_actions, executed_actions, status, completed_at, rolled_back_at 
             FROM batches 
-            WHERE status IN ('COMPLETED', 'ROLLED_BACK') 
+            WHERE status IN ('COMPLETED', 'ROLLED_BACK', 'FAILED') 
             ORDER BY created_at DESC LIMIT 1
         """)
         row = cursor.fetchone()
@@ -104,7 +123,6 @@ def propose_plan():
     target_folder = data.get("target_folder") or "Download"
     conversation_history = data.get("conversation_history") or []
 
-    # 1. Classify intent
     classification = classify_intent(
         prompt=raw_prompt,
         conversation_history=conversation_history
@@ -117,7 +135,6 @@ def propose_plan():
         "sub_intent": classification.get("sub_intent", "")
     })
 
-    # 2. Route to dedicated tier handler
     if intent == UserIntent.CONVERSATION:
         result = handle_conversation_turn(
             prompt=raw_prompt,
