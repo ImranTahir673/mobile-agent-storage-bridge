@@ -318,11 +318,13 @@ In response to the comprehensive Technical Audit, the core Python backend is und
 - [x] Near-duplicate text detection using 3-gram Jaccard similarity (threshold $\ge 0.85$).
 - [x] "Forgotten Files Finder" identifying stale downloads (>90 days), temporary files, and orphaned screenshots.
 
-#### Phase 7: Micro-Batch Architecture & Android OS Watchdog Yields [NEXT]
-- [ ] Chunked execution (20 files/batch) with explicit OS sleep yields (50ms) to prevent Android thermal/process killer termination.
-- [ ] Safe partial failure recovery and cancellation handlers.
+#### Phase 7: Micro-Batch Architecture & Android OS Watchdog Yields [COMPLETED]
+- [x] Chunked execution (20 files/batch) with explicit OS sleep yields (50ms) to prevent Android thermal/process killer termination.
+- [x] Safe partial failure recovery and cancellation handlers.
+- [x] Real-time SSE progress events (`execution_progress`) with per-chunk SQLite WAL commits.
+- [x] Graceful in-flight batch cancellation via `POST /cancel_execution` and `cancellation_manager`.
 
-#### Phase 8: Mobile Web UI Streaming & Native Standalone Android Application
+#### Phase 8: Mobile Web UI Streaming & Native Standalone Android Application [NEXT]
 - [ ] SSE streaming integration in `web/app.js`.
 - [ ] Interactive diff preview cards with individual action checkboxes.
 - [ ] Standalone Kotlin/Compose Android client synchronization.

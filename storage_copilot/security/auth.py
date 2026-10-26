@@ -12,6 +12,7 @@ from storage_copilot import config
 # Endpoints that mutate state or sensitive configuration and require zero-trust protection
 PROTECTED_MUTATION_PATHS = {
     "/execute_plan",
+    "/cancel_execution",
     "/write_file",
     "/configure_api_key",
     "/trash_file",

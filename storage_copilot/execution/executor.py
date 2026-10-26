@@ -1,9 +1,10 @@
-# storage_copilot/execution/executor.py
 import os
 import time
 import uuid
 import shutil
 from datetime import datetime, timezone
+from typing import Callable, Optional, Dict, Any, Tuple
+
 from storage_copilot import config
 from storage_copilot.security.path_resolver import resolve_safe_path
 from storage_copilot.storage.collision_resolver import resolve_collision
@@ -11,25 +12,38 @@ from storage_copilot.storage.deduplication import calculate_file_hash
 from storage_copilot.db.ledger import get_db
 from storage_copilot.execution.rollback import _rollback_internal
 from storage_copilot.execution.event_bus import publish_event
+from storage_copilot.execution.cancellation import cancellation_manager
+
+DEFAULT_CHUNK_SIZE = 20
+DEFAULT_YIELD_MS = 50
+MAX_BATCH_ACTIONS = 1000
 
 
-def _invalidate_manifest_cache():
+def _invalidate_manifest_cache() -> None:
     try:
         from storage_copilot.storage.scanner import manifest_index_manager
-        _invalidate_manifest_cache()
+        manifest_index_manager.invalidate()
     except Exception:
         pass
 
 
-def execute_action_plan(plan: dict) -> tuple[dict, int]:
+def execute_action_plan(
+    plan: dict,
+    step_hook: Optional[Callable[[int, Dict[str, Any]], None]] = None
+) -> Tuple[Dict[str, Any], int]:
     """
-    Executes a vetted Action Plan per docs/SCHEMA_SPEC.md:
+    Phase 7 Micro-Batch Action Plan Executor:
     1. Validates batch size against safe upper capacity (up to 1,000 actions).
     2. Enforces dry_run mode if requested.
-    3. Executes changes gradually in safe micro-chunks (20 files/chunk) with per-chunk SQLite WAL commits
-       and real-time SSE `execution_progress` telemetry.
-    4. Auto-rolls back all previous steps if any action fails at any point.
-    Returns (response_dict, status_code).
+    3. Executes changes in configurable micro-batches (`chunk_size = 20` default)
+       with explicit OS watchdog sleep yields (`yield_ms = 50` ms default) between chunks
+       and per-chunk SQLite WAL commits.
+    4. Emits rich `execution_progress` SSE events (`current_chunk`, `total_chunks`,
+       `actions_completed`, `percent`).
+    5. Supports graceful in-flight cancellation via `cancellation_manager` (`POST /cancel_execution`).
+    6. Supports both Safe Partial Failure Recovery (`on_error="partial"` / `partial_recovery=True`,
+       where pre-executed steps remain committed in SQLite WAL and can be rolled back via `/rollback_batch`)
+       and full auto-rollback (`on_error="rollback"` default).
     """
     plan = plan or {}
     plan_id = plan.get("plan_id") or str(uuid.uuid4())
@@ -38,16 +52,30 @@ def execute_action_plan(plan: dict) -> tuple[dict, int]:
     dry_run = bool(plan.get("dry_run", False))
     collision_strategy = plan.get("collision_strategy", "FAIL")
 
+    # Configurable micro-batch chunk size & OS watchdog sleep yield (ms)
+    try:
+        chunk_size = max(1, int(plan.get("chunk_size", DEFAULT_CHUNK_SIZE)))
+    except (ValueError, TypeError):
+        chunk_size = DEFAULT_CHUNK_SIZE
+
+    try:
+        yield_ms = max(0, int(plan.get("yield_ms", DEFAULT_YIELD_MS)))
+    except (ValueError, TypeError):
+        yield_ms = DEFAULT_YIELD_MS
+
+    # Failure recovery mode: "partial" keeps prior executed steps committed; "rollback" auto-reverts
+    on_error_mode = str(plan.get("on_error", "")).strip().lower()
+    partial_recovery = bool(plan.get("partial_recovery", False)) or (on_error_mode in ("partial", "keep_committed", "preserve"))
+
     if not actions:
         return {"error": "Action plan contains no actions"}, 400
-
-    MAX_BATCH_ACTIONS = 1000
-    EXECUTION_CHUNK_SIZE = 20
 
     if len(actions) > MAX_BATCH_ACTIONS:
         return {"error": f"Execution limit exceeded: batch size {len(actions)} > {MAX_BATCH_ACTIONS} maximum"}, 400
 
-    # Validation & pre-computation phase
+    # Pre-computation & path validation phase
+    # Note: If `partial_recovery=True`, we defer missing-source checks to the execution loop
+    # so that if action #35 of 100 has a missing/locked file, actions #1..34 still execute and commit!
     prepared_steps = []
     for idx, act in enumerate(actions):
         act_type = act.get("type")
@@ -72,15 +100,15 @@ def execute_action_plan(plan: dict) -> tuple[dict, int]:
             elif act_type == "move":
                 src = resolve_safe_path(act.get("source", ""))
                 dst = resolve_safe_path(act.get("destination", ""))
-                if not os.path.exists(src):
+                if not os.path.exists(src) and not partial_recovery:
                     return {"error": f"Source not found for move: {act.get('source')}"}, 404
 
                 final_dst = resolve_collision(dst, collision_strategy)
                 if not final_dst:
                     continue
 
-                size = os.path.getsize(src) if os.path.isfile(src) else 0
-                checksum = calculate_file_hash(src) if os.path.isfile(src) else None
+                size = os.path.getsize(src) if os.path.exists(src) and os.path.isfile(src) else 0
+                checksum = calculate_file_hash(src) if os.path.exists(src) and os.path.isfile(src) else None
                 prepared_steps.append({
                     "step_index": idx,
                     "action_type": "move",
@@ -96,15 +124,15 @@ def execute_action_plan(plan: dict) -> tuple[dict, int]:
             elif act_type == "copy":
                 src = resolve_safe_path(act.get("source", ""))
                 dst = resolve_safe_path(act.get("destination", ""))
-                if not os.path.exists(src):
+                if not os.path.exists(src) and not partial_recovery:
                     return {"error": f"Source not found for copy: {act.get('source')}"}, 404
 
                 final_dst = resolve_collision(dst, collision_strategy)
                 if not final_dst:
                     continue
 
-                size = os.path.getsize(src) if os.path.isfile(src) else 0
-                checksum = calculate_file_hash(src) if os.path.isfile(src) else None
+                size = os.path.getsize(src) if os.path.exists(src) and os.path.isfile(src) else 0
+                checksum = calculate_file_hash(src) if os.path.exists(src) and os.path.isfile(src) else None
                 prepared_steps.append({
                     "step_index": idx,
                     "action_type": "copy",
@@ -118,15 +146,15 @@ def execute_action_plan(plan: dict) -> tuple[dict, int]:
                 })
 
             elif act_type == "trash":
-                src = resolve_safe_path(act.get("path", ""))
-                if not os.path.exists(src):
-                    return {"error": f"File not found to trash: {act.get('path')}"}, 404
+                src = resolve_safe_path(act.get("path") or act.get("source") or "")
+                if not os.path.exists(src) and not partial_recovery:
+                    return {"error": f"File not found to trash: {act.get('path') or act.get('source')}"}, 404
 
                 ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
                 trash_filename = f"{ts}_{uuid.uuid4().hex[:6]}_{os.path.basename(src)}"
                 trashed_path = os.path.join(config.TRASH_DIR, trash_filename)
-                size = os.path.getsize(src) if os.path.isfile(src) else 0
-                checksum = calculate_file_hash(src) if os.path.isfile(src) else None
+                size = os.path.getsize(src) if os.path.exists(src) and os.path.isfile(src) else 0
+                checksum = calculate_file_hash(src) if os.path.exists(src) and os.path.isfile(src) else None
 
                 prepared_steps.append({
                     "step_index": idx,
@@ -160,27 +188,76 @@ def execute_action_plan(plan: dict) -> tuple[dict, int]:
             ]
         }, 200
 
+    total_steps = len(prepared_steps)
+    chunks = [prepared_steps[i:i + chunk_size] for i in range(0, total_steps, chunk_size)]
+    total_chunks = len(chunks)
+
+    cancel_token = cancellation_manager.register_batch(plan_id)
+
     publish_event("execution_progress", {
         "phase": "started",
         "batch_id": plan_id,
+        "current_chunk": 0,
+        "chunk_index": 0,
+        "total_chunks": total_chunks,
+        "actions_completed": 0,
         "executed": 0,
-        "total": len(prepared_steps)
+        "total": total_steps,
+        "percent": 0.0
     })
 
     conn = get_db()
     cursor = conn.cursor()
+    executed_actions = []
+    chunks_completed = 0
+    total_yield_sleep_ms = 0
+
     try:
         cursor.execute(
             "INSERT INTO batches (batch_id, intent, total_actions, status) VALUES (?, ?, ?, 'RUNNING')",
-            (plan_id, intent, len(prepared_steps))
+            (plan_id, intent, total_steps)
         )
         conn.commit()
 
-        chunks = [prepared_steps[i:i + EXECUTION_CHUNK_SIZE] for i in range(0, len(prepared_steps), EXECUTION_CHUNK_SIZE)]
-        executed_actions = []
-
         for chunk_idx, chunk in enumerate(chunks):
+            current_chunk_num = chunk_idx + 1
+
             for step in chunk:
+                # Check cancellation token before starting next step
+                if cancel_token.is_cancelled:
+                    conn.commit()
+                    cursor.execute(
+                        "UPDATE batches SET status = 'COMPLETED', executed_actions = ?, completed_at = CURRENT_TIMESTAMP WHERE batch_id = ?",
+                        (len(executed_actions), plan_id)
+                    )
+                    conn.commit()
+                    _invalidate_manifest_cache()
+                    pct = round((len(executed_actions) / total_steps) * 100.0, 1) if total_steps > 0 else 100.0
+                    publish_event("execution_progress", {
+                        "phase": "cancelled",
+                        "batch_id": plan_id,
+                        "current_chunk": current_chunk_num,
+                        "chunk_index": current_chunk_num,
+                        "total_chunks": total_chunks,
+                        "actions_completed": len(executed_actions),
+                        "executed": len(executed_actions),
+                        "total": total_steps,
+                        "percent": pct,
+                        "reason": cancel_token.reason
+                    })
+                    return {
+                        "status": "cancelled",
+                        "cancelled": True,
+                        "batch_id": plan_id,
+                        "executed_actions": len(executed_actions),
+                        "total_actions": total_steps,
+                        "chunks_processed": chunks_completed,
+                        "chunk_size": chunk_size,
+                        "yield_ms": yield_ms,
+                        "reason": cancel_token.reason
+                    }, 200
+
+                # 1. Pre-log action step in SQLite WAL
                 cursor.execute("""
                     INSERT INTO action_ledger 
                     (batch_id, step_index, action_type, source_path, destination_path, file_size_bytes, 
@@ -202,16 +279,26 @@ def execute_action_plan(plan: dict) -> tuple[dict, int]:
                         os.path.relpath(step["dst"], config.BASE_DIR), step["size"], step["checksum"]
                     ))
 
+                # 2. Perform Disk Mutation
                 try:
+                    if step_hook is not None:
+                        step_hook(step["step_index"], step)
+
                     if step["action_type"] == "make_dir":
                         os.makedirs(step["dst"], exist_ok=True)
                     elif step["action_type"] == "move":
+                        if not os.path.exists(step["src"]):
+                            raise FileNotFoundError(f"Source file missing at step {step['step_index']}: {step['src']}")
                         os.makedirs(os.path.dirname(step["dst"]), exist_ok=True)
                         shutil.move(step["src"], step["dst"])
                     elif step["action_type"] == "copy":
+                        if not os.path.exists(step["src"]):
+                            raise FileNotFoundError(f"Source file missing at step {step['step_index']}: {step['src']}")
                         os.makedirs(os.path.dirname(step["dst"]), exist_ok=True)
                         shutil.copy2(step["src"], step["dst"])
                     elif step["action_type"] == "trash":
+                        if not os.path.exists(step["src"]):
+                            raise FileNotFoundError(f"Source file missing at step {step['step_index']}: {step['src']}")
                         os.makedirs(config.TRASH_DIR, exist_ok=True)
                         shutil.move(step["src"], step["dst"])
 
@@ -220,38 +307,94 @@ def execute_action_plan(plan: dict) -> tuple[dict, int]:
                         (action_id,)
                     )
                     executed_actions.append(step)
+
                 except Exception as disk_err:
                     cursor.execute(
                         "UPDATE action_ledger SET status = 'FAILED', error_message = ? WHERE id = ?",
                         (str(disk_err), action_id)
                     )
                     conn.commit()
+                    _invalidate_manifest_cache()
+
+                    pct = round((len(executed_actions) / total_steps) * 100.0, 1) if total_steps > 0 else 0.0
+
+                    # Safe Partial Failure Recovery Mode (Phase 7):
+                    # Keep actions #1..N-1 safely committed in SQLite WAL and allow on-demand rollback of executed subset
+                    if partial_recovery:
+                        cursor.execute(
+                            "UPDATE batches SET status = 'FAILED', executed_actions = ?, completed_at = CURRENT_TIMESTAMP WHERE batch_id = ?",
+                            (len(executed_actions), plan_id)
+                        )
+                        conn.commit()
+                        publish_event("execution_progress", {
+                            "phase": "partial_failure",
+                            "batch_id": plan_id,
+                            "current_chunk": current_chunk_num,
+                            "chunk_index": current_chunk_num,
+                            "total_chunks": total_chunks,
+                            "actions_completed": len(executed_actions),
+                            "executed": len(executed_actions),
+                            "total": total_steps,
+                            "percent": pct,
+                            "failed_step": step["step_index"],
+                            "error": str(disk_err)
+                        })
+                        return {
+                            "status": "partial_failure",
+                            "partial_failure": True,
+                            "rolled_back": False,
+                            "batch_id": plan_id,
+                            "executed_actions": len(executed_actions),
+                            "total_actions": total_steps,
+                            "failed_step": step["step_index"],
+                            "error": f"Execution failed at step {step['step_index']}: {disk_err}. Pre-executed {len(executed_actions)} action(s) remain safely committed in SQLite WAL.",
+                            "can_rollback_executed": len(executed_actions) > 0
+                        }, 207
+
+                    # Default Full Auto-Rollback Mode
                     _rollback_internal(cursor, plan_id)
                     conn.commit()
-                    _invalidate_manifest_cache()
                     publish_event("execution_progress", {
                         "phase": "rolled_back",
                         "batch_id": plan_id,
+                        "current_chunk": current_chunk_num,
+                        "chunk_index": current_chunk_num,
+                        "total_chunks": total_chunks,
+                        "actions_completed": len(executed_actions),
+                        "executed": len(executed_actions),
+                        "total": total_steps,
+                        "percent": pct,
+                        "failed_step": step["step_index"],
                         "error": str(disk_err)
                     })
                     return {
                         "error": f"Execution failed at step {step['step_index']}: {disk_err}. Batch automatically rolled back.",
                         "batch_id": plan_id,
-                        "rolled_back": True
+                        "rolled_back": True,
+                        "failed_step": step["step_index"]
                     }, 500
 
+            # Commit SQLite WAL after each micro-batch chunk
             conn.commit()
+            chunks_completed += 1
+            pct = round((len(executed_actions) / total_steps) * 100.0, 1) if total_steps > 0 else 100.0
+
             publish_event("execution_progress", {
                 "phase": "chunk_committed",
                 "batch_id": plan_id,
-                "chunk_index": chunk_idx + 1,
-                "total_chunks": len(chunks),
+                "current_chunk": current_chunk_num,
+                "chunk_index": current_chunk_num,
+                "total_chunks": total_chunks,
+                "actions_completed": len(executed_actions),
                 "executed": len(executed_actions),
-                "total": len(prepared_steps)
+                "total": total_steps,
+                "percent": pct
             })
 
-            if chunk_idx < len(chunks) - 1:
-                time.sleep(0.02)
+            # Explicit Android OS Watchdog Sleep Yield between chunks (default 50ms)
+            if chunk_idx < total_chunks - 1 and yield_ms > 0:
+                time.sleep(yield_ms / 1000.0)
+                total_yield_sleep_ms += yield_ms
 
         cursor.execute(
             "UPDATE batches SET status = 'COMPLETED', executed_actions = ?, completed_at = CURRENT_TIMESTAMP WHERE batch_id = ?",
@@ -263,8 +406,13 @@ def execute_action_plan(plan: dict) -> tuple[dict, int]:
         publish_event("execution_progress", {
             "phase": "completed",
             "batch_id": plan_id,
+            "current_chunk": total_chunks,
+            "chunk_index": total_chunks,
+            "total_chunks": total_chunks,
+            "actions_completed": len(executed_actions),
             "executed": len(executed_actions),
-            "total": len(prepared_steps)
+            "total": total_steps,
+            "percent": 100.0
         })
 
         execution_summary = []
@@ -311,9 +459,12 @@ def execute_action_plan(plan: dict) -> tuple[dict, int]:
             "status": "success",
             "batch_id": plan_id,
             "executed_actions": len(executed_actions),
-            "total_actions": len(prepared_steps),
-            "chunks_processed": len(chunks),
-            "chunk_size": EXECUTION_CHUNK_SIZE,
+            "total_actions": total_steps,
+            "chunks_processed": chunks_completed,
+            "total_chunks": total_chunks,
+            "chunk_size": chunk_size,
+            "yield_ms": yield_ms,
+            "total_yield_sleep_ms": total_yield_sleep_ms,
             "gradual_execution": True,
             "execution_summary": execution_summary,
             "batch_info": batch_info
@@ -323,6 +474,7 @@ def execute_action_plan(plan: dict) -> tuple[dict, int]:
         conn.rollback()
         return {"error": f"Fatal transaction error: {e}"}, 500
     finally:
+        cancellation_manager.clear_batch(plan_id)
         conn.close()
 
 
