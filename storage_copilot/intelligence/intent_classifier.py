@@ -131,8 +131,63 @@ def classify_intent(
             clean_p_start
         ).strip()
 
-        if remainder and any(v in remainder for v in MUTATION_VERBS) and remainder not in ("move all files",):
-            resolved = normalize_user_prompt(remainder)
+        if remainder:
+            norm_rem = normalize_user_prompt(remainder).lower()
+            if any(w in norm_rem for w in ("duplicate", "dups", "dupes", "redundant", "copies")):
+                return {
+                    "intent": UserIntent.FILE_OPERATION,
+                    "confidence": 1.0,
+                    "raw_prompt": raw_prompt,
+                    "normalized_prompt": "clean duplicate downloads",
+                    "cleaned_query": "clean duplicate downloads",
+                    "resolved_goal": "clean duplicate downloads",
+                    "sub_intent": "deduplicate_clean",
+                    "fast_path_matched": True,
+                    "extracted_entity": "Download",
+                    "is_affirmative": True
+                }
+            if any(w in norm_rem for w in ("forgotten", "stale", "temporary", "temp", "cache", "crdownload")):
+                return {
+                    "intent": UserIntent.FILE_OPERATION,
+                    "confidence": 1.0,
+                    "raw_prompt": raw_prompt,
+                    "normalized_prompt": "clean forgotten files",
+                    "cleaned_query": "clean forgotten files",
+                    "resolved_goal": "clean forgotten files",
+                    "sub_intent": "forgotten_clean",
+                    "fast_path_matched": True,
+                    "extracted_entity": "Download",
+                    "is_affirmative": True
+                }
+            if any(w in norm_rem for w in ("voucher", "vouchers", "challan", "fee slip", "fees")):
+                return {
+                    "intent": UserIntent.FILE_OPERATION,
+                    "confidence": 1.0,
+                    "raw_prompt": raw_prompt,
+                    "normalized_prompt": "sort student vouchers",
+                    "cleaned_query": "sort student vouchers",
+                    "resolved_goal": "sort student vouchers",
+                    "sub_intent": "voucher_sorting",
+                    "fast_path_matched": True,
+                    "extracted_entity": "Download",
+                    "is_affirmative": True
+                }
+            if any(w in norm_rem for w in ("peer", "peers", "classmate", "classmates")):
+                return {
+                    "intent": UserIntent.FILE_OPERATION,
+                    "confidence": 1.0,
+                    "raw_prompt": raw_prompt,
+                    "normalized_prompt": "separate peer documents",
+                    "cleaned_query": "separate peer documents",
+                    "resolved_goal": "separate peer documents",
+                    "sub_intent": "peer_separation",
+                    "fast_path_matched": True,
+                    "extracted_entity": "Download",
+                    "is_affirmative": True
+                }
+
+        if norm_rem and any(v in norm_rem for v in MUTATION_VERBS) and norm_rem not in ("move all files",):
+            resolved = norm_rem
             return {
                 "intent": UserIntent.FILE_OPERATION,
                 "confidence": 1.0,
@@ -180,6 +235,24 @@ def classify_intent(
                 resolved = "organize all my university files"
                 sub = "academic_organization"
             else:
+                if os.getenv("GEMINI_API_KEY") and time.time() >= config.GEMINI_QUOTA_BLOCKED_UNTIL:
+                    llm_res = call_gemini_micro_classifier(normalized_prompt, recent_context=last_asst[:250] if last_asst else "")
+                    if llm_res and isinstance(llm_res, dict) and llm_res.get("intent"):
+                        raw_intent_str = str(llm_res.get("intent", "")).upper().strip()
+                        if raw_intent_str in ("CONVERSATION", "QUERY_INFO", "FILE_OPERATION"):
+                            return {
+                                "intent": getattr(UserIntent, raw_intent_str, UserIntent.CONVERSATION),
+                                "confidence": 0.9,
+                                "raw_prompt": raw_prompt,
+                                "normalized_prompt": normalized_prompt,
+                                "cleaned_query": llm_res.get("target") or normalized_prompt,
+                                "resolved_goal": normalized_prompt,
+                                "sub_intent": "llm_classified",
+                                "fast_path_matched": False,
+                                "extracted_entity": llm_res.get("target", ""),
+                                "is_affirmative": True,
+                                "model_source": llm_res.get("_model_used", "gemini-3.1-flash-lite")
+                            }
                 return {
                     "intent": UserIntent.CONVERSATION,
                     "confidence": 0.95,

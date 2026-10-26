@@ -4,19 +4,19 @@ import requests
 from storage_copilot import config
 
 GEMINI_MODELS = [
+    "gemini-3.1-flash-lite",
+    "gemini-3.5-flash-lite",
+    "gemini-flash-lite-latest",
     "gemini-3.5-flash",
     "gemini-3.6-flash",
-    "gemini-3.5-flash-lite",
-    "gemini-3.1-flash-lite",
     "gemini-3.7-flash",
-    "gemini-3.8-flash",
     "gemini-flash-latest"
 ]
 
 def call_gemini_json(system_prompt: str, user_prompt: str) -> dict:
     """
     Sends structured JSON prompt to Gemini API with robust model fallback and backoff retry.
-    Fast-switches to local deterministic engine if daily project quota (20 req/day) is exhausted.
+    Fast-switches to local deterministic engine if all models exhaust quota.
     """
     if time.time() < config.GEMINI_QUOTA_BLOCKED_UNTIL:
         return {}
@@ -34,6 +34,7 @@ def call_gemini_json(system_prompt: str, user_prompt: str) -> dict:
 
     from storage_copilot.execution.plan_builder import extract_json_plan
 
+    all_exhausted = True
     for model in GEMINI_MODELS:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
         try:
@@ -56,11 +57,11 @@ def call_gemini_json(system_prompt: str, user_prompt: str) -> dict:
                             continue
             elif resp.status_code == 429:
                 resp_text = resp.text
-                if "GenerateRequestsPerDay" in resp_text or "quotaId" in resp_text or "RESOURCE_EXHAUSTED" in resp_text:
-                    print(f"[Storage Copilot Gemini] Daily free-tier quota (20 req/day) reached for project on '{model}'. Fast-switching to deterministic local engine.")
-                    config.GEMINI_QUOTA_BLOCKED_UNTIL = time.time() + 900
-                    return {}
-                print(f"[Storage Copilot Gemini] Model '{model}' returned HTTP 429 (throttled). Retrying with 1s backoff...")
+                if any(q in resp_text for q in ("GenerateRequestsPerDay", "quotaId", "RESOURCE_EXHAUSTED", "exceeded your current quota")):
+                    print(f"[Storage Copilot Gemini] Model '{model}' quota reached. Cascading to next model...")
+                    continue
+                all_exhausted = False
+                print(f"[Storage Copilot Gemini] Model '{model}' throttled (429). Retrying with 1s backoff...")
                 time.sleep(1.0)
                 try:
                     retry_resp = requests.post(url, json=payload, timeout=20)
@@ -81,20 +82,27 @@ def call_gemini_json(system_prompt: str, user_prompt: str) -> dict:
                     pass
                 continue
             elif resp.status_code == 503:
+                all_exhausted = False
                 print(f"[Storage Copilot Gemini] Model '{model}' temporarily unavailable (503). Trying next model...")
                 continue
             else:
+                all_exhausted = False
                 print(f"[Storage Copilot Gemini] Model '{model}' returned HTTP {resp.status_code}.")
                 continue
         except Exception as e:
+            all_exhausted = False
             print(f"[Storage Copilot Gemini] Model '{model}' request failed: {e}")
             continue
+
+    if all_exhausted:
+        print("[Storage Copilot Gemini] All Gemini models exhausted daily quota. Activating 15-minute fallback throttle.")
+        config.GEMINI_QUOTA_BLOCKED_UNTIL = time.time() + 900
     return {}
 
 def call_gemini_text(system_prompt: str, user_prompt: str) -> str:
     """
     Sends conversational/markdown prompt to Gemini API with robust model fallback and returns raw text.
-    Fast-switches to local deterministic engine if daily project quota (20 req/day) is exhausted.
+    Fast-switches to local deterministic engine if all models exhaust quota.
     """
     if time.time() < config.GEMINI_QUOTA_BLOCKED_UNTIL:
         return ""
@@ -110,6 +118,7 @@ def call_gemini_text(system_prompt: str, user_prompt: str) -> str:
         "generationConfig": {"temperature": 0.2}
     }
 
+    all_exhausted = True
     for model in GEMINI_MODELS:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
         try:
@@ -126,11 +135,11 @@ def call_gemini_text(system_prompt: str, user_prompt: str) -> str:
                             return text
             elif resp.status_code == 429:
                 resp_text = resp.text
-                if "GenerateRequestsPerDay" in resp_text or "quotaId" in resp_text or "RESOURCE_EXHAUSTED" in resp_text:
-                    print(f"[Storage Copilot Gemini Text] Daily free-tier quota (20 req/day) reached for project on '{model}'. Fast-switching to deterministic local engine.")
-                    config.GEMINI_QUOTA_BLOCKED_UNTIL = time.time() + 900
-                    return ""
-                print(f"[Storage Copilot Gemini Text] Model '{model}' returned HTTP 429 (throttled). Retrying with 1s backoff...")
+                if any(q in resp_text for q in ("GenerateRequestsPerDay", "quotaId", "RESOURCE_EXHAUSTED", "exceeded your current quota")):
+                    print(f"[Storage Copilot Gemini Text] Model '{model}' quota reached. Cascading to next model...")
+                    continue
+                all_exhausted = False
+                print(f"[Storage Copilot Gemini Text] Model '{model}' throttled (429). Retrying with 1s backoff...")
                 time.sleep(1.0)
                 try:
                     retry_resp = requests.post(url, json=payload, timeout=20)
@@ -148,14 +157,21 @@ def call_gemini_text(system_prompt: str, user_prompt: str) -> str:
                     pass
                 continue
             elif resp.status_code == 503:
+                all_exhausted = False
                 print(f"[Storage Copilot Gemini Text] Model '{model}' temporarily unavailable (503). Trying next model...")
                 continue
             else:
+                all_exhausted = False
                 print(f"[Storage Copilot Gemini Text] Model '{model}' returned HTTP {resp.status_code}.")
                 continue
         except Exception as e:
+            all_exhausted = False
             print(f"[Storage Copilot Gemini Text] Model '{model}' request failed: {e}")
             continue
+
+    if all_exhausted:
+        print("[Storage Copilot Gemini Text] All Gemini models exhausted daily quota. Activating 15-minute fallback throttle.")
+        config.GEMINI_QUOTA_BLOCKED_UNTIL = time.time() + 900
     return ""
 
 def call_gemini_api(system_prompt: str, user_prompt: str) -> dict:
@@ -193,8 +209,14 @@ def call_gemini_micro_classifier(prompt: str, recent_context: str = "") -> dict:
         }
     }
 
-    classifier_models = ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemini-3.5-flash"]
+    classifier_models = [
+        "gemini-3.1-flash-lite",
+        "gemini-3.5-flash-lite",
+        "gemini-flash-lite-latest",
+        "gemini-3.5-flash"
+    ]
     from storage_copilot.execution.plan_builder import extract_json_plan
+    all_exhausted = True
     for model in classifier_models:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
         try:
@@ -210,10 +232,18 @@ def call_gemini_micro_classifier(prompt: str, recent_context: str = "") -> dict:
                             parsed["_model_used"] = model
                             return parsed
             elif resp.status_code == 429:
-                if "GenerateRequestsPerDay" in resp.text or "RESOURCE_EXHAUSTED" in resp.text:
-                    config.GEMINI_QUOTA_BLOCKED_UNTIL = time.time() + 900
-                    return {}
+                if any(q in resp.text for q in ("GenerateRequestsPerDay", "RESOURCE_EXHAUSTED", "exceeded your current quota")):
+                    continue
+                all_exhausted = False
+                continue
+            else:
+                all_exhausted = False
+                continue
         except Exception:
+            all_exhausted = False
             continue
+
+    if all_exhausted:
+        config.GEMINI_QUOTA_BLOCKED_UNTIL = time.time() + 900
     return {}
 
