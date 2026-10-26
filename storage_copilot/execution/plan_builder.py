@@ -2,6 +2,7 @@ import os
 import re
 import json
 
+
 def extract_json_plan(response_text: str) -> dict:
     """Extracts JSON Action Plan from LLM response text."""
     clean_text = (response_text or "").strip()
@@ -16,6 +17,7 @@ def extract_json_plan(response_text: str) -> dict:
         else:
             raise ValueError(f"Could not locate JSON in response:\n{clean_text}")
     return json.loads(json_candidate)
+
 
 def format_plan_badges(plan_actions: list, peer_names: list, manifest_lookup: dict = None) -> list:
     """Post-processes action steps, annotates visual UI badges, and ensures PII inspection attributes."""
@@ -72,7 +74,6 @@ def format_plan_badges(plan_actions: list, peer_names: list, manifest_lookup: di
                     act_copy["badge"] = "FILE_MOVE"
                     act_copy["badge_label"] = "Move File"
 
-            # Annotate PII inspection attributes
             if "ai_inspected" not in act_copy or act_copy["ai_inspected"] is None:
                 if manifest_item and manifest_item.get("has_content"):
                     act_copy["ai_inspected"] = True
@@ -114,29 +115,37 @@ def format_plan_badges(plan_actions: list, peer_names: list, manifest_lookup: di
 
     return formatted_actions
 
+
+TYPO_REPLACEMENTS = [
+    (r"\b(?:fikes|fils|fiels|fls|filez)\b", "files"),
+    (r"\b(?:fike|fil|fiel)\b", "file"),
+    (r"\b(?:cleen|clen|claen|clena)\b", "clean"),
+    (r"\b(?:teh|hte|th)\b", "the"),
+    (r"\b(?:al|alll)\b", "all"),
+    (r"\b(?:vest|bset)\b", "best"),
+    (r"\b(?:oragnize|orgnize|organise|orgnaize|oragnise)\b", "organize"),
+    (r"\b(?:srot|sotr)\b", "sort"),
+    (r"\b(?:doenload|downlod|dowload|downlaod)\b", "download"),
+    (r"\b(?:doenloads|downlods|dowloads|downlaods|dowlands)\b", "downloads"),
+    (r"\b(?:reciept|recipt)\b", "receipt"),
+    (r"\b(?:reciepts|recipts)\b", "receipts"),
+    (r"\b(?:dups|dupes|dupe|dupplicates|duplicats|duplicat)\b", "duplicates"),
+    (r"\b(?:dedup|dedupe)\b", "deduplicate"),
+    (r"\b(?:forgt|forgoten|forgtten)\b", "forgotten"),
+    (r"\b(?:universty|univeristy|uni)\b", "university"),
+    (r"\b(?:vocher|vochers|vouchr)\b", "vouchers"),
+]
+
+
 def normalize_user_prompt(text: str) -> str:
     """
-    Normalizes common mobile typos, abbreviations, and colloquialisms for robust intent understanding:
-    - 'fikes' -> 'files'
-    - 'vest' -> 'best'
-    - 'oragnize' -> 'organize'
-    - 'doenload' -> 'download'
-    - 'reciept' -> 'receipt'
-    - 'dups' / 'dupes' / 'dupe' -> 'duplicates'
-    - 'dedup' -> 'deduplicate'
+    Phase 9 Enhanced Typo & Colloquialism Normalizer:
+    Handles real-world mobile keyboard typos (e.g. 'yes cleen all teh fils in the downlods'
+    -> 'yes clean all the files in the downloads').
     """
     if not text:
         return ""
     t = text.strip()
-    t = re.sub(r"\b(?:fikes|fils|fiel|fiels)\b", "files", t, flags=re.I)
-    t = re.sub(r"\bcleen\b", "clean", t, flags=re.I)
-    t = re.sub(r"\bteh\b", "the", t, flags=re.I)
-    t = re.sub(r"\bvest\b", "best", t, flags=re.I)
-    t = re.sub(r"\b(?:oragnize|organise|orginize)\b", "organize", t, flags=re.I)
-    t = re.sub(r"\b(?:doenload|downlods|dawnload|dwnload|downlod)\b", "download", t, flags=re.I)
-    t = re.sub(r"\breciept\b", "receipt", t, flags=re.I)
-    t = re.sub(r"\b(?:dups|dupes|dupe|dupplicates)\b", "duplicates", t, flags=re.I)
-    t = re.sub(r"\bdedup\b", "deduplicate", t, flags=re.I)
-    t = re.sub(r"\b(?:vouchr|vaucher)\b", "voucher", t, flags=re.I)
-    t = re.sub(r"\b(?:lectur|letcure)\b", "lecture", t, flags=re.I)
+    for pattern, repl in TYPO_REPLACEMENTS:
+        t = re.sub(pattern, repl, t, flags=re.I)
     return t
