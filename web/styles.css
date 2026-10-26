@@ -368,6 +368,121 @@ body {
   color: #bae6fd;
 }
 
+.msg-heading {
+  font-size: 14px;
+  font-weight: 700;
+  color: #38bdf8;
+  margin: 10px 0 6px 0;
+  padding-bottom: 4px;
+  border-bottom: 1px solid rgba(56, 189, 248, 0.2);
+}
+
+.msg-subheading {
+  font-size: 13px;
+  font-weight: 600;
+  color: #7dd3fc;
+  margin: 8px 0 4px 0;
+}
+
+.msg-list {
+  margin: 6px 0 10px 18px;
+  padding: 0;
+}
+
+.msg-list li {
+  margin-bottom: 4px;
+  line-height: 1.45;
+}
+
+/* Quick Audit Action Button inside assistant bubbles */
+.quick-audit-action {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--border-color);
+}
+
+.btn-action-trigger {
+  width: 100%;
+  padding: 10px 14px;
+  background: linear-gradient(135deg, #0284c7, #0369a1);
+  color: #ffffff;
+  border: 1px solid #38bdf8;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+  box-shadow: 0 2px 6px rgba(2, 132, 199, 0.3);
+  transition: all 0.2s ease;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+
+.btn-action-trigger:hover, .btn-action-trigger:active {
+  background: linear-gradient(135deg, #0369a1, #075985);
+  transform: translateY(-1px);
+}
+
+/* Thinking & Loading Indicator */
+.pulse-badge {
+  background: rgba(245, 158, 11, 0.2) !important;
+  color: #fbbf24 !important;
+  animation: pulseOpacity 1.5s infinite ease-in-out;
+}
+
+@keyframes pulseOpacity {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+.thinking-body {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 0 2px 0;
+}
+
+.thinking-text {
+  font-size: 12.5px;
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+.typing-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.typing-indicator span {
+  width: 6px;
+  height: 6px;
+  background-color: #38bdf8;
+  border-radius: 50%;
+  display: inline-block;
+  animation: bounceDot 1.4s infinite ease-in-out both;
+}
+
+.typing-indicator span:nth-child(1) {
+  animation-delay: -0.32s;
+}
+
+.typing-indicator span:nth-child(2) {
+  animation-delay: -0.16s;
+}
+
+@keyframes bounceDot {
+  0%, 80%, 100% {
+    transform: scale(0);
+    opacity: 0.4;
+  }
+  40% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
 /* Diff Review Card */
 .plan-review-box {
   margin-top: 12px;
