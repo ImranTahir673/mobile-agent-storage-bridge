@@ -303,22 +303,22 @@ In response to the comprehensive Technical Audit, the core Python backend is und
 - [x] Move default `LEDGER_DB_PATH` from Android emulated storage (`/storage/emulated/0/.ledger.db`) to Termux app-private storage (`$HOME/.storage_copilot_ledger.db`) to eliminate SQLite WAL corruption on FUSE.
 - [x] Added dedicated Phase 3 security test suite (`test_phase3_security.py`) with 100% pass rate.
 
-#### Phase 4: Performance, Manifest Indexing & Server-Sent Events (SSE) [NEXT]
-- [ ] Background manifest indexer thread with file mtime cache invalidation.
-- [ ] Server-Sent Events (`GET /stream`) for real-time progress events during scanning and execution.
-- [ ] Lazy snippet extraction triggered only for relevant search candidates.
-- [ ] Production WSGI server configuration (`waitress` / `gunicorn`).
+#### Phase 4: Performance, Manifest Indexing & Server-Sent Events (SSE) [COMPLETED]
+- [x] Background manifest indexer thread with file mtime cache invalidation.
+- [x] Server-Sent Events (`GET /stream`) for real-time progress events during scanning and execution.
+- [x] Lazy snippet extraction triggered only for relevant search candidates.
+- [x] Production WSGI server configuration (`waitress` / `gunicorn`).
 
-#### Phase 5: Content-Derived Collision-Free Naming Engine
-- [ ] Deep sequence & title extraction (`ContentDerivedNamer`) for university lectures, assignments, and papers.
-- [ ] Elimination of hardcoded sequence counters (`_04`, `_02`).
-- [ ] User-configurable naming templates via `user_profile.json`.
+#### Phase 5: Content-Derived Collision-Free Naming Engine [COMPLETED]
+- [x] Deep sequence & title extraction (`ContentDerivedNamer`) for university lectures, assignments, and papers.
+- [x] Elimination of hardcoded sequence counters (`_04`, `_02`).
+- [x] User-configurable naming templates via `user_profile.json`.
 
-#### Phase 6: Deduplication & Stale File Reconnaissance
-- [ ] Near-duplicate text detection using 3-gram Jaccard similarity (threshold $\ge 0.85$).
-- [ ] "Forgotten Files Finder" identifying stale downloads (>90 days), temporary files, and orphaned screenshots.
+#### Phase 6: Deduplication & Stale File Reconnaissance [COMPLETED]
+- [x] Near-duplicate text detection using 3-gram Jaccard similarity (threshold $\ge 0.85$).
+- [x] "Forgotten Files Finder" identifying stale downloads (>90 days), temporary files, and orphaned screenshots.
 
-#### Phase 7: Micro-Batch Architecture & Android OS Watchdog Yields
+#### Phase 7: Micro-Batch Architecture & Android OS Watchdog Yields [NEXT]
 - [ ] Chunked execution (20 files/batch) with explicit OS sleep yields (50ms) to prevent Android thermal/process killer termination.
 - [ ] Safe partial failure recovery and cancellation handlers.
 
