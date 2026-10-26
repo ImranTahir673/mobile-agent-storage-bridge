@@ -18,7 +18,8 @@ from storage_copilot.storage.deduplication import (
 )
 from storage_copilot.storage.collision_resolver import ensure_unique_plan_destinations
 from storage_copilot.storage.namer import ContentDerivedNamer, extract_course_code
-from storage_copilot.intelligence.gemini_client import call_gemini_json, call_gemini_text
+from storage_copilot.intelligence.gemini_client import call_gemini_json, call_gemini_text, call_gemini_text_with_meta
+from storage_copilot.intelligence.session_context import session_context_store
 from storage_copilot.intelligence.document_classifier import classify_document, parse_query_intent
 from storage_copilot.intelligence.search_engine import (
     score_file_relevance,
@@ -126,6 +127,7 @@ def handle_conversation_turn(
         if cat_counts.get("Other", 0) > 0:
             rows.append(f"| 📁 **Other Files** | `{target_folder}/Other/` | **{cat_counts['Other']} files** |")
 
+        session_context_store.update_context(target_folder=target_folder, last_intent="CONVERSATION", last_sub_intent="format_sorting_proposal", unorganized_count=len(unorg_files))
         table_md = "\n".join(rows)
         msg = f"""Hello {owner_name}. I have analyzed your `{target_folder}/` directory and identified **{len(unorg_files)} unorganized files**.
 
@@ -150,6 +152,7 @@ To ensure system stability and safety, files will be moved in batches (25 files 
             "plan": [],
             "badges": ["Chat", "Format Breakdown"],
             "format_sorting_active": True,
+            "origin_badge": "🛡️ Offline Heuristic",
             "version": config.APP_VERSION,
             "model_source": "deterministic-engine",
             "is_llm": False,
@@ -208,19 +211,21 @@ Respond directly and warmly to {owner_name} in concise Markdown.
 - Ground your advice in the actual filenames present above.
 - Explain your capabilities clearly (local storage reconnaissance, in-memory PII redaction, academic vs. peer routing, SHA-256 & 3-gram Jaccard deduplication, and 1-tap SQLite WAL rollback).
 """
-    llm_text = call_gemini_text(sys_prompt, raw_prompt)
+    llm_text, used_model = call_gemini_text_with_meta(sys_prompt, raw_prompt, task_tier="fast")
     if llm_text:
+        m_src = used_model or classification.get("model_source") or "gemini-3.1-flash-lite"
         return {
             "type": "conversation",
             "intent": "CONVERSATION",
             "message": llm_text,
             "analysis": llm_text,
             "version": config.APP_VERSION,
-            "model_source": "gemini-flash",
+            "model_source": m_src,
             "is_llm": True,
+            "origin_badge": f"⚡ Gemini AI ({m_src})",
             "actions": [],
             "plan": [],
-            "badges": ["Chat", "Advice"],
+            "badges": [f"⚡ Gemini AI ({m_src})", "Chat", "Advice"],
             "quick_chips": [
                 "📋 Sort Student Vouchers",
                 "👥 Separate Peer Documents",
@@ -277,6 +282,7 @@ def handle_query_info_turn(
         days_match = re.search(r"(\d+)\s*(?:day|days)", lower_norm)
         stale_days = float(days_match.group(1)) if days_match else 90.0
         forg_res = find_forgotten_files(config.BASE_STORAGE_DIR, target_folder=target_folder, stale_days=stale_days)
+        session_context_store.record_forgotten_audit(target_folder, forg_res, stale_days=stale_days)
         if forg_res["total_forgotten"] == 0:
             msg = (
                 f"✨ **No forgotten or stale files detected in `{target_folder}/`!**\n\n"
@@ -329,8 +335,9 @@ def handle_query_info_turn(
 
     # 1b. Deduplication Audit (Exact SHA-256 & Near-Duplicate Jaccard)
     if sub_intent in ("deduplicate_audit", "deduplicate_near_audit"):
-        include_near = (sub_intent == "deduplicate_near_audit")
+        include_near = (sub_intent == "deduplicate_near_audit") or bool(classification.get("include_near"))
         dup_res = find_duplicate_clusters(config.BASE_STORAGE_DIR, target_folder, include_near=include_near)
+        session_context_store.record_duplicate_audit(target_folder, dup_res, include_near_requested=include_near)
         if dup_res["total_duplicates"] == 0:
             msg = (
                 f"✨ **No duplicate files detected in `{target_folder}/`!**\n\n"
@@ -685,16 +692,22 @@ def handle_file_operation_turn(
             ]
         }
 
-    # 1b. Deduplication Clean Sweep (Exact SHA-256 & Near-Duplicate Jaccard)
+    # 1b. Deduplication Clean Sweep (Exact SHA-256 & Near-Duplicate Jaccard with Phase 9 Continuity)
     if sub_intent in ("deduplicate_clean", "deduplicate_near_clean"):
-        include_near = (sub_intent == "deduplicate_near_clean") or "near" in lower_p
+        session_ctx = session_context_store.get_context(target_folder)
+        include_near = (
+            sub_intent == "deduplicate_near_clean"
+            or bool(classification.get("include_near"))
+            or bool(session_ctx.get("include_near"))
+            or int(session_ctx.get("near_duplicates_count", 0)) > 0
+        )
         dup_res = find_duplicate_clusters(config.BASE_STORAGE_DIR, target_folder, include_near=include_near)
+        # Phase 9 Safeguard: If exact SHA-256 scan found 0 duplicates, automatically check 3-gram Jaccard near-duplicates!
         if dup_res["total_duplicates"] == 0 and not include_near:
-            near_dup_res = find_duplicate_clusters(config.BASE_STORAGE_DIR, target_folder, include_near=True)
-            if near_dup_res["total_duplicates"] > 0:
-                dup_res = near_dup_res
+            near_res = find_duplicate_clusters(config.BASE_STORAGE_DIR, target_folder, include_near=True)
+            if near_res["total_duplicates"] > 0:
+                dup_res = near_res
                 include_near = True
-
         if dup_res["total_duplicates"] == 0:
             msg = (
                 f"✨ **No duplicate files detected in `{target_folder}/`!**\n\n"

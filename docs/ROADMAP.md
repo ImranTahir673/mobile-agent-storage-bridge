@@ -41,7 +41,12 @@ This roadmap details the engineering phases required to evolve the **Mobile Agen
                                                   |
                                                   v
 +---------------------------------------------------------------------------------------------------+
-| Phase 4: Native Standalone Android Application (Jetpack Compose, Room DB, SAF) [NEXT MILESTONE]   |
+| Phase 9: AI-First Intent Orchestrator & Conversational Continuity Engine [COMPLETED]             |
++---------------------------------------------------------------------------------------------------+
+                                                  |
+                                                  v
++---------------------------------------------------------------------------------------------------+
+| Phase 10: Native Standalone Android Application (Jetpack Compose, Room DB, SAF) [NEXT MILESTONE]  |
 +---------------------------------------------------------------------------------------------------+
 ```
 
@@ -396,3 +401,26 @@ Transition from the 3-tier hybrid developer prototype (Termux + Python + Cloudfl
   - 20-file batch execution on real `/storage/emulated/0/Download` directory.
   - 1-tap instant rollback verification (100% byte fidelity).
 - [ ] Generate signed release APK / AAB bundle and publish documentation.
+
+---
+
+## 9. Phase 9: AI-First Intent Orchestrator & Conversational Continuity Engine [COMPLETED]
+
+Transitioned from brittle regexes to an AI-First Intent Orchestrator with per-model circuit breaking, session continuity, and automatic near-duplicate sweeping.
+
+### 9.1 Tasks & Deliverables
+
+- [x] **9.1 Per-Model 429 Cooldown Circuit Breaker (`gemini_client.py`)**
+  - Replaced global `GEMINI_QUOTA_BLOCKED_UNTIL` with per-model cooldown timestamps (`MODEL_COOLDOWN_UNTIL`).
+  - Cascades past single-model 429 quota exhaustion to working sibling models (`gemini-3.1-flash-lite`, `gemini-3.5-flash-lite`).
+- [x] **9.2 State-Preserving Session Context Store (`session_context.py`)**
+  - Thread-safe `SessionContextStore` tracking audit state across turns (`include_near`, `near_duplicates_count`, `stale_days`).
+  - Resolves multi-turn follow-ups (*"Yes"*, *"Clean them"*, *"Yes clean all the duplicate files"*) with full context.
+- [x] **9.3 Mobile Keyboard Typo Resilience (`plan_builder.py` & `intent_classifier.py`)**
+  - Normalizes severe mobile typos (`cleen`, `teh`, `fils`, `downlods`, `duplicats`, `forgt`).
+  - AI-First resolution mode routes prompts to `call_gemini_micro_classifier` before falling back to offline heuristics.
+- [x] **9.4 Dual-Sweep Near-Duplicate Fallback (`tier_handlers.py`)**
+  - Automatically sweeps 3-gram Jaccard near-duplicates when exact SHA-256 duplicates are 0.
+  - Attaches origin badges (`⚡ Gemini AI (<model>)` vs `🛡️ Offline Heuristic`) to every response.
+- [x] **9.5 Full Test Suite Pass (All 30 Tests in 14 Suites Passing)**
+  - Validated by `test_phase9_ai_continuity.py`.
