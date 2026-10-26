@@ -522,6 +522,12 @@ dom.promptForm.addEventListener("submit", (e) => {
   submitPrompt(dom.promptInput.value);
 });
 
+dom.promptInput.addEventListener("focus", () => {
+  setTimeout(() => {
+    scrollToBottom();
+  }, 250);
+});
+
 document.querySelectorAll(".chip-btn[data-prompt]").forEach((btn) => {
   btn.addEventListener("click", () => submitPrompt(btn.getAttribute("data-prompt")));
 });
