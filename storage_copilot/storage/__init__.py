@@ -11,6 +11,15 @@ from .scanner import (
     manifest_index_manager,
     MAX_HYDRATE_CANDIDATES
 )
+from .namer import (
+    DEFAULT_NAMING_TEMPLATES,
+    ContentDerivedNamer,
+    derive_content_filename,
+    extract_sequence_info,
+    extract_course_code,
+    extract_academic_topic,
+    extract_financial_bill_info,
+)
 
 __all__ = [
     "extract_file_snippet",
@@ -26,4 +35,11 @@ __all__ = [
     "is_cryptic_filename",
     "manifest_index_manager",
     "MAX_HYDRATE_CANDIDATES",
+    "DEFAULT_NAMING_TEMPLATES",
+    "ContentDerivedNamer",
+    "derive_content_filename",
+    "extract_sequence_info",
+    "extract_course_code",
+    "extract_academic_topic",
+    "extract_financial_bill_info",
 ]

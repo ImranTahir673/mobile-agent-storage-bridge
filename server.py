@@ -1,6 +1,6 @@
 """
 Storage Copilot - Mobile Storage Bridge & Intelligent File Organizer
-v0.6.4-live Entry Point, Production Threaded WSGI Runner & Backward Compatibility Shim.
+v0.6.5-live Entry Point, Production Threaded WSGI Runner & Backward Compatibility Shim.
 
 All core modules have been refactored into the `storage_copilot` package.
 This module re-exports all public symbols and synchronizes runtime path overrides
@@ -71,6 +71,15 @@ from storage_copilot.storage.scanner import (
     is_cryptic_filename,
     manifest_index_manager,
     MAX_HYDRATE_CANDIDATES,
+)
+from storage_copilot.storage.namer import (
+    DEFAULT_NAMING_TEMPLATES,
+    ContentDerivedNamer,
+    derive_content_filename,
+    extract_sequence_info,
+    extract_course_code,
+    extract_academic_topic,
+    extract_financial_bill_info,
 )
 
 # Intelligence
@@ -165,7 +174,7 @@ sys.modules[__name__].__class__ = _ServerCompatModule
 
 def run_production_server(host: str = "0.0.0.0", port: int = 8080, threads: int = 8):
     """
-    Phase 4 Production WSGI Runner:
+    Phase 4/5 Production WSGI Runner:
     - Warms up the background directory manifest index in a non-blocking daemon thread.
     - Prefers `waitress` (1 process, 8 threads) so SSE connections, `_SNIPPET_CACHE`,
       and `EventBus` share the same process memory space without blocking.
