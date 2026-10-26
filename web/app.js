@@ -60,15 +60,42 @@ function buildHeaders() {
 
 function formatMarkdownSimple(text) {
   if (!text) return "";
-  let html = text
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
-  html = html.replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>");
-  html = html.replace(/\*(.*?)\*/g, "<em>$1</em>");
-  html = html.replace(/`([^`]+)`/g, "<code>$1</code>");
-  html = html.replace(/\n/g, "<br/>");
-  return `<p>${html}</p>`;
+  const lines = text.split("\n");
+  let html = "";
+  let inList = false;
+
+  for (let rawLine of lines) {
+    let line = rawLine.trim();
+    if (!line) {
+      if (inList) { html += "</ul>"; inList = false; }
+      continue;
+    }
+
+    let escaped = line
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;");
+
+    escaped = escaped.replace(/`([^`]+)`/g, "<code>$1</code>");
+    escaped = escaped.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+    escaped = escaped.replace(/\*([^*]+)\*/g, "<em>$1</em>");
+
+    if (escaped.startsWith("#### ")) {
+      if (inList) { html += "</ul>"; inList = false; }
+      html += `<h4 class="msg-subheading">${escaped.slice(5)}</h4>`;
+    } else if (escaped.startsWith("### ")) {
+      if (inList) { html += "</ul>"; inList = false; }
+      html += `<h3 class="msg-heading">${escaped.slice(4)}</h3>`;
+    } else if (escaped.startsWith("- ") || escaped.startsWith("* ")) {
+      if (!inList) { html += "<ul class='msg-list'>"; inList = true; }
+      html += `<li>${escaped.slice(2)}</li>`;
+    } else {
+      if (inList) { html += "</ul>"; inList = false; }
+      html += `<p>${escaped}</p>`;
+    }
+  }
+  if (inList) html += "</ul>";
+  return html;
 }
 
 function scrollToBottom() {
@@ -188,6 +215,34 @@ function appendUserMessage(text) {
   scrollToBottom();
 }
 
+function showThinkingIndicator(promptText) {
+  removeThinkingIndicator();
+  const div = document.createElement("div");
+  div.className = "chat-message assistant-message thinking-bubble";
+  div.id = "activeThinkingBubble";
+  div.innerHTML = `
+    <div class="msg-header">
+      <span class="msg-author">Storage Copilot</span>
+      <span class="msg-badge pulse-badge">ANALYZING...</span>
+    </div>
+    <div class="msg-body thinking-body">
+      <div class="typing-indicator">
+        <span></span><span></span><span></span>
+      </div>
+      <span class="thinking-text">Auditing storage & evaluating request...</span>
+    </div>
+  `;
+  dom.chatContainer.appendChild(div);
+  scrollToBottom();
+}
+
+function removeThinkingIndicator() {
+  const el = document.getElementById("activeThinkingBubble");
+  if (el) {
+    el.remove();
+  }
+}
+
 function appendAssistantResponse(data) {
   const div = document.createElement("div");
   div.className = "chat-message assistant-message";
@@ -204,6 +259,36 @@ function appendAssistantResponse(data) {
     </div>
     <div class="msg-body">${formatMarkdownSimple(data.message || data.analysis || "")}</div>
   `;
+
+  // If this response is a Duplicate Audit with duplicates, add 1-click Clean Duplicates button
+  if (data.duplicate_summary && data.duplicate_summary.total_duplicates > 0 && data.type !== "plan") {
+    const actionBox = document.createElement("div");
+    actionBox.className = "quick-audit-action";
+    actionBox.innerHTML = `
+      <button type="button" class="btn-action-trigger">
+        🧹 Clean ${data.duplicate_summary.total_duplicates} Redundant Copy(ies) (${data.duplicate_summary.reclaimable_human})
+      </button>
+    `;
+    actionBox.querySelector("button").addEventListener("click", () => {
+      submitPrompt("Clean duplicate downloads");
+    });
+    div.appendChild(actionBox);
+  }
+
+  // If this response is a Forgotten Files Audit with items, add 1-click Clean Forgotten Files button
+  if (data.forgotten_summary && data.forgotten_summary.total_forgotten > 0 && data.type !== "plan") {
+    const actionBox = document.createElement("div");
+    actionBox.className = "quick-audit-action";
+    actionBox.innerHTML = `
+      <button type="button" class="btn-action-trigger">
+        🗑️ Clean ${data.forgotten_summary.total_forgotten} Forgotten File(s) (${data.forgotten_summary.reclaimable_human})
+      </button>
+    `;
+    actionBox.querySelector("button").addEventListener("click", () => {
+      submitPrompt("Clean forgotten files");
+    });
+    div.appendChild(actionBox);
+  }
 
   // If this response contains a proposed Action Plan, render Selective Diff Cards
   const actions = data.actions || (data.plan && data.plan.actions) || [];
@@ -360,6 +445,8 @@ async function submitPrompt(promptText) {
   dom.promptInput.value = "";
   const targetFolder = dom.targetFolderSelect.value || "Download";
 
+  showThinkingIndicator(cleanPrompt);
+
   try {
     const resp = await fetch("/propose_plan", {
       method: "POST",
@@ -371,10 +458,12 @@ async function submitPrompt(promptText) {
       }),
     });
     const data = await resp.json();
+    removeThinkingIndicator();
     state.conversationHistory.push({ role: "user", content: cleanPrompt });
     state.conversationHistory.push({ role: "assistant", content: data.message || "" });
     appendAssistantResponse(data);
   } catch (err) {
+    removeThinkingIndicator();
     appendAssistantResponse({
       type: "conversation",
       intent: "CONVERSATION",
