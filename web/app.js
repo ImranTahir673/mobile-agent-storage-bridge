@@ -248,6 +248,13 @@ function appendAssistantResponse(data) {
   div.className = "chat-message assistant-message";
 
   const intentLabel = data.intent || (data.type || "conversation").toUpperCase();
+  let aiEngineBadge = "";
+  if (data.is_llm) {
+    aiEngineBadge = `<span class="msg-badge badge-llm">⚡ Gemini AI</span>`;
+  } else if (data.model_source === "offline-heuristic" || data.fallback_alert) {
+    aiEngineBadge = `<span class="msg-badge badge-offline">🛡️ Offline Heuristic</span>`;
+  }
+
   const badgesHtml = (data.badges || [intentLabel])
     .map((b) => `<span class="msg-badge">${b}</span>`)
     .join(" ");
@@ -255,6 +262,7 @@ function appendAssistantResponse(data) {
   div.innerHTML = `
     <div class="msg-header">
       <span class="msg-author">Storage Copilot</span>
+      ${aiEngineBadge}
       ${badgesHtml}
     </div>
     <div class="msg-body">${formatMarkdownSimple(data.message || data.analysis || "")}</div>
@@ -608,6 +616,9 @@ async function checkApiStatus() {
     if (data.gemini_configured && !data.quota_limited) {
       dom.aiStatusPill.textContent = `⚡ Gemini Online (${data.masked_key || "Active"})`;
       dom.aiStatusPill.className = "status-pill status-online";
+    } else if (data.gemini_configured && data.quota_limited) {
+      dom.aiStatusPill.textContent = "⚠️ Gemini Quota Throttled";
+      dom.aiStatusPill.className = "status-pill status-connecting";
     } else {
       dom.aiStatusPill.textContent = "🛡️ Local Offline Engine";
       dom.aiStatusPill.className = "status-pill status-offline";

@@ -128,11 +128,15 @@ def normalize_user_prompt(text: str) -> str:
     if not text:
         return ""
     t = text.strip()
-    t = re.sub(r"\bfikes\b", "files", t, flags=re.I)
+    t = re.sub(r"\b(?:fikes|fils|fiel|fiels)\b", "files", t, flags=re.I)
+    t = re.sub(r"\bcleen\b", "clean", t, flags=re.I)
+    t = re.sub(r"\bteh\b", "the", t, flags=re.I)
     t = re.sub(r"\bvest\b", "best", t, flags=re.I)
-    t = re.sub(r"\boragnize\b", "organize", t, flags=re.I)
-    t = re.sub(r"\bdoenload\b", "download", t, flags=re.I)
+    t = re.sub(r"\b(?:oragnize|organise|orginize)\b", "organize", t, flags=re.I)
+    t = re.sub(r"\b(?:doenload|downlods|dawnload|dwnload|downlod)\b", "download", t, flags=re.I)
     t = re.sub(r"\breciept\b", "receipt", t, flags=re.I)
     t = re.sub(r"\b(?:dups|dupes|dupe|dupplicates)\b", "duplicates", t, flags=re.I)
     t = re.sub(r"\bdedup\b", "deduplicate", t, flags=re.I)
+    t = re.sub(r"\b(?:vouchr|vaucher)\b", "voucher", t, flags=re.I)
+    t = re.sub(r"\b(?:lectur|letcure)\b", "lecture", t, flags=re.I)
     return t

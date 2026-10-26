@@ -687,8 +687,14 @@ def handle_file_operation_turn(
 
     # 1b. Deduplication Clean Sweep (Exact SHA-256 & Near-Duplicate Jaccard)
     if sub_intent in ("deduplicate_clean", "deduplicate_near_clean"):
-        include_near = (sub_intent == "deduplicate_near_clean")
+        include_near = (sub_intent == "deduplicate_near_clean") or "near" in lower_p
         dup_res = find_duplicate_clusters(config.BASE_STORAGE_DIR, target_folder, include_near=include_near)
+        if dup_res["total_duplicates"] == 0 and not include_near:
+            near_dup_res = find_duplicate_clusters(config.BASE_STORAGE_DIR, target_folder, include_near=True)
+            if near_dup_res["total_duplicates"] > 0:
+                dup_res = near_dup_res
+                include_near = True
+
         if dup_res["total_duplicates"] == 0:
             msg = (
                 f"✨ **No duplicate files detected in `{target_folder}/`!**\n\n"
