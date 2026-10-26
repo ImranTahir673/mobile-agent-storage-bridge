@@ -1,263 +1,165 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
-  <title>Agent Storage Bridge | Mobile Copilot</title>
-  <meta name="description" content="Mobile-first intelligent storage organizer and autonomous file bridging copilot with human-in-the-loop diff review.">
-  <meta name="theme-color" content="#0B0F19">
-  
-  <!-- Fonts -->
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
-  
-  <link rel="stylesheet" href="styles.css">
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>Storage Copilot — On-Device AI File Organizer</title>
+  <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
-  <!-- Mobile App Frame Container -->
-  <div class="mobile-viewport app-container" id="app-container">
-    
-    <!-- Top App Bar -->
-    <header class="app-bar" id="app-bar">
-      <div class="app-branding">
-        <div class="brand-icon-wrapper">
-          <svg class="brand-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path stroke-linecap="round" stroke-linejoin="round" d="M9 3v2m6-2v2M9 19v2m6-2v2M5 9H3m2 6H3m18-6h-2m2 6h-2M7 19h10a2 2 0 002-2V7a2 2 0 00-2-2H7a2 2 0 00-2 2v10a2 2 0 002 2zM9 9h6v6H9V9z" />
-          </svg>
-        </div>
-        <div class="brand-text">
-          <span class="brand-title">Storage Copilot</span>
-          <span id="bridge-version" class="brand-subtitle text-xs text-slate-400">Android Bridge v0.6.2-live</span>
+  <div class="app-shell">
+    <!-- Top Header -->
+    <header class="app-header">
+      <div class="brand-group">
+        <div class="brand-logo">🛡️</div>
+        <div>
+          <h1 class="brand-title">Storage Copilot</h1>
+          <div class="brand-subtitle">
+            <span id="version-badge">v0.6.7-live</span>
+            <span class="dot-sep">•</span>
+            <span id="sse-status-pill" class="status-pill status-connecting">● Connecting SSE...</span>
+            <span class="dot-sep">•</span>
+            <span id="ai-status-pill" class="status-pill status-offline">🛡️ Local Engine</span>
+          </div>
         </div>
       </div>
 
-      <div class="header-controls">
-        <button class="clear-chat-btn" id="clear-chat-btn" title="Fresh Session (Clear Conversation)">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path stroke-linecap="round" stroke-linejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-          </svg>
-        </button>
-        <button class="ai-status-pill" id="ai-status-pill" title="Configure Google Gemini Intelligence Key">
-          <span class="ai-sparkle">✨</span>
-          <span class="ai-status-label" id="ai-status-label">AI Status</span>
-        </button>
-        <div class="engine-badge online" id="engine-status-badge" title="Bridge server connection status">
-          <span class="pulse-dot"></span>
-          <span class="badge-text" id="engine-status-text">Engine Online</span>
-        </div>
+      <div class="header-actions">
+        <select id="target-folder-select" class="folder-select" title="Target Folder">
+          <option value="Download" selected>📥 Download/</option>
+          <option value="Documents">📁 Documents/</option>
+        </select>
+        <button id="btn-open-settings" class="icon-btn" title="API Key & Security Settings">⚙️ Settings</button>
       </div>
     </header>
 
-    <!-- Persistent Undo Banner / Snackbar -->
-    <section class="undo-banner" id="active-batch-banner" style="display: none;">
-      <div class="undo-content">
-        <div class="undo-indicator">
-          <svg class="undo-icon-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path stroke-linecap="round" stroke-linejoin="round" d="M3 10h10a5 5 0 015 5v2m0 0l-3-3m3 3l3-3M3 10l3 3m-3-3l3-3" />
-          </svg>
-        </div>
-        <div class="undo-details">
-          <div class="undo-title" id="undo-title">Batch Executed</div>
-          <div class="undo-meta" id="undo-meta">Ready for rollback</div>
-        </div>
+    <!-- Phase 6 & Utility Quick-Action Toolbar -->
+    <section class="toolbar-strip">
+      <div class="toolbar-left">
+        <button id="btn-seed-fixtures" class="tool-btn tool-btn-primary" title="Create sample mobile files in Download/">
+          🌱 Seed Demo Fixtures
+        </button>
+        <label class="inline-toggle" title="Also seed exact duplicate copies when seeding fixtures">
+          <input type="checkbox" id="chk-seed-duplicates" checked />
+          <span>+Duplicates</span>
+        </label>
+
+        <span class="toolbar-divider"></span>
+
+        <button id="btn-scan-duplicates" class="tool-btn" title="Scan for exact SHA-256 and optional 3-gram Jaccard near-duplicates">
+          🔍 Scan Duplicates
+        </button>
+        <label class="inline-toggle" title="Enable Phase 6 3-Gram Jaccard Near-Duplicate Detection (>= 85% similarity)">
+          <input type="checkbox" id="chk-include-near" checked />
+          <span>Near-Dup (3-Gram)</span>
+        </label>
+
+        <span class="toolbar-divider"></span>
+
+        <button id="btn-scan-forgotten" class="tool-btn" title="Find stale downloads (>90d), .tmp files, and orphaned screenshots">
+          🕰️ Forgotten Files
+        </button>
+        <button id="btn-view-folders" class="tool-btn" title="Inspect organized folders status">
+          📂 Organized Folders
+        </button>
       </div>
-      <button class="undo-action-btn" id="undo-btn" title="Revert last batch">
-        <span>Undo</span>
-        <kbd>1-Tap</kbd>
-      </button>
     </section>
 
-    <!-- Main Scrollable Content Area -->
-    <main class="content-scroll" id="content-scroll">
-      
-      <!-- System Header Card -->
-      <section class="system-card" id="system-header-card">
-        <div class="user-profile-row">
-          <div class="avatar-ring">
-            <div class="avatar-inner">IT</div>
-          </div>
-          <div class="user-meta">
-            <div class="user-name-row">
-              <h1 class="user-name" id="user-display-name">Imran Tahir</h1>
-              <span class="user-tag" id="user-id-tag">BSAI-182</span>
-            </div>
-            <p class="user-sub" id="user-org">BS AI • University Storage Profile</p>
-          </div>
-          <button class="seed-btn" id="seed-btn" title="Seed sample realistic test files in storage">
-            <svg class="seed-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-            </svg>
-            <span>Seed Fixtures</span>
+    <!-- Persistent 1-Tap Undo / Recent Batch Banner -->
+    <section id="undo-banner" class="undo-banner hidden">
+      <div class="undo-banner-info">
+        <span class="undo-icon">⏪</span>
+        <div>
+          <div id="undo-banner-title" class="undo-title">Last Batch Completed</div>
+          <div id="undo-banner-subtitle" class="undo-subtitle">Ready for 1-tap atomic rollback via SQLite WAL</div>
+        </div>
+      </div>
+      <div class="undo-banner-actions">
+        <button id="btn-undo-batch" class="btn-undo">1-Tap Undo Batch</button>
+      </div>
+    </section>
+
+    <!-- Live SSE Telemetry & Micro-Batch Progress Bar (Phase 4 & Phase 7) -->
+    <section id="live-progress-panel" class="progress-panel hidden">
+      <div class="progress-header">
+        <div class="progress-labels">
+          <span id="progress-phase-badge" class="phase-badge">EXECUTING</span>
+          <span id="progress-status-text" class="progress-text">Processing micro-batch...</span>
+        </div>
+        <div class="progress-right">
+          <span id="progress-percent-text" class="progress-percent">0%</span>
+          <button id="btn-cancel-execution" class="btn-cancel hidden" title="Gracefully stop execution after current file">
+            ⏹ Stop Execution
           </button>
         </div>
+      </div>
+      <div class="progress-track">
+        <div id="progress-bar-fill" class="progress-fill" style="width: 0%;"></div>
+      </div>
+    </section>
 
-        <div class="storage-path-box">
-          <div class="storage-path-header">
-            <span class="path-label">STORAGE BASE PATH</span>
-            <span class="path-status" id="path-status">Strict Sandbox</span>
-          </div>
-          <div class="path-display-row">
-            <svg class="folder-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path stroke-linecap="round" stroke-linejoin="round" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
-            </svg>
-            <span class="path-text" id="storage-base-path">Loading storage path...</span>
-            <button class="copy-path-btn" id="copy-path-btn" title="Copy base path">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <path stroke-linecap="round" stroke-linejoin="round" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
-              </svg>
-            </button>
-          </div>
+    <!-- Main Chat & Interactive Diff Stream -->
+    <main id="chat-container" class="chat-container">
+      <div class="chat-message assistant-message">
+        <div class="msg-header">
+          <span class="msg-author">Storage Copilot</span>
+          <span class="msg-badge">READY</span>
         </div>
-
-        <!-- Peer Separation Matrix Pills -->
-        <div class="peer-matrix-box">
-          <div class="matrix-header">
-            <span class="matrix-title">REGISTERED PEERS (PHASE 2.7 ROUTING)</span>
-            <span class="matrix-count" id="peer-count-badge">4 Peers</span>
-          </div>
-          <div class="peer-pills" id="peer-pills-list">
-            <span class="peer-pill"><span class="peer-avatar">F</span> Fawad</span>
-            <span class="peer-pill"><span class="peer-avatar">S</span> Sumbal</span>
-            <span class="peer-pill"><span class="peer-avatar">A</span> Ahmed</span>
-            <span class="peer-pill"><span class="peer-avatar">Y</span> Yousaf</span>
-          </div>
+        <div class="msg-body">
+          <p>Welcome! I am your on-device <strong>Storage Copilot</strong> running with pre-flight RAM PII sanitization, 3-Tier Intent Routing, and an atomic SQLite WAL rollback ledger.</p>
+          <p>Tap <strong>🌱 Seed Demo Fixtures</strong> above to populate <code>Download/</code> with realistic test documents, or try any command below:</p>
         </div>
-      </section>
-
-      <!-- Conversational & Timeline Stream -->
-      <section class="conversation-stream" id="conversation-stream">
-        <!-- Initial Welcome Message -->
-        <div class="message-card assistant welcome-card">
-          <div class="message-header">
-            <div class="assistant-avatar">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <path stroke-linecap="round" stroke-linejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z" />
-              </svg>
-            </div>
-            <div class="message-sender">Storage Copilot</div>
-            <span class="message-time">Just now</span>
-          </div>
-          <div class="message-body">
-            <p><strong>👋 Welcome Imran!</strong> I'm your mobile storage organization copilot.</p>
-            <p>I analyze unstructured files on your device, protect your personal documents by routing peer files away, sort university vouchers, and clean up temporary files—with <strong>human-in-the-loop diff approval</strong> and <strong>1-tap rollback</strong>.</p>
-            <p class="hint-text">💡 Tap one of the quick task chips below or type any custom request.</p>
-          </div>
-        </div>
-      </section>
-
-      <!-- Bottom Spacing for Fixed Bar -->
-      <div class="bottom-dock-spacer"></div>
+      </div>
     </main>
 
-    <!-- Bottom Dock: Quick Chips + Natural Language Input Bar -->
-    <div class="bottom-dock input-dock" id="bottom-dock">
-      
-      <!-- Quick Task Chips (Horizontally Scrollable) -->
-      <div class="chips-container dock-scroll" id="chips-container">
-        <button class="task-chip highlight-chip" data-task="Process next batch of files in Download" id="chip-next-batch">
-          <span class="chip-emoji">⏩</span>
-          <span class="chip-label">Process Next Batch</span>
-        </button>
-        <button class="task-chip" data-task="Clean duplicate downloads" id="chip-duplicates">
-          <span class="chip-emoji">🧹</span>
-          <span class="chip-label">Clean Duplicates</span>
-        </button>
-        <button class="task-chip" data-task="Sort Student Vouchers" id="chip-vouchers">
-          <span class="chip-emoji">📋</span>
-          <span class="chip-label">Sort Student Vouchers</span>
-        </button>
-        <button class="task-chip" data-task="Separate Peer Documents" id="chip-peers">
-          <span class="chip-emoji">👥</span>
-          <span class="chip-label">Separate Peer Documents</span>
-        </button>
-        <button class="task-chip" data-task="Clean Download Names" id="chip-names">
-          <span class="chip-emoji">🏷️</span>
-          <span class="chip-label">Clean Download Names</span>
-        </button>
-        <button class="task-chip" data-task="Cleanup Old Screenshots" id="chip-cleanup">
-          <span class="chip-emoji">🗑️</span>
-          <span class="chip-label">Cleanup Old Screenshots</span>
-        </button>
-      </div>
-
-      <!-- Natural Language Input Bar -->
-      <div class="input-bar-wrapper">
-        <form class="input-bar" id="prompt-form" autocomplete="off">
-          <div class="input-icon">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path stroke-linecap="round" stroke-linejoin="round" d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z" />
-            </svg>
-          </div>
-          <input 
-            type="text" 
-            id="prompt-input" 
-            class="prompt-input" 
-            placeholder="Ask copilot or type an instruction..."
-            aria-label="Agent prompt input"
-          />
-          <button type="submit" id="send-btn" class="send-btn" title="Submit instruction">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path stroke-linecap="round" stroke-linejoin="round" d="M5 12h14M12 5l7 7-7 7" />
-            </svg>
-          </button>
-        </form>
-      </div>
-
+    <!-- Contextual Quick Chips Bar -->
+    <div id="quick-chips-bar" class="quick-chips-bar">
+      <button class="chip-btn" data-prompt="What can you do? Give me some suggestions for my files.">💡 Storage Advice</button>
+      <button class="chip-btn" data-prompt="List university lectures">📚 List Lectures</button>
+      <button class="chip-btn" data-prompt="Clean Download Names">🏷️ Clean Download Names</button>
+      <button class="chip-btn" data-prompt="Sort student vouchers">🧾 Sort Vouchers</button>
+      <button class="chip-btn" data-prompt="Separate peer documents">👥 Separate Peer Docs</button>
+      <button class="chip-btn" data-prompt="Find forgotten files">🕰️ Find Forgotten Files</button>
+      <button class="chip-btn" data-prompt="Clean duplicate downloads">🧹 Clean Duplicates</button>
     </div>
 
-    <!-- Notification Toast / Snackbar -->
-    <div class="toast-snackbar" id="toast" role="alert" aria-live="polite">
-      <div class="toast-content" id="toast-message">Message</div>
-    </div>
-
-    <!-- Google Gemini AI Key Configuration Modal -->
-    <div class="modal-overlay" id="api-key-modal" style="display: none;">
-      <div class="modal-dialog glass-modal">
-        <div class="modal-header">
-          <div class="modal-title-wrap">
-            <span class="modal-icon">✨</span>
-            <h3 class="modal-title">Gemini AI Engine</h3>
-          </div>
-          <button class="modal-close-btn" id="close-api-modal-btn" aria-label="Close modal">&times;</button>
-        </div>
-        <div class="modal-body">
-          <p class="modal-desc">
-            Enable advanced contextual reasoning, intelligent document understanding, and dynamic conversation powered by Google Gemini.
-          </p>
-          <div class="key-status-row" id="key-status-row">
-            <span class="key-status-label">Engine Status:</span>
-            <span class="key-status-val" id="key-current-status">Checking...</span>
-          </div>
-          <div class="input-group">
-            <label for="gemini-key-input" class="input-label">Google Gemini API Key</label>
-            <div class="key-input-wrapper">
-              <input 
-                type="password" 
-                id="gemini-key-input" 
-                class="key-text-input" 
-                placeholder="AIzaSy..." 
-                autocomplete="off"
-              />
-              <button type="button" class="key-toggle-btn" id="toggle-key-visibility" title="Show/Hide Key">👁️</button>
-            </div>
-            <p class="input-hint">Your API key is securely saved to your local Termux <code>.env</code> file on your device.</p>
-          </div>
-          <div class="api-feedback-msg" id="api-feedback-msg" style="display: none;"></div>
-        </div>
-        <div class="modal-footer">
-          <button class="btn btn-secondary" id="cancel-api-btn">Cancel</button>
-          <button class="btn btn-primary" id="save-api-key-btn">
-            <span class="btn-spinner" id="save-key-spinner" style="display: none;"></span>
-            <span id="save-key-btn-text">Verify & Save</span>
-          </button>
-        </div>
-      </div>
-    </div>
-
+    <!-- Bottom Prompt Input Bar -->
+    <footer class="composer-bar">
+      <form id="prompt-form" class="composer-form">
+        <input
+          type="text"
+          id="prompt-input"
+          class="composer-input"
+          placeholder="Ask to find files, summarize notes, or organize downloads..."
+          autocomplete="off"
+        />
+        <button type="submit" id="btn-send-prompt" class="btn-send">Send ➔</button>
+      </form>
+    </footer>
   </div>
 
-  <!-- Scripts -->
+  <!-- Settings Modal (Gemini API Key & Bearer Token) -->
+  <div id="settings-modal" class="modal-backdrop hidden">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h2>⚙️ Copilot Settings & Security</h2>
+        <button id="btn-close-settings" class="modal-close">✕</button>
+      </div>
+      <div class="modal-body">
+        <label class="field-label" for="input-api-key">Google Gemini API Key (Optional — Offline Engine active if blank)</label>
+        <input type="password" id="input-api-key" class="field-input" placeholder="AIzaSy..." />
+        <p class="field-hint">Stored locally in <code>.env</code> on your device. Never shared with third parties.</p>
+
+        <label class="field-label" for="input-bearer-token">Zero-Trust Bearer Token (Optional for Remote / Tunnel Auth)</label>
+        <input type="password" id="input-bearer-token" class="field-input" placeholder="Paste ~/.storage_copilot_token if remote..." />
+        <p class="field-hint">Required when accessing the bridge via Cloudflare Tunnel or when <code>COPILOT_ENFORCE_AUTH=1</code>.</p>
+      </div>
+      <div class="modal-footer">
+        <button id="btn-save-settings" class="btn-primary">Save Settings</button>
+      </div>
+    </div>
+  </div>
+
   <script src="app.js"></script>
 </body>
 </html>

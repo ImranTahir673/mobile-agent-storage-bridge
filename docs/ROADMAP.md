@@ -324,10 +324,12 @@ In response to the comprehensive Technical Audit, the core Python backend is und
 - [x] Real-time SSE progress events (`execution_progress`) with per-chunk SQLite WAL commits.
 - [x] Graceful in-flight batch cancellation via `POST /cancel_execution` and `cancellation_manager`.
 
-#### Phase 8: Mobile Web UI Streaming & Native Standalone Android Application [NEXT]
-- [ ] SSE streaming integration in `web/app.js`.
-- [ ] Interactive diff preview cards with individual action checkboxes.
-- [ ] Standalone Kotlin/Compose Android client synchronization.
+#### Phase 8: Mobile Web UI Streaming, Selective Diff Execution & Manual Testing Runbook [COMPLETED]
+- [x] SSE streaming integration in `web/app.js` (`connected`, `classifier_intent`, `scan_progress`, `plan_synthesized`, `execution_progress`).
+- [x] Interactive diff preview cards with individual action checkboxes and selective subset execution.
+- [x] Live micro-batch progress bar with in-flight cancellation (`POST /cancel_execution`).
+- [x] Phase 6 Deep Deduplication and Forgotten Files quick-action toolbar.
+- [x] Comprehensive 10-scenario manual testing runbook (`docs/MANUAL_TESTING_GUIDE.md`).
 
 ---
 

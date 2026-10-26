@@ -1,1477 +1,597 @@
 /**
- * Agent Storage Bridge - Mobile Copilot Front-End Controller
- * Clean Vanilla ES6+ - Zero External Dependencies
+ * Storage Copilot — Phase 8 Mobile Web UI Controller
+ * Features:
+ * - Real-time Server-Sent Events (SSE) telemetry via EventSource (/stream?token=...)
+ * - Live micro-batch progress bar & in-flight cancellation (POST /cancel_execution)
+ * - Interactive Action Plan Diff Cards with selective per-action checkboxes
+ * - Phase 6 Deep Deduplication (Exact SHA-256 + 3-Gram Jaccard Near-Duplicate toggle)
+ * - Phase 6 Forgotten Files Finder (>90d stale downloads, .tmp files, orphaned screenshots)
+ * - Persistent 1-Tap Undo Banner wired to SQLite WAL (/recent_batch & /rollback_batch)
  */
 
-document.addEventListener('DOMContentLoaded', () => {
-  // ==============================================================================
-  // State Management
-  // ==============================================================================
-  const state = {
-    engineOnline: false,
-    baseDir: '',
-    userProfile: null,
-    lastBatchId: null,
-    lastBatchActions: 0,
-    lastExecutionSummary: [],
-    activePlan: null,
-    selectedActionIds: new Set(),
-    conversationHistory: [],
-    autoBatchActive: false
+const state = {
+  conversationHistory: [],
+  activeBatchId: null,
+  lastCompletedBatchId: null,
+  sseSource: null,
+  bearerToken: localStorage.getItem("copilot_bearer_token") || "",
+};
+
+const dom = {
+  chatContainer: document.getElementById("chat-container"),
+  promptForm: document.getElementById("prompt-form"),
+  promptInput: document.getElementById("prompt-input"),
+  targetFolderSelect: document.getElementById("target-folder-select"),
+  quickChipsBar: document.getElementById("quick-chips-bar"),
+  sseStatusPill: document.getElementById("sse-status-pill"),
+  aiStatusPill: document.getElementById("ai-status-pill"),
+  versionBadge: document.getElementById("version-badge"),
+  undoBanner: document.getElementById("undo-banner"),
+  undoBannerTitle: document.getElementById("undo-banner-title"),
+  undoBannerSubtitle: document.getElementById("undo-banner-subtitle"),
+  btnUndoBatch: document.getElementById("btn-undo-batch"),
+  progressPanel: document.getElementById("live-progress-panel"),
+  progressPhaseBadge: document.getElementById("progress-phase-badge"),
+  progressStatusText: document.getElementById("progress-status-text"),
+  progressPercentText: document.getElementById("progress-percent-text"),
+  progressBarFill: document.getElementById("progress-bar-fill"),
+  btnCancelExecution: document.getElementById("btn-cancel-execution"),
+  btnSeedFixtures: document.getElementById("btn-seed-fixtures"),
+  chkSeedDuplicates: document.getElementById("chk-seed-duplicates"),
+  btnScanDuplicates: document.getElementById("btn-scan-duplicates"),
+  chkIncludeNear: document.getElementById("chk-include-near"),
+  btnScanForgotten: document.getElementById("btn-scan-forgotten"),
+  btnViewFolders: document.getElementById("btn-view-folders"),
+  settingsModal: document.getElementById("settings-modal"),
+  btnOpenSettings: document.getElementById("btn-open-settings"),
+  btnCloseSettings: document.getElementById("btn-close-settings"),
+  btnSaveSettings: document.getElementById("btn-save-settings"),
+  inputApiKey: document.getElementById("input-api-key"),
+  inputBearerToken: document.getElementById("input-bearer-token"),
+};
+
+function buildHeaders() {
+  const headers = { "Content-Type": "application/json" };
+  if (state.bearerToken) {
+    headers["Authorization"] = `Bearer ${state.bearerToken}`;
+  }
+  return headers;
+}
+
+function formatMarkdownSimple(text) {
+  if (!text) return "";
+  let html = text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+  html = html.replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>");
+  html = html.replace(/\*(.*?)\*/g, "<em>$1</em>");
+  html = html.replace(/`([^`]+)`/g, "<code>$1</code>");
+  html = html.replace(/\n/g, "<br/>");
+  return `<p>${html}</p>`;
+}
+
+function scrollToBottom() {
+  dom.chatContainer.scrollTop = dom.chatContainer.scrollHeight;
+}
+
+// ============================================================================
+// 1. Live Server-Sent Events (SSE) Connection (/stream)
+// ============================================================================
+function connectSSEStream() {
+  if (state.sseSource) {
+    state.sseSource.close();
+  }
+  const tokenParam = state.bearerToken ? `?token=${encodeURIComponent(state.bearerToken)}` : "";
+  const streamUrl = `/stream${tokenParam}`;
+  const es = new EventSource(streamUrl);
+  state.sseSource = es;
+
+  es.addEventListener("connected", () => {
+    dom.sseStatusPill.textContent = "● Live SSE Connected";
+    dom.sseStatusPill.className = "status-pill status-online";
+  });
+
+  es.addEventListener("classifier_intent", (evt) => {
+    try {
+      const data = JSON.parse(evt.data);
+      showProgressBanner(
+        data.intent || "CLASSIFYING",
+        `Intent routed via ${data.fast_path_matched ? "0ms Fast-Path Gate" : "Micro-LLM Router"} (${data.sub_intent || "standard"})`,
+        15,
+        false
+      );
+    } catch (_) {}
+  });
+
+  es.addEventListener("scan_progress", (evt) => {
+    try {
+      const data = JSON.parse(evt.data);
+      if (data.phase === "scanning_metadata") {
+        showProgressBanner("SCANNING", `Scanning ${data.target_folder}/ (${data.total_files} files)...`, 35, false);
+      } else if (data.phase === "scan_complete") {
+        showProgressBanner("INDEXED", `Indexed ${data.total_files} files (${data.hydrated_snippets || 0} snippets hydrated)`, 70, false);
+        setTimeout(() => hideProgressBannerIfIdle(), 900);
+      }
+    } catch (_) {}
+  });
+
+  es.addEventListener("plan_synthesized", () => {
+    setTimeout(() => hideProgressBannerIfIdle(), 600);
+  });
+
+  es.addEventListener("execution_progress", (evt) => {
+    try {
+      const data = JSON.parse(evt.data);
+      state.activeBatchId = data.batch_id || state.activeBatchId;
+      const pct = typeof data.percent === "number" ? data.percent : 0;
+
+      if (data.phase === "started" || data.phase === "chunk_committed") {
+        const chunkStr = data.total_chunks ? `Chunk ${data.current_chunk}/${data.total_chunks}` : "Executing";
+        showProgressBanner(
+          "EXECUTING",
+          `${chunkStr} — ${data.actions_completed || data.executed || 0} of ${data.total || 0} actions committed`,
+          pct,
+          true
+        );
+      } else if (data.phase === "completed") {
+        showProgressBanner("COMPLETED", `Completed ${data.executed || 0} actions (100%)`, 100, false);
+        state.activeBatchId = null;
+        refreshRecentBatchBanner();
+        setTimeout(() => hideProgressBannerIfIdle(), 1500);
+      } else if (data.phase === "cancelled") {
+        showProgressBanner("CANCELLED", `Stopped cleanly after ${data.actions_completed || 0} actions`, pct, false);
+        state.activeBatchId = null;
+        refreshRecentBatchBanner();
+        setTimeout(() => hideProgressBannerIfIdle(), 2000);
+      } else if (data.phase === "partial_failure" || data.phase === "rolled_back") {
+        showProgressBanner("HALTED", data.error || "Execution encountered an error", pct, false);
+        state.activeBatchId = null;
+        refreshRecentBatchBanner();
+      }
+    } catch (_) {}
+  });
+
+  es.onerror = () => {
+    dom.sseStatusPill.textContent = "● SSE Reconnecting...";
+    dom.sseStatusPill.className = "status-pill status-connecting";
   };
+}
 
-  // ==============================================================================
-  // DOM Elements
-  // ==============================================================================
-  const elements = {
-    clearChatBtn: document.getElementById('clear-chat-btn'),
-    engineStatusBadge: document.getElementById('engine-status-badge'),
-    engineStatusText: document.getElementById('engine-status-text'),
-    userDisplayName: document.getElementById('user-display-name'),
-    userIdTag: document.getElementById('user-id-tag'),
-    userOrg: document.getElementById('user-org'),
-    storageBasePath: document.getElementById('storage-base-path'),
-    copyPathBtn: document.getElementById('copy-path-btn'),
-    seedBtn: document.getElementById('seed-btn'),
-    peerPillsList: document.getElementById('peer-pills-list'),
-    peerCountBadge: document.getElementById('peer-count-badge'),
-    undoBanner: document.getElementById('active-batch-banner') || document.getElementById('undo-banner'),
-    undoTitle: document.getElementById('undo-title'),
-    undoMeta: document.getElementById('undo-meta'),
-    undoBtn: document.getElementById('undo-btn'),
-    conversationStream: document.getElementById('conversation-stream'),
-    contentScroll: document.getElementById('content-scroll'),
-    chipsContainer: document.getElementById('chips-container'),
-    promptForm: document.getElementById('prompt-form'),
-    promptInput: document.getElementById('prompt-input'),
-    sendBtn: document.getElementById('send-btn'),
-    toast: document.getElementById('toast'),
-    toastMessage: document.getElementById('toast-message'),
-    aiStatusPill: document.getElementById('ai-status-pill'),
-    aiStatusLabel: document.getElementById('ai-status-label'),
-    apiKeyModal: document.getElementById('api-key-modal'),
-    closeApiModalBtn: document.getElementById('close-api-modal-btn'),
-    cancelApiBtn: document.getElementById('cancel-api-btn'),
-    geminiKeyInput: document.getElementById('gemini-key-input'),
-    toggleKeyVisibility: document.getElementById('toggle-key-visibility'),
-    saveApiKeyBtn: document.getElementById('save-api-key-btn'),
-    saveKeySpinner: document.getElementById('save-key-spinner'),
-    saveKeyBtnText: document.getElementById('save-key-btn-text'),
-    keyCurrentStatus: document.getElementById('key-current-status'),
-    apiFeedbackMsg: document.getElementById('api-feedback-msg')
-  };
+function showProgressBanner(phase, text, percent, showCancelBtn) {
+  dom.progressPanel.classList.remove("hidden");
+  dom.progressPhaseBadge.textContent = phase;
+  dom.progressStatusText.textContent = text;
+  dom.progressPercentText.textContent = `${Math.round(percent)}%`;
+  dom.progressBarFill.style.width = `${Math.min(100, Math.max(0, percent))}%`;
+  if (showCancelBtn) {
+    dom.btnCancelExecution.classList.remove("hidden");
+  } else {
+    dom.btnCancelExecution.classList.add("hidden");
+  }
+}
 
-  // ==============================================================================
-  // Toast Notifications
-  // ==============================================================================
-  let toastTimer = null;
-  function showToast(message, type = 'info', duration = 3200) {
-    if (!elements.toast) return;
-    clearTimeout(toastTimer);
-    elements.toastMessage.textContent = message;
-    elements.toast.className = `toast-snackbar show ${type}`;
-    toastTimer = setTimeout(() => {
-      elements.toast.className = 'toast-snackbar';
-    }, duration);
+function hideProgressBannerIfIdle() {
+  if (!state.activeBatchId) {
+    dom.progressPanel.classList.add("hidden");
+  }
+}
+
+// ============================================================================
+// 2. Chat & Interactive Diff Plan Rendering (Selective Checkboxes)
+// ============================================================================
+function appendUserMessage(text) {
+  const div = document.createElement("div");
+  div.className = "chat-message user-message";
+  div.textContent = text;
+  dom.chatContainer.appendChild(div);
+  scrollToBottom();
+}
+
+function appendAssistantResponse(data) {
+  const div = document.createElement("div");
+  div.className = "chat-message assistant-message";
+
+  const intentLabel = data.intent || (data.type || "conversation").toUpperCase();
+  const badgesHtml = (data.badges || [intentLabel])
+    .map((b) => `<span class="msg-badge">${b}</span>`)
+    .join(" ");
+
+  div.innerHTML = `
+    <div class="msg-header">
+      <span class="msg-author">Storage Copilot</span>
+      ${badgesHtml}
+    </div>
+    <div class="msg-body">${formatMarkdownSimple(data.message || data.analysis || "")}</div>
+  `;
+
+  // If this response contains a proposed Action Plan, render Selective Diff Cards
+  const actions = data.actions || (data.plan && data.plan.actions) || [];
+  if (data.type === "plan" && actions.length > 0) {
+    const planObj = data.plan || {
+      plan_id: `plan-${Date.now()}`,
+      description: data.message || "Proposed Action Plan",
+      actions: actions,
+    };
+    const reviewBox = buildSelectivePlanReviewCard(planObj);
+    div.appendChild(reviewBox);
   }
 
-  const EXPECTED_VERSION = 'v0.6.2-live';
+  dom.chatContainer.appendChild(div);
 
-  async function fetchHealth() {
-    try {
-      const resp = await fetch('/health', {
-        headers: { 'Accept': 'application/json' }
-      });
-      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-      const data = await resp.json();
-      
-      state.engineOnline = data.status === 'running';
-      state.baseDir = data.base_dir || '';
-      state.version = data.version || '';
+  if (Array.isArray(data.quick_chips) && data.quick_chips.length > 0) {
+    renderQuickChips(data.quick_chips);
+  }
+  scrollToBottom();
+}
 
-      const versionBadge = document.getElementById('bridge-version');
-      if (versionBadge) {
-        versionBadge.textContent = `Android Bridge ${state.version || EXPECTED_VERSION}`;
-      }
+function buildSelectivePlanReviewCard(plan) {
+  const box = document.createElement("div");
+  box.className = "plan-review-box";
 
-      if (data.version && data.version !== EXPECTED_VERSION) {
-        console.warn(`[Version Mismatch] Expected ${EXPECTED_VERSION}, got ${data.version}`);
-      } else {
-        console.log(`[Version Verified] Running ${EXPECTED_VERSION}`);
-      }
+  const actions = plan.actions || [];
+  const selectedIndices = new Set(actions.map((_, idx) => idx));
 
-      elements.engineStatusBadge.className = 'engine-badge online';
-      elements.engineStatusText.textContent = 'Engine Online';
-      elements.storageBasePath.textContent = state.baseDir || 'Connected Root';
-      elements.storageBasePath.title = state.baseDir;
-      return data;
-    } catch (err) {
-      console.warn('Bridge health check failed:', err);
-      state.engineOnline = false;
-      elements.engineStatusBadge.className = 'engine-badge offline';
-      elements.engineStatusText.textContent = 'Bridge Offline';
-      elements.storageBasePath.textContent = 'Offline (Check server)';
-      return null;
-    }
+  const header = document.createElement("div");
+  header.className = "plan-review-header";
+
+  const countLabel = document.createElement("span");
+  countLabel.style.fontSize = "12px";
+  countLabel.style.fontWeight = "700";
+
+  const controls = document.createElement("div");
+  controls.className = "plan-select-controls";
+
+  const btnSelectAll = document.createElement("button");
+  btnSelectAll.type = "button";
+  btnSelectAll.className = "link-btn";
+  btnSelectAll.textContent = "Select All";
+
+  const btnClearAll = document.createElement("button");
+  btnClearAll.type = "button";
+  btnClearAll.className = "link-btn";
+  btnClearAll.textContent = "Clear All";
+
+  controls.appendChild(btnSelectAll);
+  controls.appendChild(btnClearAll);
+  header.appendChild(countLabel);
+  header.appendChild(controls);
+
+  const listEl = document.createElement("div");
+  listEl.className = "diff-list";
+
+  const execBtn = document.createElement("button");
+  execBtn.type = "button";
+  execBtn.className = "btn-execute-plan";
+
+  function updateSelectionUI() {
+    const count = selectedIndices.size;
+    countLabel.textContent = `${count} of ${actions.length} actions selected`;
+    execBtn.textContent = `✅ Execute Selected (${count} Action${count === 1 ? "" : "s"})`;
+    execBtn.disabled = count === 0;
   }
 
-  async function fetchAiStatus() {
-    try {
-      const resp = await fetch('/api_status');
-      if (!resp.ok) return;
-      const data = await resp.json();
-      state.geminiConfigured = data.gemini_configured;
+  const checkboxes = [];
+  actions.forEach((act, idx) => {
+    const card = document.createElement("div");
+    card.className = "diff-card";
 
-      if (elements.aiStatusPill) {
-        if (data.gemini_configured) {
-          elements.aiStatusPill.className = 'ai-status-pill configured';
-          if (elements.aiStatusLabel) elements.aiStatusLabel.textContent = '✨ Gemini AI Active';
-          if (elements.keyCurrentStatus) elements.keyCurrentStatus.textContent = `Active (${data.masked_key})`;
-        } else {
-          elements.aiStatusPill.className = 'ai-status-pill unconfigured';
-          if (elements.aiStatusLabel) elements.aiStatusLabel.textContent = '⚡ Setup Gemini Key';
-          if (elements.keyCurrentStatus) elements.keyCurrentStatus.textContent = 'Not Configured (Offline Mode)';
-        }
-      }
-      return data;
-    } catch (err) {
-      console.warn('Could not fetch AI status:', err);
-    }
-  }
-
-  async function fetchUserProfile() {
-    try {
-      const resp = await fetch('/user_profile');
-      if (!resp.ok) return;
-      const data = await resp.json();
-      const profile = data.profile || {};
-      state.userProfile = profile;
-
-      // Update Owner Details
-      const identity = profile.user_identity || {};
-      const primaryName = identity.primary_name || 'Imran Tahir';
-      elements.userDisplayName.textContent = primaryName;
-
-      const ids = identity.identifiers || [];
-      elements.userIdTag.textContent = ids.length > 0 ? ids[0] : 'BSAI-182';
-      elements.userOrg.textContent = identity.organization ? `${identity.organization} • Storage Profile` : 'University Storage Profile';
-
-      // Update Registered Peers
-      const peers = profile.known_peers || [];
-      if (peers.length > 0) {
-        elements.peerCountBadge.textContent = `${peers.length} Peers`;
-        elements.peerPillsList.innerHTML = peers.map(peer => {
-          const initial = (peer.name || 'P')[0].toUpperCase();
-          return `
-            <span class="peer-pill" title="Routing: ${peer.designated_folder || 'Documents/Peers/' + peer.name}">
-              <span class="peer-avatar">${initial}</span>
-              ${peer.name}
-            </span>
-          `;
-        }).join('');
-      }
-    } catch (err) {
-      console.warn('Could not load user profile:', err);
-    }
-  }
-
-  async function fetchRecentBatch() {
-    try {
-      const resp = await fetch('/recent_batch');
-      if (!resp.ok) return;
-      const data = await resp.json();
-      const batch = data.batch;
-      if (batch && batch.batch_id) {
-        state.lastBatchId = batch.batch_id;
-        state.lastBatchActions = batch.executed_actions || batch.total_actions || 0;
-        state.lastExecutionSummary = batch.execution_summary || [];
-        updateUndoBanner(batch.batch_id, batch.status, state.lastBatchActions);
-      }
-    } catch (err) {
-      console.warn('Could not fetch recent batch:', err);
-    }
-  }
-
-  async function seedDemoFixtures() {
-    try {
-      elements.seedBtn.disabled = true;
-      elements.seedBtn.style.opacity = '0.6';
-      showToast('Seeding fixture files in Download/...', 'info');
-
-      const resp = await fetch('/seed_fixtures', { method: 'POST' });
-      const data = await resp.json();
-
-      if (data.status === 'success') {
-        showToast(`✓ Fixtures ready: ${data.files.length} test files available`, 'success');
-      } else {
-        showToast('Seed finished with note', 'info');
-      }
-    } catch (err) {
-      showToast(`Seed failed: ${err.message}`, 'error');
-    } finally {
-      elements.seedBtn.disabled = false;
-      elements.seedBtn.style.opacity = '1';
-    }
-  }
-
-  // ==============================================================================
-  // Undo Banner Controller
-  // ==============================================================================
-  function updateUndoBanner(batchId, status = 'COMPLETED', actionCount = 0) {
-    if (!batchId) {
-      elements.undoBanner.style.display = 'none';
-      return;
-    }
-
-    elements.undoBanner.style.display = 'flex';
-    const shortId = batchId.length > 10 ? `${batchId.substring(0, 8)}...` : batchId;
-
-    if (status === 'ROLLED_BACK') {
-      elements.undoTitle.textContent = `Batch #${shortId} (Reverted)`;
-      elements.undoMeta.textContent = `Rolled back via inverted ledger`;
-      elements.undoBtn.disabled = true;
-      elements.undoBtn.style.opacity = '0.4';
-      elements.undoBtn.style.cursor = 'not-allowed';
-    } else {
-      elements.undoTitle.textContent = `Batch #${shortId} Active`;
-      elements.undoMeta.textContent = `${actionCount} filesystem operations executed`;
-      elements.undoBtn.disabled = false;
-      elements.undoBtn.style.opacity = '1';
-      elements.undoBtn.style.cursor = 'pointer';
-    }
-  }
-
-  async function handleRollback() {
-    if (!state.lastBatchId) return;
-
-    try {
-      elements.undoBtn.disabled = true;
-      elements.undoBtn.innerHTML = `<span>Reverting...</span>`;
-
-      const resp = await fetch('/rollback_batch', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ batch_id: state.lastBatchId })
-      });
-
-      const data = await resp.json();
-      if (!resp.ok) {
-        throw new Error(data.error || 'Failed to rollback batch');
-      }
-
-      showToast(`✓ Rollback complete! ${data.reverted_actions || 0} operations reverted`, 'success', 4000);
-      updateUndoBanner(state.lastBatchId, 'ROLLED_BACK', data.reverted_actions);
-
-      // Append notice to chat timeline
-      appendSystemNotice(`⟲ <strong>Rollback Executed:</strong> Batch <code>${state.lastBatchId.substring(0, 8)}</code> was reverted. All original paths restored.`);
-    } catch (err) {
-      showToast(`Undo Error: ${err.message}`, 'error', 4500);
-      elements.undoBtn.disabled = false;
-      elements.undoBtn.innerHTML = `<span>Undo</span><kbd>1-Tap</kbd>`;
-    }
-  }
-
-  // ==============================================================================
-  // Chat Timeline Rendering
-  // ==============================================================================
-  // ==============================================================================
-  // Conversation History Storage & Dynamic Chips
-  // ==============================================================================
-  const STORAGE_KEY = 'storage_bridge_chat_history_v2';
-  const BUILD_STORAGE_KEY = 'storage_bridge_last_build_id';
-
-  function saveChatHistory() {
-    try {
-      sessionStorage.setItem(STORAGE_KEY, JSON.stringify(state.conversationHistory));
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(state.conversationHistory));
-    } catch (e) {
-      console.warn('Could not save conversation history:', e);
-    }
-  }
-
-  function loadChatHistory() {
-    try {
-      const saved = sessionStorage.getItem(STORAGE_KEY) || localStorage.getItem(STORAGE_KEY);
-      if (!saved) return false;
-      const history = JSON.parse(saved);
-      if (!Array.isArray(history) || history.length === 0) return false;
-      
-      elements.conversationStream.innerHTML = '';
-      state.conversationHistory = history;
-      history.forEach(item => {
-        if (item.role === 'user') {
-          appendUserMessage(item.content, false);
-        } else if (item.role === 'assistant') {
-          const modelSource = item.model_source;
-          const isLlm = item.is_llm;
-          if (item.type === 'query_info') {
-            appendQueryInfoMessage(item.content, item.queryResults, modelSource, isLlm, false);
-          } else if (item.type === 'plan' && item.plan) {
-            appendAssistantMessage(item.content, modelSource, isLlm, false);
-            renderDiffReview(item.plan, modelSource, isLlm, false);
-          } else {
-            appendAssistantMessage(item.content, modelSource, isLlm, false);
-          }
-        }
-      });
-      return true;
-    } catch (e) {
-      console.warn('Could not restore chat history:', e);
-      return false;
-    }
-  }
-
-  function clearChatHistory(notifyUser = true) {
-    try {
-      localStorage.removeItem(STORAGE_KEY);
-      sessionStorage.removeItem(STORAGE_KEY);
-    } catch (e) {}
-    state.conversationHistory = [];
-    state.activePlan = null;
-    state.selectedActionIds.clear();
-    elements.conversationStream.innerHTML = `
-      <div class="message-card assistant welcome-card">
-        <div class="message-header">
-          <div class="assistant-avatar">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path stroke-linecap="round" stroke-linejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z" />
-            </svg>
-          </div>
-          <div class="message-sender">Storage Copilot</div>
-          <span class="message-time">Just now</span>
-        </div>
-        <div class="message-body">
-          <p><strong>👋 Welcome Imran!</strong> I'm your mobile storage organization copilot.</p>
-          <p>I analyze unstructured files on your device, protect your personal documents by routing peer files away, sort university vouchers, and clean up temporary files—with <strong>human-in-the-loop diff approval</strong> and <strong>1-tap rollback</strong>.</p>
-          <p class="hint-text">💡 Tap one of the quick task chips below or type any custom request.</p>
-        </div>
-      </div>
-    `;
-    if (notifyUser) {
-      showToast('🔄 Fresh testing session initialized', 'info');
-    }
-  }
-
-  function updateQuickChips(chips) {
-    if (!chips || !chips.length || !elements.chipsContainer) return;
-    elements.chipsContainer.innerHTML = chips.map(rawText => {
-      const chipText = String(rawText || '').trim();
-      let emoji = '';
-      let cleanLabel = chipText;
-
-      // Extract leading emoji / pictograph / symbol
-      const emojiMatch = chipText.match(/^([\p{Extended_Pictographic}\u2600-\u27BF\uD83C-\uDBFF\uDC00-\uDFFF\s]+)/u);
-      if (emojiMatch && emojiMatch[1].trim()) {
-        emoji = emojiMatch[1].trim();
-        cleanLabel = chipText.slice(emojiMatch[0].length).trim();
-      }
-
-      if (!emoji) {
-        if (cleanLabel.includes('Next Batch') || cleanLabel.includes('Process Next')) emoji = '⏩';
-        else if (cleanLabel.includes('Duplicate') || cleanLabel.includes('Clean Duplicates')) emoji = '🧹';
-        else if (cleanLabel.includes('Voucher') || cleanLabel.includes('Slip')) emoji = '📋';
-        else if (cleanLabel.includes('Peer') || cleanLabel.includes('Student')) emoji = '👥';
-        else if (cleanLabel.includes('Name')) emoji = '🏷️';
-        else if (cleanLabel.includes('Batch')) emoji = '⏩';
-        else if (cleanLabel.includes('Screenshot') || cleanLabel.includes('Cache') || cleanLabel.includes('Trash')) emoji = '🗑️';
-        else emoji = '💡';
-      }
-
-      const isNext = chipText.includes('Next Batch') || chipText.includes('Process Next');
-      return `
-        <button class="task-chip ${isNext ? 'highlight-chip' : ''}" data-task="${escapeHtml(chipText)}">
-          <span class="chip-emoji">${emoji}</span>
-          <span class="chip-label">${escapeHtml(cleanLabel)}</span>
-        </button>
-      `;
-    }).join('');
-  }
-
-  function scrollToBottom() {
-    setTimeout(() => {
-      elements.contentScroll.scrollTop = elements.contentScroll.scrollHeight;
-    }, 60);
-  }
-
-  function appendUserMessage(text, shouldScroll = true) {
-    const card = document.createElement('div');
-    card.className = 'message-card user';
-    card.innerHTML = `
-      <div class="message-header">
-        <div class="message-sender">You</div>
-        <span class="message-time">Just now</span>
-      </div>
-      <div class="message-body">
-        <p>${escapeHtml(text)}</p>
-      </div>
-    `;
-    elements.conversationStream.appendChild(card);
-    if (shouldScroll) scrollToBottom();
-  }
-
-  function formatInlineMarkdown(str) {
-    let s = escapeHtml(str);
-    // Inline code: `code`
-    s = s.replace(/`([^`]+)`/g, '<code class="inline-code">$1</code>');
-    // Bold: **text**
-    s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
-    // Italic: *text*
-    s = s.replace(/\*([^*]+)\*/g, '<em>$1</em>');
-    return s;
-  }
-
-  function renderMarkdown(rawText) {
-    if (!rawText) return '';
-    const text = rawText.replace(/\r\n/g, '\n');
-    const lines = text.split('\n');
-    let html = '';
-    let inUl = false;
-    let inOl = false;
-    let inTable = false;
-    let tableHeadRendered = false;
-
-    for (let i = 0; i < lines.length; i++) {
-      const line = lines[i];
-      const trimmed = line.trim();
-
-      // Markdown Table row detection (| cell | cell |)
-      const isTableRow = trimmed.startsWith('|') && trimmed.endsWith('|') && trimmed.length > 2;
-      const isTableDivider = isTableRow && /^\|(\s*:?-+:?\s*\|)+$/.test(trimmed);
-
-      if (isTableRow) {
-        if (inUl) { html += '</ul>'; inUl = false; }
-        if (inOl) { html += '</ol>'; inOl = false; }
-
-        if (!inTable) {
-          html += '<div class="table-responsive"><table class="md-table">';
-          inTable = true;
-          tableHeadRendered = false;
-        }
-
-        if (isTableDivider) {
-          continue;
-        }
-
-        const cells = trimmed.slice(1, -1).split('|').map(c => c.trim());
-        const nextLine = (i + 1 < lines.length) ? lines[i + 1].trim() : '';
-        const nextIsDivider = nextLine.startsWith('|') && /^\|(\s*:?-+:?\s*\|)+$/.test(nextLine);
-
-        if (!tableHeadRendered && nextIsDivider) {
-          html += '<thead><tr>';
-          cells.forEach(c => {
-            html += `<th>${formatInlineMarkdown(c)}</th>`;
-          });
-          html += '</tr></thead><tbody>';
-          tableHeadRendered = true;
-        } else {
-          html += '<tr>';
-          cells.forEach(c => {
-            html += `<td>${formatInlineMarkdown(c)}</td>`;
-          });
-          html += '</tr>';
-        }
-        continue;
-      } else if (inTable) {
-        if (tableHeadRendered) html += '</tbody>';
-        html += '</table></div>';
-        inTable = false;
-        tableHeadRendered = false;
-      }
-
-      // Check unordered list item (* or -)
-      const ulMatch = line.match(/^(\s*)[*-]\s+(.+)$/);
-      // Check ordered list item (1. )
-      const olMatch = line.match(/^(\s*)\d+\.\s+(.+)$/);
-      // Check header (### or ## or #)
-      const headerMatch = line.match(/^(#{1,4})\s+(.+)$/);
-
-      if (ulMatch) {
-        if (!inUl) {
-          if (inOl) { html += '</ol>'; inOl = false; }
-          html += '<ul class="md-list">';
-          inUl = true;
-        }
-        html += `<li>${formatInlineMarkdown(ulMatch[2])}</li>`;
-      } else if (olMatch) {
-        if (!inOl) {
-          if (inUl) { html += '</ul>'; inUl = false; }
-          html += '<ol class="md-list">';
-          inOl = true;
-        }
-        html += `<li>${formatInlineMarkdown(olMatch[2])}</li>`;
-      } else {
-        if (inUl) { html += '</ul>'; inUl = false; }
-        if (inOl) { html += '</ol>'; inOl = false; }
-
-        if (headerMatch) {
-          const level = headerMatch[1].length;
-          const hTag = level <= 2 ? 'h4' : 'h5';
-          html += `<${hTag} class="md-heading">${formatInlineMarkdown(headerMatch[2])}</${hTag}>`;
-        } else if (line.trim() === '') {
-          html += '<div class="md-gap"></div>';
-        } else {
-          html += `<p>${formatInlineMarkdown(line)}</p>`;
-        }
-      }
-    }
-
-    if (inUl) html += '</ul>';
-    if (inOl) html += '</ol>';
-    if (inTable) {
-      if (tableHeadRendered) html += '</tbody>';
-      html += '</table></div>';
-    }
-
-    return html;
-  }
-
-  function renderModelBadgeHtml(modelSource, isLlm) {
-    if (!modelSource) return '';
-    if (isLlm) {
-      return `
-        <span class="model-badge badge-llm" title="Generated via Google Gemini Cloud AI (${escapeHtml(modelSource)})">
-          ✨ ${escapeHtml(modelSource)}
-        </span>`;
-    }
-    if (modelSource === 'deterministic-engine' || modelSource === 'local-fastpath') {
-      return `
-        <span class="model-badge badge-deterministic" title="Deterministic high-speed on-device engine (0ms latency, 100% reliable)">
-          ⚡ High-Speed Engine
-        </span>`;
-    }
-    return `
-      <span class="model-badge badge-offline" title="Executed via local offline engine">
-        🛡️ Local Engine (Offline)
-      </span>`;
-  }
-
-  function appendAssistantMessage(text, modelSource = null, isLlm = false, shouldScroll = true) {
-    const card = document.createElement('div');
-    card.className = 'message-card assistant';
-    const modelBadgeHtml = renderModelBadgeHtml(modelSource, isLlm);
-
-    card.innerHTML = `
-      <div class="message-header">
-        <div class="assistant-avatar">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path stroke-linecap="round" stroke-linejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z" />
-          </svg>
-        </div>
-        <div class="message-sender">Storage Copilot</div>
-        ${modelBadgeHtml}
-        <span class="message-time">Just now</span>
-      </div>
-      <div class="message-body">
-        ${renderMarkdown(text)}
-      </div>
-    `;
-    elements.conversationStream.appendChild(card);
-    if (shouldScroll) scrollToBottom();
-  }
-
-  function appendQueryInfoMessage(text, queryResults, modelSource = null, isLlm = false, shouldScroll = true) {
-    const card = document.createElement('div');
-    card.className = 'message-card assistant query-card';
-    const modelBadgeHtml = renderModelBadgeHtml(modelSource, isLlm);
-
-    card.innerHTML = `
-      <div class="message-header">
-        <div class="assistant-avatar query-avatar">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-          </svg>
-        </div>
-        <div class="message-sender">Storage Copilot</div>
-        <span class="query-info-badge">🔍 Information Query</span>
-        ${modelBadgeHtml}
-        <span class="message-time">Just now</span>
-      </div>
-      <div class="message-body">
-        ${renderMarkdown(text)}
-      </div>
-    `;
-    elements.conversationStream.appendChild(card);
-    if (shouldScroll) scrollToBottom();
-  }
-
-  function appendSystemNotice(html) {
-    const card = document.createElement('div');
-    card.className = 'message-card assistant';
-    card.style.borderColor = 'rgba(239, 68, 68, 0.35)';
-    card.style.backgroundColor = 'rgba(239, 68, 68, 0.08)';
-    card.innerHTML = `
-      <div class="message-body" style="color: #FCA5A5;">
-        <p>${html}</p>
-      </div>
-    `;
-    elements.conversationStream.appendChild(card);
-    scrollToBottom();
-  }
-
-  function showTypingIndicator() {
-    const bubble = document.createElement('div');
-    bubble.className = 'message-card assistant';
-    bubble.id = 'typing-indicator';
-    bubble.innerHTML = `
-      <div class="typing-bubble">
-        <span class="typing-dot"></span>
-        <span class="typing-dot"></span>
-        <span class="typing-dot"></span>
-      </div>
-    `;
-    elements.conversationStream.appendChild(bubble);
-    scrollToBottom();
-    return bubble;
-  }
-
-  function removeTypingIndicator() {
-    const bubble = document.getElementById('typing-indicator');
-    if (bubble) bubble.remove();
-  }
-
-  // ==============================================================================
-  // Interactive Diff Review Cards Rendering & Execution
-  // ==============================================================================
-  function renderDiffReview(plan, modelSource = null, isLlm = false, shouldScroll = true) {
-    state.activePlan = plan;
-    const actions = plan.actions || [];
-    
-    // Select all actions by default
-    state.selectedActionIds.clear();
-    actions.forEach(act => state.selectedActionIds.add(act.action_id));
-
-    const container = document.createElement('div');
-    container.className = 'diff-review-container';
-    container.id = `diff-review-${plan.plan_id}`;
-
-    const modelBadgeHtml = modelSource ? `
-      <span class="model-badge ${isLlm ? 'badge-llm' : 'badge-offline'}" title="${isLlm ? 'Plan synthesized by ' + escapeHtml(modelSource) : 'Local Heuristic Engine'}">
-        ${isLlm ? '✨ ' + escapeHtml(modelSource) : '⚠️ Offline Heuristic'}
-      </span>` : '';
-
-    // Header
-    const header = document.createElement('div');
-    header.className = 'diff-header';
-    const isLargeBatch = actions.length > 20;
-    header.innerHTML = `
-      <div class="diff-title-row">
-        <div class="diff-title">
-          <span>Action Plan Proposal</span>
-          <span class="diff-count-badge" id="diff-badge-count">${actions.length} Actions</span>
-          ${modelBadgeHtml}
-          ${isLargeBatch ? `<span class="batch-strategy-tag" style="background: rgba(16, 185, 129, 0.15); color: #34D399; font-size: 11px; padding: 2px 8px; border-radius: 9999px; border: 1px solid rgba(16, 185, 129, 0.3); font-weight: 500;">⚡ Gradual Execution: Chunks of 20</span>` : ''}
-        </div>
-      </div>
-      <div class="diff-desc">${escapeHtml(plan.description || 'Filesystem reorganization')}</div>
-      <div class="diff-selection-controls" style="display: flex; gap: 8px; margin-top: 8px;">
-        <button class="pill-btn select-all-btn" id="btn-select-all-${plan.plan_id}" style="background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.12); color: var(--text-secondary); font-size: 11px; padding: 3px 10px; border-radius: 6px; cursor: pointer;">Select All (${actions.length})</button>
-        ${isLargeBatch ? `<button class="pill-btn select-20-btn" id="btn-select-20-${plan.plan_id}" style="background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.12); color: var(--text-secondary); font-size: 11px; padding: 3px 10px; border-radius: 6px; cursor: pointer;">Select First 20</button>` : ''}
-        <button class="pill-btn deselect-all-btn" id="btn-deselect-all-${plan.plan_id}" style="background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.12); color: var(--text-secondary); font-size: 11px; padding: 3px 10px; border-radius: 6px; cursor: pointer;">Deselect All</button>
-      </div>
-    `;
-    container.appendChild(header);
-
-    // Diff Cards List
-    const list = document.createElement('div');
-    list.className = 'diff-cards-list';
-
-    actions.forEach(act => {
-      const card = createDiffCardElement(act);
-      list.appendChild(card);
+    const chk = document.createElement("input");
+    chk.type = "checkbox";
+    chk.className = "diff-checkbox";
+    chk.checked = true;
+    chk.addEventListener("change", () => {
+      if (chk.checked) selectedIndices.add(idx);
+      else selectedIndices.delete(idx);
+      updateSelectionUI();
     });
-    container.appendChild(list);
+    checkboxes.push(chk);
 
-    // Action Bar (Approve Selected & Reject All)
-    const actionBar = document.createElement('div');
-    actionBar.className = 'diff-action-bar';
-    actionBar.innerHTML = `
-      <button class="approve-btn" id="approve-plan-btn">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:16px;height:16px;">
-          <path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7" />
-        </svg>
-        <span id="approve-btn-label">Approve Selected (${actions.length})</span>
-      </button>
-      <button class="reject-btn" id="reject-plan-btn">
-        <span>Reject All</span>
-      </button>
-    `;
-    container.appendChild(actionBar);
+    const badgeType = act.badge || (act.type || "MOVE").toUpperCase();
+    const srcPath = act.source || act.path || "";
+    const dstPath = act.destination || (act.type === "trash" ? ".agent_trash/" : "");
+    const piiBadge = act.ai_inspected
+      ? `<span class="pii-badge">🛡️ PII-Sanitized Inspect</span>`
+      : "";
 
-    elements.conversationStream.appendChild(container);
-    if (shouldScroll) scrollToBottom();
-
-    // Event Listeners for Action Bar
-    const approveBtn = actionBar.querySelector('#approve-plan-btn');
-    const rejectBtn = actionBar.querySelector('#reject-plan-btn');
-
-    approveBtn.addEventListener('click', () => executeApprovedActions(container, plan));
-    rejectBtn.addEventListener('click', () => rejectPlan(container, plan));
-
-    // Selection Controls Listeners
-    const btnSelectAll = header.querySelector(`#btn-select-all-${plan.plan_id}`);
-    const btnSelect20 = header.querySelector(`#btn-select-20-${plan.plan_id}`);
-    const btnDeselectAll = header.querySelector(`#btn-deselect-all-${plan.plan_id}`);
-
-    if (btnSelectAll) {
-      btnSelectAll.addEventListener('click', () => {
-        state.selectedActionIds.clear();
-        actions.forEach(a => state.selectedActionIds.add(a.action_id));
-        list.querySelectorAll('.diff-card').forEach(c => {
-          c.classList.remove('excluded');
-          c.classList.add('selected');
-        });
-        updateDiffActionBarCount();
-      });
-    }
-
-    if (btnSelect20) {
-      btnSelect20.addEventListener('click', () => {
-        state.selectedActionIds.clear();
-        actions.slice(0, 20).forEach(a => state.selectedActionIds.add(a.action_id));
-        list.querySelectorAll('.diff-card').forEach((c, idx) => {
-          if (idx < 20) {
-            c.classList.remove('excluded');
-            c.classList.add('selected');
-          } else {
-            c.classList.remove('selected');
-            c.classList.add('excluded');
-          }
-        });
-        updateDiffActionBarCount();
-      });
-    }
-
-    if (btnDeselectAll) {
-      btnDeselectAll.addEventListener('click', () => {
-        state.selectedActionIds.clear();
-        list.querySelectorAll('.diff-card').forEach(c => {
-          c.classList.remove('selected');
-          c.classList.add('excluded');
-        });
-        updateDiffActionBarCount();
-      });
-    }
-
-    return container;
-  }
-
-  function createDiffCardElement(act) {
-    const card = document.createElement('div');
-    card.className = 'diff-card selected';
-    card.id = `card-${act.action_id}`;
-    card.dataset.actionId = act.action_id;
-
-    // Determine Badge
-    const badgeType = act.badge || act.type.toUpperCase();
-    const badgeLabel = act.badge_label || badgeType.replace('_', ' ');
-
-    let mutationHtml = '';
-    if (act.type === 'make_dir') {
-      mutationHtml = `
-        <div class="mutation-diff">
-          <div class="path-node">
-            <span class="node-label dst">DIR</span>
-            <span class="node-path" title="${act.path}">${escapeHtml(act.path)}</span>
-          </div>
-        </div>
-      `;
-    } else if (act.type === 'trash') {
-      mutationHtml = `
-        <div class="mutation-diff">
-          <div class="path-node">
-            <span class="node-label src">FILE</span>
-            <span class="node-path" title="${act.path}">${escapeHtml(act.path)}</span>
-          </div>
-          <div class="diff-connector">↓ soft-delete</div>
-          <div class="path-node">
-            <span class="node-label dst">VAULT</span>
-            <span class="node-path">.agent_trash (Soft Delete)</span>
-          </div>
-        </div>
-      `;
-    } else {
-      // move or copy
-      mutationHtml = `
-        <div class="mutation-diff">
-          <div class="path-node">
-            <span class="node-label src">SRC</span>
-            <span class="node-path" title="${act.source}">${escapeHtml(act.source)}</span>
-          </div>
-          <div class="diff-connector">↓ destination</div>
-          <div class="path-node">
-            <span class="node-label dst">DST</span>
-            <span class="node-path" title="${act.destination}">${escapeHtml(act.destination)}</span>
-          </div>
-        </div>
-      `;
-    }
-
-    card.innerHTML = `
-      <div class="card-top-bar">
-        <div class="card-left-group">
-          <div class="custom-checkbox">
-            <svg class="check-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3">
-              <path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7" />
-            </svg>
-          </div>
-          <span class="action-badge badge-${badgeType}">${badgeLabel}</span>
-          ${act.peer_name ? `<span class="peer-pill" style="font-size:10px;padding:2px 7px;"><span class="peer-avatar">${act.peer_name[0]}</span> ${act.peer_name}</span>` : ''}
-          ${act.ai_inspected ? `<span class="badge badge-pii">🛡️ PII-Safe Content Inspected</span>` : (act.type !== 'make_dir' ? `<span class="badge badge-muted">📄 Metadata Only</span>` : '')}
-        </div>
-        <span class="step-id">${act.action_id}</span>
+    const content = document.createElement("div");
+    content.className = "diff-content";
+    content.innerHTML = `
+      <div class="diff-badges">
+        <span class="op-badge op-${badgeType}">${badgeType}</span>
+        ${piiBadge}
       </div>
-      ${mutationHtml}
-      ${(act.ai_inspected && act.inspected_preview && act.inspected_preview !== 'No readable text extracted (scanned image or binary document)') ? `
-        <div class="snippet-preview">"${escapeHtml(act.inspected_preview)}..."</div>
-      ` : ''}
-      ${act.rationale ? `
-        <div class="card-rationale">
-          <svg class="rationale-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path stroke-linecap="round" stroke-linejoin="round" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-          </svg>
-          <span>${escapeHtml(act.rationale)}</span>
-        </div>
-      ` : ''}
+      <div class="diff-paths">${srcPath}</div>
+      ${dstPath ? `<div class="diff-paths diff-dest">➔ ${dstPath}</div>` : ""}
+      ${act.rationale ? `<div class="diff-rationale">${act.rationale}</div>` : ""}
     `;
 
-    // Toggle Checkbox / Selection on Click
-    card.addEventListener('click', (e) => {
-      const isSelected = state.selectedActionIds.has(act.action_id);
-      if (isSelected) {
-        state.selectedActionIds.delete(act.action_id);
-        card.classList.remove('selected');
-        card.classList.add('excluded');
-      } else {
-        state.selectedActionIds.add(act.action_id);
-        card.classList.remove('excluded');
-        card.classList.add('selected');
-      }
-      updateDiffActionBarCount();
-    });
-
-    return card;
-  }
-  const renderDiffCard = createDiffCardElement;
-
-  function updateDiffActionBarCount() {
-    const total = (state.activePlan && state.activePlan.actions) ? state.activePlan.actions.length : 0;
-    const selected = state.selectedActionIds.size;
-    
-    const approveLabel = document.getElementById('approve-btn-label');
-    const badgeCount = document.getElementById('diff-badge-count');
-    const approveBtn = document.getElementById('approve-plan-btn');
-
-    if (approveLabel) approveLabel.textContent = `Approve Selected (${selected} of ${total})`;
-    if (badgeCount) badgeCount.textContent = `${selected} of ${total} Selected`;
-
-    if (approveBtn) {
-      approveBtn.disabled = selected === 0;
-      approveBtn.style.opacity = selected === 0 ? '0.5' : '1';
-    }
-  }
-
-  function rejectPlan(container, plan) {
-    container.innerHTML = `
-      <div style="padding: 10px; text-align: center; color: var(--text-secondary);">
-        <p>✕ Plan <code>${plan.plan_id.substring(0, 8)}</code> was rejected by user. No mutations were applied.</p>
-      </div>
-    `;
-    state.activePlan = null;
-    showToast('Action Plan cancelled', 'info');
-  }
-
-  async function executeApprovedActions(container, plan) {
-    const selectedActions = (plan.actions || []).filter(act => state.selectedActionIds.has(act.action_id));
-    if (selectedActions.length === 0) {
-      showToast('No actions selected for execution', 'error');
-      return;
-    }
-
-    const approveBtn = container.querySelector('#approve-plan-btn');
-    const rejectBtn = container.querySelector('#reject-plan-btn');
-    if (approveBtn) {
-      approveBtn.disabled = true;
-      if (selectedActions.length > 20) {
-        const estChunks = Math.ceil(selectedActions.length / 20);
-        approveBtn.innerHTML = `<span>⚡ Applying ${selectedActions.length} changes gradually (${estChunks} micro-chunks)...</span>`;
-      } else {
-        approveBtn.innerHTML = `<span>Executing atomically...</span>`;
-      }
-    }
-    if (rejectBtn) rejectBtn.style.display = 'none';
-
-    try {
-      const planPayload = {
-        plan_id: plan.plan_id,
-        description: plan.description,
-        collision_strategy: plan.collision_strategy || 'RENAME_NUMERIC',
-        actions: selectedActions,
-        batch_info: plan.batch_info
-      };
-
-      const resp = await fetch('/execute_plan', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(planPayload)
-      });
-
-      const result = await resp.json();
-      if (!resp.ok) {
-        throw new Error(result.error || 'Batch execution failed');
-      }
-
-      // Preserve batch_info on result if returned or from original plan
-      if (!result.batch_info && plan.batch_info) {
-        result.batch_info = plan.batch_info;
-      }
-
-      // Store executed batch audit details
-      state.lastBatchId = result.batch_id;
-      state.lastBatchActions = result.executed_actions;
-      state.lastExecutionSummary = result.execution_summary || [];
-      updateUndoBanner(result.batch_id, 'COMPLETED', result.executed_actions);
-
-      // Render interactive Execution Success Card with Before & After Audit View
-      renderExecutionSuccess(container, result);
-
-      const chunkMsg = (result.chunks_processed && result.chunks_processed > 1)
-        ? ` (${result.chunks_processed} gradual chunks applied)`
-        : '';
-      showToast(`✓ Batch #${result.batch_id.substring(0, 8)} executed! (${result.executed_actions} changes${chunkMsg}, 1-Tap Undo active)`, 'success', 4500);
-
-      // Continuous Auto-Batch Runner Support
-      const remainingFiles = (result.batch_info && typeof result.batch_info.remaining_files === 'number')
-        ? result.batch_info.remaining_files
-        : ((plan.batch_info && typeof plan.batch_info.remaining_files === 'number') ? plan.batch_info.remaining_files : 0);
-
-      if (state.autoBatchActive) {
-        if (remainingFiles > 0) {
-          showToast(`⚡ Auto-Run: Next batch starting (${remainingFiles} files remaining)...`, 'info', 2500);
-          setTimeout(() => {
-            if (state.autoBatchActive) {
-              submitPrompt("Process next batch of files in Download");
-            }
-          }, 1200);
-        } else {
-          state.autoBatchActive = false;
-          showToast('🎉 All files successfully organized into folders!', 'success', 5000);
-        }
-      }
-    } catch (err) {
-      showToast(`Execution Error: ${err.message}`, 'error', 5000);
-      if (approveBtn) {
-        approveBtn.disabled = false;
-        approveBtn.innerHTML = `<span>Retry Execution</span>`;
-      }
-      if (rejectBtn) rejectBtn.style.display = 'flex';
-    }
-  }
-
-  // ==============================================================================
-  // Executed Batch Audit View Controller (v0.5-live)
-  // ==============================================================================
-  function createAuditListHtml(summary, batchId) {
-    if (!summary || summary.length === 0) {
-      return `
-        <div class="audit-item" style="text-align: center; color: var(--text-tertiary); font-style: italic;">
-          <span>No granular filesystem mutations recorded for this batch.</span>
-        </div>
-      `;
-    }
-
-    return summary.map(item => {
-      const badge = item.badge || (item.action_type === 'trash' ? 'TRASH' : 'FILE_MOVE');
-      let pathRowsHtml = '';
-
-      if (item.action_type === 'make_dir') {
-        pathRowsHtml = `
-          <div class="audit-path-row dir">
-            <span class="audit-label">DIR:</span>
-            <span class="audit-path" title="${escapeHtml(item.destination)}">${escapeHtml(item.destination)}</span>
-          </div>
-        `;
-      } else if (item.action_type === 'trash') {
-        pathRowsHtml = `
-          <div class="audit-path-row src">
-            <span class="audit-label">SRC:</span>
-            <span class="audit-path" title="${escapeHtml(item.source)}">${escapeHtml(item.source)}</span>
-          </div>
-          <div class="audit-diff-arrow">↳ soft-deleted to:</div>
-          <div class="audit-path-row dst">
-            <span class="audit-label">DST:</span>
-            <span class="audit-path">.agent_trash (Soft Delete Vault)</span>
-          </div>
-        `;
-      } else {
-        pathRowsHtml = `
-          <div class="audit-path-row src">
-            <span class="audit-label">SRC:</span>
-            <span class="audit-path" title="${escapeHtml(item.source)}">${escapeHtml(item.source)}</span>
-          </div>
-          <div class="audit-diff-arrow">↳ moved / renamed to:</div>
-          <div class="audit-path-row dst">
-            <span class="audit-label">DST:</span>
-            <span class="audit-path" title="${escapeHtml(item.destination)}">${escapeHtml(item.destination)}</span>
-          </div>
-        `;
-      }
-
-      return `
-        <div class="audit-item">
-          <div class="audit-item-top">
-            <span class="action-badge badge-${badge}">${badge.replace('_', ' ')}</span>
-            <span class="audit-step-time">${item.timestamp || 'Executed'}</span>
-          </div>
-          <div class="audit-path-diff">
-            ${pathRowsHtml}
-          </div>
-        </div>
-      `;
-    }).join('');
-  }
-
-  function renderExecutionSuccess(container, result) {
-    const summary = result.execution_summary || [];
-    const count = result.executed_actions || summary.length;
-    const batchId = result.batch_id;
-    const shortId = batchId.length > 8 ? batchId.substring(0, 8) : batchId;
-    const chunkText = (result.chunks_processed && result.chunks_processed > 1)
-      ? ` gradually across ${result.chunks_processed} safe micro-chunks (20 files/chunk)`
-      : '';
-
-    const batchInfo = result.batch_info || (state.activePlan && state.activePlan.batch_info) || null;
-    let progressHtml = '';
-    if (batchInfo && typeof batchInfo.remaining_files === 'number') {
-      const remaining = batchInfo.remaining_files;
-      const totalUnorg = batchInfo.total_unorganized || (count + remaining);
-      const doneCount = Math.max(0, totalUnorg - remaining);
-      const pct = totalUnorg > 0 ? Math.min(100, Math.round((doneCount / totalUnorg) * 100)) : 100;
-      
-      progressHtml = `
-        <div class="batch-progress-card">
-          <div class="batch-progress-header">
-            <span class="batch-progress-title">Batch Progress (${doneCount} of ${totalUnorg} Files)</span>
-            <span class="batch-progress-count">${remaining > 0 ? `${remaining} files remaining` : '✓ All files organized'}</span>
-          </div>
-          <div class="batch-progress-bar-bg">
-            <div class="batch-progress-bar-fill" style="width: ${pct}%;"></div>
-          </div>
-          ${remaining > 0 ? `
-            <div class="batch-progress-actions">
-              <button class="btn btn-primary" id="btn-next-batch-${batchId}" style="background: var(--primary-gradient); color: #fff; font-size: 12px; padding: 6px 14px; border-radius: 8px; border: none; cursor: pointer; display: inline-flex; align-items: center; gap: 4px;">
-                <span>⏩ Process Next Batch (${Math.min(25, remaining)} files)</span>
-              </button>
-              <button class="btn btn-secondary" id="btn-autorun-batches-${batchId}" style="background: rgba(255,255,255,0.08); color: var(--text-primary); font-size: 12px; padding: 6px 14px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.15); cursor: pointer; display: inline-flex; align-items: center; gap: 4px;">
-                <span>⚡ Auto-Run All Remaining</span>
-              </button>
-            </div>
-          ` : `
-            <div style="font-size: 11px; color: #10B981; font-weight: 500; display: flex; align-items: center; gap: 4px;">
-              <span>✨ Complete! All files in ${escapeHtml(batchInfo.target_folder || 'Download')} are organized into respective format folders.</span>
-            </div>
-          `}
-        </div>
-      `;
-    }
-
-    container.innerHTML = `
-      <div class="execution-success-card" id="audit-card-${batchId}">
-        <div class="success-header-row">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="width:20px;height:20px;">
-            <path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
-          </svg>
-          <span>Batch Executed Successfully</span>
-        </div>
-        <p class="success-meta-text">
-          Batch <code>#${shortId}</code> applied ${count} atomic changes${chunkText}. Pre-logged to SQLite WAL ledger.
-        </p>
-
-        ${progressHtml}
-
-        <div class="audit-action-center">
-          <button class="audit-toggle-btn" id="audit-toggle-${batchId}" aria-expanded="false" title="Expand Before & After applied changes">
-            <span class="audit-eye-icon">👁️</span>
-            <span class="audit-toggle-label">View Applied Changes</span>
-            <span class="audit-chevron">▼</span>
-          </button>
-        </div>
-
-        <div class="audit-panel" id="audit-panel-${batchId}" style="display: none;">
-          <div class="audit-panel-header">
-            <span class="audit-panel-title">Before &amp; After Audit Trail</span>
-            <span class="audit-panel-count">${count} Operations</span>
-          </div>
-          <div class="audit-list" id="audit-list-${batchId}">
-            ${createAuditListHtml(summary, batchId)}
-          </div>
-        </div>
-      </div>
-    `;
-
-    // Wire up batch progress buttons
-    const nextBatchBtn = container.querySelector(`#btn-next-batch-${batchId}`);
-    const autoRunBtn = container.querySelector(`#btn-autorun-batches-${batchId}`);
-    if (nextBatchBtn) {
-      nextBatchBtn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        submitPrompt("Process next batch of files in Download");
-      });
-    }
-    if (autoRunBtn) {
-      autoRunBtn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        state.autoBatchActive = true;
-        showToast('⚡ Auto-running all remaining batches...', 'info', 3500);
-        autoRunBtn.disabled = true;
-        autoRunBtn.style.opacity = '0.6';
-        autoRunBtn.textContent = '⚡ Auto-Running...';
-        submitPrompt("Process next batch of files in Download");
-      });
-    }
-
-    // Wire up toggle button
-    const toggleBtn = container.querySelector(`#audit-toggle-${batchId}`);
-    const panel = container.querySelector(`#audit-panel-${batchId}`);
-    if (toggleBtn && panel) {
-      toggleBtn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        const isHidden = panel.style.display === 'none';
-        panel.style.display = isHidden ? 'flex' : 'none';
-        toggleBtn.setAttribute('aria-expanded', isHidden ? 'true' : 'false');
-        const labelEl = toggleBtn.querySelector('.audit-toggle-label');
-        if (labelEl) {
-          labelEl.textContent = isHidden ? 'Hide Applied Changes' : 'View Applied Changes';
-        }
-        if (isHidden) {
-          setTimeout(() => {
-            panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-          }, 80);
-        }
-      });
-    }
-
-    scrollToBottom();
-  }
-
-  function openOrScrollToAuditView(batchId) {
-    if (!batchId) return;
-
-    let card = document.getElementById(`audit-card-${batchId}`);
-    let panel = document.getElementById(`audit-panel-${batchId}`);
-    let toggleBtn = document.getElementById(`audit-toggle-${batchId}`);
-
-    if (card && panel) {
-      panel.style.display = 'flex';
-      if (toggleBtn) toggleBtn.setAttribute('aria-expanded', 'true');
-      card.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      card.classList.remove('audit-highlight-pulse');
-      void card.offsetWidth; // Trigger DOM reflow
-      card.classList.add('audit-highlight-pulse');
-      setTimeout(() => card.classList.remove('audit-highlight-pulse'), 1800);
-      showToast(`Showing audit trail for Batch #${batchId.substring(0, 8)}`, 'info');
-      return;
-    }
-
-    // Fallback: If page was reloaded and card is not yet in conversation stream, render it
-    if (state.lastExecutionSummary && state.lastExecutionSummary.length > 0) {
-      const wrapper = document.createElement('div');
-      wrapper.className = 'diff-review-container';
-      elements.conversationStream.appendChild(wrapper);
-      renderExecutionSuccess(wrapper, {
-        batch_id: batchId,
-        executed_actions: state.lastBatchActions || state.lastExecutionSummary.length,
-        execution_summary: state.lastExecutionSummary
-      });
-
-      const newPanel = document.getElementById(`audit-panel-${batchId}`);
-      const newToggle = document.getElementById(`audit-toggle-${batchId}`);
-      if (newPanel) newPanel.style.display = 'flex';
-      if (newToggle) newToggle.setAttribute('aria-expanded', 'true');
-
-      const newCard = document.getElementById(`audit-card-${batchId}`);
-      if (newCard) {
-        newCard.scrollIntoView({ behavior: 'smooth', block: 'center' });
-        newCard.classList.add('audit-highlight-pulse');
-        setTimeout(() => newCard.classList.remove('audit-highlight-pulse'), 1800);
-      }
-      showToast(`Restored audit trail for Batch #${batchId.substring(0, 8)}`, 'info');
-    } else {
-      showToast(`Batch #${batchId.substring(0, 8)} is active for 1-Tap Undo`, 'info');
-    }
-  }
-
-  // ==============================================================================
-  // User Prompt Submission & Conversational Dispatch
-  // ==============================================================================
-  async function submitPrompt(promptText) {
-    const text = (promptText || '').trim();
-    if (!text) return;
-
-    elements.promptInput.value = '';
-    appendUserMessage(text);
-    const typingBubble = showTypingIndicator();
-
-    // Record user message to conversation history
-    state.conversationHistory.push({ role: 'user', content: text });
-    saveChatHistory();
-
-    try {
-      const resp = await fetch('/propose_plan', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ 
-          prompt: text, 
-          target_folder: 'Download',
-          conversation_history: state.conversationHistory.slice(-6).map(h => ({ role: h.role, content: h.content }))
-        })
-      });
-
-      let data;
-      try {
-        data = await resp.json();
-      } catch (jsonErr) {
-        removeTypingIndicator();
-        throw new Error(`Server error (${resp.status} ${resp.statusText || 'non-JSON response'}). Please restart python server.py in Termux.`);
-      }
-      removeTypingIndicator();
-
-      if (!resp.ok) {
-        throw new Error(data.error || data.message || `Server returned error (${resp.status})`);
-      }
-
-      const modelSource = data.model_source || (data.is_llm ? 'Gemini AI' : 'Offline Heuristic');
-      const isLlm = Boolean(data.is_llm);
-
-      // Record assistant message to conversation history with metadata
-      const replyMsg = data.message || '';
-      if (replyMsg) {
-        state.conversationHistory.push({ 
-          role: 'assistant', 
-          content: replyMsg,
-          type: data.type,
-          plan: data.plan,
-          queryResults: data.query_results,
-          model_source: modelSource,
-          is_llm: isLlm
-        });
-        saveChatHistory();
-      }
-
-      // Update quick chips if dynamically provided by server
-      if (data.quick_chips && data.quick_chips.length > 0) {
-        updateQuickChips(data.quick_chips);
-      }
-
-      if (data.type === 'conversation') {
-        // Casual greetings or guidance
-        appendAssistantMessage(data.message, modelSource, isLlm);
-      } else if (data.type === 'query_info') {
-        // Read-only filesystem query results with citations
-        appendQueryInfoMessage(data.message, data.query_results, modelSource, isLlm);
-      } else if (data.type === 'plan' && data.plan) {
-        // Synthesized Action Plan
-        appendAssistantMessage(data.message || 'I have analyzed your request and formulated the following Action Plan:', modelSource, isLlm);
-        const reviewContainer = renderDiffReview(data.plan, modelSource, isLlm);
-        if (state.autoBatchActive && reviewContainer) {
-          setTimeout(() => {
-            if (state.autoBatchActive && state.activePlan && state.activePlan.plan_id === data.plan.plan_id) {
-              executeApprovedActions(reviewContainer, data.plan);
-            }
-          }, 900);
-        }
-      } else {
-        appendAssistantMessage(data.message || 'I processed your request.', modelSource, isLlm);
-      }
-    } catch (err) {
-      removeTypingIndicator();
-      appendAssistantMessage(`⚠️ <strong>Bridge Error:</strong> ${err.message}`);
-      showToast(`Error: ${err.message}`, 'error');
-    }
-  }
-
-  // ==============================================================================
-  // Event Bindings
-  // ==============================================================================
-  // Clear Chat History Button (1-Tap Fresh Session Reset)
-  if (elements.clearChatBtn) {
-    elements.clearChatBtn.addEventListener('click', () => {
-      clearChatHistory(true);
-    });
-  }
-
-  // 1. Form Submit
-  elements.promptForm.addEventListener('submit', (e) => {
-    e.preventDefault();
-    state.autoBatchActive = false;
-    submitPrompt(elements.promptInput.value);
+    card.appendChild(chk);
+    card.appendChild(content);
+    listEl.appendChild(card);
   });
 
-  // 2. Quick Task Chips Click
-  elements.chipsContainer.addEventListener('click', (e) => {
-    const chip = e.target.closest('.task-chip');
-    if (!chip) return;
-    const taskName = chip.dataset.task;
-    if (taskName) {
-      submitPrompt(taskName);
-    }
+  btnSelectAll.addEventListener("click", () => {
+    checkboxes.forEach((c, i) => {
+      c.checked = true;
+      selectedIndices.add(i);
+    });
+    updateSelectionUI();
   });
 
-  // 3. Persistent Undo Button
-  elements.undoBtn.addEventListener('click', handleRollback);
-
-  // 3b. Active Batch Banner Click (#active-batch-banner) -> Scroll to or open audit view
-  if (elements.undoBanner) {
-    elements.undoBanner.addEventListener('click', (e) => {
-      // Ignore clicks directly targeting the 1-Tap Undo button
-      if (e.target.closest('#undo-btn')) return;
-      if (state.lastBatchId) {
-        openOrScrollToAuditView(state.lastBatchId);
-      }
-    });
-  }
-
-  // 4. Seed Fixtures Button
-  elements.seedBtn.addEventListener('click', seedDemoFixtures);
-
-  // 5. Copy Base Path Button
-  elements.copyPathBtn.addEventListener('click', () => {
-    if (!state.baseDir) return;
-    navigator.clipboard.writeText(state.baseDir).then(() => {
-      showToast('✓ Storage base path copied to clipboard', 'info');
-    }).catch(() => {
-      showToast(state.baseDir, 'info');
-    });
+  btnClearAll.addEventListener("click", () => {
+    checkboxes.forEach((c) => (c.checked = false));
+    selectedIndices.clear();
+    updateSelectionUI();
   });
 
-  // 6. Gemini AI Key Modal Interactions
-  if (elements.aiStatusPill) {
-    elements.aiStatusPill.addEventListener('click', () => {
-      if (elements.apiKeyModal) {
-        elements.apiKeyModal.style.display = 'flex';
-        if (elements.apiFeedbackMsg) elements.apiFeedbackMsg.style.display = 'none';
-        if (elements.geminiKeyInput) elements.geminiKeyInput.focus();
-      }
+  execBtn.addEventListener("click", async () => {
+    const filteredActions = actions.filter((_, idx) => selectedIndices.has(idx));
+    if (filteredActions.length === 0) return;
+    execBtn.disabled = true;
+    execBtn.textContent = "⏳ Executing Micro-Batch...";
+
+    const filteredPlan = {
+      ...plan,
+      actions: filteredActions,
+    };
+    await executeSelectedPlan(filteredPlan, execBtn);
+  });
+
+  const footer = document.createElement("div");
+  footer.className = "plan-review-footer";
+  footer.appendChild(execBtn);
+
+  updateSelectionUI();
+  box.appendChild(header);
+  box.appendChild(listEl);
+  box.appendChild(footer);
+  return box;
+}
+
+// ============================================================================
+// 3. API Interactions (/propose_plan, /execute_plan, /cancel_execution, /rollback_batch)
+// ============================================================================
+async function submitPrompt(promptText) {
+  const cleanPrompt = (promptText || "").trim();
+  if (!cleanPrompt) return;
+
+  appendUserMessage(cleanPrompt);
+  dom.promptInput.value = "";
+  const targetFolder = dom.targetFolderSelect.value || "Download";
+
+  try {
+    const resp = await fetch("/propose_plan", {
+      method: "POST",
+      headers: buildHeaders(),
+      body: JSON.stringify({
+        prompt: cleanPrompt,
+        target_folder: targetFolder,
+        conversation_history: state.conversationHistory.slice(-6),
+      }),
+    });
+    const data = await resp.json();
+    state.conversationHistory.push({ role: "user", content: cleanPrompt });
+    state.conversationHistory.push({ role: "assistant", content: data.message || "" });
+    appendAssistantResponse(data);
+  } catch (err) {
+    appendAssistantResponse({
+      type: "conversation",
+      intent: "CONVERSATION",
+      message: `⚠️ Network error communicating with Storage Copilot: ${err.message}`,
     });
   }
+}
 
-  function closeApiKeyModal() {
-    if (elements.apiKeyModal) {
-      elements.apiKeyModal.style.display = 'none';
-    }
-  }
+async function executeSelectedPlan(planPayload, buttonEl) {
+  state.activeBatchId = planPayload.plan_id;
+  showProgressBanner("STARTING", `Starting execution of ${planPayload.actions.length} action(s)...`, 5, true);
 
-  if (elements.closeApiModalBtn) elements.closeApiModalBtn.addEventListener('click', closeApiKeyModal);
-  if (elements.cancelApiBtn) elements.cancelApiBtn.addEventListener('click', closeApiKeyModal);
-
-  if (elements.toggleKeyVisibility) {
-    elements.toggleKeyVisibility.addEventListener('click', () => {
-      if (!elements.geminiKeyInput) return;
-      const isPassword = elements.geminiKeyInput.type === 'password';
-      elements.geminiKeyInput.type = isPassword ? 'text' : 'password';
-      elements.toggleKeyVisibility.textContent = isPassword ? '🔒' : '👁️';
+  try {
+    const resp = await fetch("/execute_plan", {
+      method: "POST",
+      headers: buildHeaders(),
+      body: JSON.stringify(planPayload),
     });
-  }
+    const data = await resp.json();
+    state.activeBatchId = null;
 
-  if (elements.saveApiKeyBtn) {
-    elements.saveApiKeyBtn.addEventListener('click', async () => {
-      const keyVal = (elements.geminiKeyInput ? elements.geminiKeyInput.value : '').trim();
-      if (!keyVal) {
-        if (elements.apiFeedbackMsg) {
-          elements.apiFeedbackMsg.className = 'api-feedback-msg error';
-          elements.apiFeedbackMsg.textContent = 'Please enter a valid Gemini API key.';
-          elements.apiFeedbackMsg.style.display = 'block';
-        }
-        return;
-      }
-
-      if (elements.saveKeySpinner) elements.saveKeySpinner.style.display = 'inline-block';
-      if (elements.saveKeyBtnText) elements.saveKeyBtnText.textContent = 'Verifying...';
-      elements.saveApiKeyBtn.disabled = true;
-
-      try {
-        const resp = await fetch('/configure_api_key', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ api_key: keyVal })
-        });
-        const resData = await resp.json();
-
-        if (resp.ok) {
-          if (elements.apiFeedbackMsg) {
-            elements.apiFeedbackMsg.className = 'api-feedback-msg success';
-            elements.apiFeedbackMsg.textContent = '✓ ' + (resData.message || 'Key verified and saved!');
-            elements.apiFeedbackMsg.style.display = 'block';
-          }
-          showToast('✨ Gemini AI intelligence successfully activated!', 'success');
-          await fetchAiStatus();
-          setTimeout(() => {
-            closeApiKeyModal();
-            if (elements.geminiKeyInput) elements.geminiKeyInput.value = '';
-          }, 1200);
-        } else {
-          if (elements.apiFeedbackMsg) {
-            elements.apiFeedbackMsg.className = 'api-feedback-msg error';
-            elements.apiFeedbackMsg.textContent = resData.error || 'Verification failed. Please check key.';
-            elements.apiFeedbackMsg.style.display = 'block';
-          }
-        }
-      } catch (err) {
-        if (elements.apiFeedbackMsg) {
-          elements.apiFeedbackMsg.className = 'api-feedback-msg error';
-          elements.apiFeedbackMsg.textContent = 'Network error connecting to bridge: ' + err.message;
-          elements.apiFeedbackMsg.style.display = 'block';
-        }
-      } finally {
-        if (elements.saveKeySpinner) elements.saveKeySpinner.style.display = 'none';
-        if (elements.saveKeyBtnText) elements.saveKeyBtnText.textContent = 'Verify & Save';
-        elements.saveApiKeyBtn.disabled = false;
-      }
-    });
-  }
-
-  // ==============================================================================
-  // Helper Utilities
-  // ==============================================================================
-  function escapeHtml(str) {
-    if (!str) return '';
-    return str
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;')
-      .replace(/'/g, '&#039;');
-  }
-
-  // ==============================================================================
-  // Startup Initialization (initApp)
-  // ==============================================================================
-  async function initApp() {
-    const healthData = await fetchHealth();
-    if (healthData && healthData.build_id) {
-      const lastBuildId = localStorage.getItem('storage_bridge_last_build_id');
-      if (lastBuildId && lastBuildId !== healthData.build_id) {
-        console.log(`[Fresh Start] Build updated (${lastBuildId} -> ${healthData.build_id}). Starting clean session.`);
-        clearChatHistory(false);
-        showToast('✨ Fresh testing session ready for new build', 'info', 3000);
-      } else {
-        loadChatHistory();
-      }
-      localStorage.setItem('storage_bridge_last_build_id', healthData.build_id);
+    if (resp.ok && (data.status === "success" || data.status === "cancelled" || data.status === "partial_failure")) {
+      state.lastCompletedBatchId = data.batch_id;
+      buttonEl.textContent = data.cancelled
+        ? `⏹ Cancelled (${data.executed_actions} Executed)`
+        : `✓ Executed (${data.executed_actions} Actions)`;
+      appendAssistantResponse({
+        type: "conversation",
+        intent: "FILE_OPERATION",
+        badges: [data.status === "success" ? "COMPLETED" : data.status.toUpperCase()],
+        message:
+          data.status === "success"
+            ? `✅ **Batch Execution Complete!** Successfully executed **${data.executed_actions} action(s)** across **${data.chunks_processed || 1} micro-batch chunk(s)** (Batch ID: \`${data.batch_id}\`). You can revert this entire batch at any time with 1-Tap Undo.`
+            : data.cancelled
+            ? `⏹ **Batch Execution Cancelled.** Safely committed **${data.executed_actions} of ${data.total_actions} action(s)** before stopping. Tap **1-Tap Undo Batch** above if you wish to restore them.`
+            : `⚠️ **Partial Failure Recovery:** ${data.error}`,
+      });
+      await refreshRecentBatchBanner();
     } else {
-      loadChatHistory();
+      buttonEl.disabled = false;
+      buttonEl.textContent = "Retry Execution";
+      appendAssistantResponse({
+        type: "conversation",
+        intent: "CONVERSATION",
+        badges: ["ERROR"],
+        message: `⚠️ **Execution Error:** ${data.error || "Unknown error"}`,
+      });
     }
-
-    if (healthData && healthData.version && healthData.version !== EXPECTED_VERSION) {
-      console.warn(`[initApp] Bridge version mismatch: server reported ${healthData.version}, expected ${EXPECTED_VERSION}`);
-      const versionEl = document.getElementById('bridge-version');
-      if (versionEl) {
-        versionEl.textContent = `Android Bridge ${healthData.version}`;
-      }
-    }
-    await fetchAiStatus();
-    await fetchUserProfile();
-    await fetchRecentBatch();
+  } catch (err) {
+    state.activeBatchId = null;
+    buttonEl.disabled = false;
+    buttonEl.textContent = "Retry Execution";
   }
+}
 
-  initApp();
+async function cancelActiveExecution() {
+  try {
+    await fetch("/cancel_execution", {
+      method: "POST",
+      headers: buildHeaders(),
+      body: JSON.stringify({
+        batch_id: state.activeBatchId,
+        reason: "User clicked Stop Execution in Web UI",
+      }),
+    });
+  } catch (_) {}
+}
+
+async function refreshRecentBatchBanner() {
+  try {
+    const resp = await fetch("/recent_batch");
+    const data = await resp.json();
+    if (data.status === "success" && data.batch && data.batch.status !== "ROLLED_BACK" && data.batch.executed_actions > 0) {
+      state.lastCompletedBatchId = data.batch.batch_id;
+      dom.undoBanner.classList.remove("hidden");
+      dom.undoBannerTitle.textContent = `Recent Batch: ${data.batch.executed_actions} action(s) executed`;
+      dom.undoBannerSubtitle.textContent = `Batch ${data.batch.batch_id.slice(0, 8)}... (${data.batch.status}) — Protected by SQLite WAL`;
+    } else {
+      dom.undoBanner.classList.add("hidden");
+    }
+  } catch (_) {}
+}
+
+async function triggerRollbackLastBatch() {
+  if (!state.lastCompletedBatchId) return;
+  dom.btnUndoBatch.disabled = true;
+  dom.btnUndoBatch.textContent = "Reverting...";
+  try {
+    const resp = await fetch("/rollback_batch", {
+      method: "POST",
+      headers: buildHeaders(),
+      body: JSON.stringify({ batch_id: state.lastCompletedBatchId }),
+    });
+    const data = await resp.json();
+    if (resp.ok && data.status === "rolled_back") {
+      appendAssistantResponse({
+        type: "conversation",
+        intent: "FILE_OPERATION",
+        badges: ["ROLLED BACK", `${data.reverted_actions} Reverted`],
+        message: `⏪ **1-Tap Atomic Rollback Complete!** Restored **${data.reverted_actions} action(s)** from Batch \`${data.batch_id}\` back to their original locations with 100% byte-for-byte fidelity.`,
+      });
+      dom.undoBanner.classList.add("hidden");
+    }
+  } finally {
+    dom.btnUndoBatch.disabled = false;
+    dom.btnUndoBatch.textContent = "1-Tap Undo Batch";
+  }
+}
+
+function renderQuickChips(chips) {
+  dom.quickChipsBar.innerHTML = "";
+  chips.forEach((chipText) => {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "chip-btn";
+    btn.textContent = chipText;
+    const cleanPrompt = chipText.replace(/^[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}✅⏩🧹📋👥🏷️🗑️📂💡📚🧾🕰️❌]+\s*/u, "");
+    btn.addEventListener("click", () => submitPrompt(cleanPrompt));
+    dom.quickChipsBar.appendChild(btn);
+  });
+}
+
+// ============================================================================
+// 4. Toolbar & Initialization Event Listeners
+// ============================================================================
+async function checkApiStatus() {
+  try {
+    const resp = await fetch("/api_status");
+    const data = await resp.json();
+    if (data.app_version) {
+      dom.versionBadge.textContent = data.app_version;
+    }
+    if (data.gemini_configured && !data.quota_limited) {
+      dom.aiStatusPill.textContent = `⚡ Gemini Online (${data.masked_key || "Active"})`;
+      dom.aiStatusPill.className = "status-pill status-online";
+    } else {
+      dom.aiStatusPill.textContent = "🛡️ Local Offline Engine";
+      dom.aiStatusPill.className = "status-pill status-offline";
+    }
+  } catch (_) {}
+}
+
+dom.promptForm.addEventListener("submit", (e) => {
+  e.preventDefault();
+  submitPrompt(dom.promptInput.value);
 });
+
+document.querySelectorAll(".chip-btn[data-prompt]").forEach((btn) => {
+  btn.addEventListener("click", () => submitPrompt(btn.getAttribute("data-prompt")));
+});
+
+dom.btnCancelExecution.addEventListener("click", cancelActiveExecution);
+dom.btnUndoBatch.addEventListener("click", triggerRollbackLastBatch);
+
+dom.btnSeedFixtures.addEventListener("click", async () => {
+  const withDups = dom.chkSeedDuplicates.checked;
+  const resp = await fetch("/seed_fixtures", {
+    method: "POST",
+    headers: buildHeaders(),
+    body: JSON.stringify({ duplicates: withDups }),
+  });
+  const data = await resp.json();
+  if (resp.ok) {
+    appendAssistantResponse({
+      type: "conversation",
+      intent: "CONVERSATION",
+      badges: ["FIXTURES SEEDED", `${(data.files || []).length} Files`],
+      message: `🌱 **Seeded ${(data.files || []).length} sample mobile files into \`Download/\`!**\n\nFiles ready for testing: \`${(data.files || []).join("`, `")}\`.`,
+    });
+  }
+});
+
+dom.btnScanDuplicates.addEventListener("click", () => {
+  const includeNear = dom.chkIncludeNear.checked;
+  if (includeNear) {
+    submitPrompt("Find near duplicate files in Download");
+  } else {
+    submitPrompt("Find duplicate files in Download");
+  }
+});
+
+dom.btnScanForgotten.addEventListener("click", () => {
+  submitPrompt("Find forgotten files in Download");
+});
+
+dom.btnViewFolders.addEventListener("click", () => {
+  submitPrompt("View organized folders");
+});
+
+dom.btnOpenSettings.addEventListener("click", () => {
+  dom.inputBearerToken.value = state.bearerToken;
+  dom.settingsModal.classList.remove("hidden");
+});
+
+dom.btnCloseSettings.addEventListener("click", () => {
+  dom.settingsModal.classList.add("hidden");
+});
+
+dom.btnSaveSettings.addEventListener("click", async () => {
+  const newToken = dom.inputBearerToken.value.trim();
+  state.bearerToken = newToken;
+  localStorage.setItem("copilot_bearer_token", newToken);
+
+  const newKey = dom.inputApiKey.value.trim();
+  if (newKey) {
+    await fetch("/configure_api_key", {
+      method: "POST",
+      headers: buildHeaders(),
+      body: JSON.stringify({ api_key: newKey }),
+    });
+  }
+  dom.settingsModal.classList.add("hidden");
+  checkApiStatus();
+  connectSSEStream();
+});
+
+// Initialize on page load
+checkApiStatus();
+connectSSEStream();
+refreshRecentBatchBanner();
