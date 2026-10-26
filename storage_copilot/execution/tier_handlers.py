@@ -1,4 +1,3 @@
-# storage_copilot/execution/tier_handlers.py
 import os
 import re
 import json
@@ -13,7 +12,10 @@ from storage_copilot.storage.scanner import (
     resolve_target_directory
 )
 from storage_copilot.storage.content_extractor import extract_file_snippet
-from storage_copilot.storage.deduplication import find_duplicate_clusters
+from storage_copilot.storage.deduplication import (
+    find_duplicate_clusters,
+    find_forgotten_files
+)
 from storage_copilot.storage.collision_resolver import ensure_unique_plan_destinations
 from storage_copilot.storage.namer import ContentDerivedNamer, extract_course_code
 from storage_copilot.intelligence.gemini_client import call_gemini_json, call_gemini_text
@@ -82,11 +84,6 @@ def handle_conversation_turn(
     target_folder: str = "Download",
     conversation_history: Optional[List[Dict[str, Any]]] = None
 ) -> Dict[str, Any]:
-    """
-    Handles greetings, capability questions, storage advice, out-of-scope requests,
-    and format-sorting breakdowns.
-    Strictly stages ZERO file mutations (actions: []).
-    """
     ctx = _load_profile_context()
     owner_name = ctx["owner_name"]
     peer_names = ctx["peer_names"]
@@ -209,7 +206,7 @@ Recent Conversation:
 Respond directly and warmly to {owner_name} in concise Markdown.
 - NEVER use a static canned greeting template like '👋 Hello Imran Tahir! I am Storage Copilot, running locally on your Android device via Termux'.
 - Ground your advice in the actual filenames present above.
-- Explain your capabilities clearly (local storage reconnaissance, in-memory PII redaction, academic vs. peer routing, SHA-256 deduplication, and 1-tap SQLite WAL rollback).
+- Explain your capabilities clearly (local storage reconnaissance, in-memory PII redaction, academic vs. peer routing, SHA-256 & 3-gram Jaccard deduplication, and 1-tap SQLite WAL rollback).
 """
     llm_text = call_gemini_text(sys_prompt, raw_prompt)
     if llm_text:
@@ -267,11 +264,6 @@ def handle_query_info_turn(
     target_folder: str = "Download",
     conversation_history: Optional[List[Dict[str, Any]]] = None
 ) -> Dict[str, Any]:
-    """
-    Handles read-only searches, directory listings, temporal queries, duplicate audits,
-    and deep document content Q&A.
-    Strictly stages ZERO file mutations (actions: []).
-    """
     ctx = _load_profile_context()
     owner_name = ctx["owner_name"]
     sub_intent = classification.get("sub_intent", "")
@@ -280,12 +272,69 @@ def handle_query_info_turn(
     lower_raw = raw_prompt.lower()
     lower_norm = normalized_prompt.lower()
 
-    if sub_intent == "deduplicate_audit":
-        dup_res = find_duplicate_clusters(config.BASE_STORAGE_DIR, target_folder)
+    # 1a. Phase 6 Forgotten Files Audit
+    if sub_intent == "forgotten_audit":
+        days_match = re.search(r"(\d+)\s*(?:day|days)", lower_norm)
+        stale_days = float(days_match.group(1)) if days_match else 90.0
+        forg_res = find_forgotten_files(config.BASE_STORAGE_DIR, target_folder=target_folder, stale_days=stale_days)
+        if forg_res["total_forgotten"] == 0:
+            msg = (
+                f"✨ **No forgotten or stale files detected in `{target_folder}/`!**\n\n"
+                f"Scanned for downloads older than {int(stale_days)} days, temporary cache artifacts, and orphaned screenshots."
+            )
+            return {
+                "type": "query_info",
+                "intent": "QUERY_INFO",
+                "message": msg,
+                "analysis": msg,
+                "version": config.APP_VERSION,
+                "actions": [],
+                "plan": [],
+                "badges": ["Forgotten Files", "Read-Only"],
+                "forgotten_summary": forg_res,
+                "quick_chips": [
+                    "📋 Sort Student Vouchers",
+                    "👥 Separate Peer Documents",
+                    "🧹 Clean Duplicates"
+                ]
+            }
+
+        lines = [
+            f"### 🕰️ Forgotten Files Audit for `{target_folder}/`",
+            f"Identified **{forg_res['total_forgotten']} forgotten or ephemeral file(s)** occupying **`{forg_res['reclaimable_human']}`**:\n",
+            f"- 📦 **Stale Downloads ($\\\\ge {int(stale_days)}$ days):** {len(forg_res['stale_downloads'])} file(s)",
+            f"- 🗑️ **Temporary Cache Artifacts:** {len(forg_res['temporary_files'])} file(s)",
+            f"- 🖼️ **Orphaned Screenshots:** {len(forg_res['orphaned_screenshots'])} file(s)\n"
+        ]
+        for item in forg_res["items"][:15]:
+            lines.append(f"- **{item['filename']}** (`{item['path']}`, {item['size_human']}) — *{item['reason']}*")
+        lines.append("\n💡 *To safely sweep these into `.agent_trash` with 1-tap rollback, say **'Clean forgotten files'**.*")
+        msg = "\n".join(lines)
+        return {
+            "type": "query_info",
+            "intent": "QUERY_INFO",
+            "message": msg,
+            "analysis": msg,
+            "version": config.APP_VERSION,
+            "actions": [],
+            "plan": [],
+            "badges": ["Forgotten Files", "Read-Only"],
+            "forgotten_summary": forg_res,
+            "quick_chips": [
+                "🗑️ Clean forgotten files",
+                "🧹 Clean duplicate downloads",
+                "📋 Sort Student Vouchers"
+            ]
+        }
+
+    # 1b. Deduplication Audit (Exact SHA-256 & Near-Duplicate Jaccard)
+    if sub_intent in ("deduplicate_audit", "deduplicate_near_audit"):
+        include_near = (sub_intent == "deduplicate_near_audit")
+        dup_res = find_duplicate_clusters(config.BASE_STORAGE_DIR, target_folder, include_near=include_near)
         if dup_res["total_duplicates"] == 0:
             msg = (
                 f"✨ **No duplicate files detected in `{target_folder}/`!**\n\n"
-                "All documents possess unique cryptographic SHA-256 signatures. No redundant copies were found."
+                "All documents possess unique signatures. No redundant copies were found."
             )
             return {
                 "type": "query_info",
@@ -313,7 +362,9 @@ def handle_query_info_turn(
         ]
         for idx, cluster in enumerate(dup_res["clusters"], 1):
             k = cluster["keeper"]
-            lines.append(f"**Group {idx}** (Size: {cluster['size_human']} each, Reclaimable: {cluster['reclaimable_human']}):")
+            m_type = cluster.get("match_type", "EXACT_SHA256")
+            badge_str = "Exact SHA-256" if m_type == "EXACT_SHA256" else f"Near-Duplicate ({int(cluster.get('similarity', 0.85) * 100)}% Jaccard)"
+            lines.append(f"**Group {idx} [{badge_str}]** (Size: {cluster['size_human']} each, Reclaimable: {cluster['reclaimable_human']}):")
             lines.append(f"- 🛡️ **Preserving Keeper:** `{k['path']}` *({k['reason']})*")
             for d in cluster["duplicates"]:
                 lines.append(f"- 🗑️ **Redundant Copy:** `{d['path']}` *({d['reason']})*")
@@ -339,6 +390,7 @@ def handle_query_info_turn(
             ]
         }
 
+    # 2. View Organized Folders
     if sub_intent == "view_organized_folders":
         target_dir = resolve_target_directory(target_folder)
         dl_subfolders = []
@@ -556,11 +608,6 @@ def handle_file_operation_turn(
     target_folder: str = "Download",
     conversation_history: Optional[List[Dict[str, Any]]] = None
 ) -> Dict[str, Any]:
-    """
-    Synthesizes validated, collision-free Action Plans for moving, renaming,
-    sorting, archiving, deduplicating, or soft-deleting files.
-    Uses Phase 5 ContentDerivedNamer for dynamic sequence and title extraction.
-    """
     ctx = _load_profile_context()
     owner_name = ctx["owner_name"]
     peer_names = ctx["peer_names"]
@@ -572,8 +619,76 @@ def handle_file_operation_turn(
     resolved_goal = classification.get("resolved_goal") or classification.get("normalized_prompt") or raw_prompt
     lower_p = resolved_goal.lower()
 
-    if sub_intent == "deduplicate_clean":
-        dup_res = find_duplicate_clusters(config.BASE_STORAGE_DIR, target_folder)
+    # 1a. Phase 6 Forgotten Files Clean Sweep
+    if sub_intent == "forgotten_clean":
+        days_match = re.search(r"(\d+)\s*(?:day|days)", lower_p)
+        stale_days = float(days_match.group(1)) if days_match else 90.0
+        forg_res = find_forgotten_files(config.BASE_STORAGE_DIR, target_folder=target_folder, stale_days=stale_days)
+        if forg_res["total_forgotten"] == 0:
+            msg = f"✨ **No forgotten or stale files found in `{target_folder}/` to clean!**"
+            return {
+                "type": "conversation",
+                "intent": "FILE_OPERATION",
+                "message": msg,
+                "analysis": msg,
+                "version": config.APP_VERSION,
+                "actions": [],
+                "plan": [],
+                "badges": ["Forgotten Files", "Clean"],
+                "forgotten_summary": forg_res,
+                "quick_chips": [
+                    "📋 Sort Student Vouchers",
+                    "👥 Separate Peer Documents",
+                    "🧹 Clean Duplicates"
+                ]
+            }
+
+        actions = []
+        for idx, item in enumerate(forg_res["items"], 1):
+            actions.append({
+                "action_id": f"step-{idx}",
+                "type": "trash",
+                "badge": "TRASH",
+                "badge_label": "Soft Delete",
+                "source": item["path"],
+                "path": item["path"],
+                "destination": item["suggested_destination"],
+                "rationale": f"{item['reason']} ({item['size_human']} reclaimed)",
+                "ai_inspected": False
+            })
+        plan_id = str(uuid.uuid4())
+        plan_desc = f"Forgotten Files Cleanup: Soft-delete {len(actions)} stale/temporary file(s) ({forg_res['reclaimable_human']})"
+        msg = (
+            f"Identified **{len(actions)} forgotten file(s)** ({len(forg_res['stale_downloads'])} stale downloads, "
+            f"{len(forg_res['temporary_files'])} temp files, {len(forg_res['orphaned_screenshots'])} orphaned screenshots) "
+            f"totalling **`{forg_res['reclaimable_human']}`**.\n\n"
+            "Tap **Execute Action Plan** to move them safely to `.agent_trash` with 1-tap rollback."
+        )
+        return {
+            "type": "plan",
+            "intent": "FILE_OPERATION",
+            "message": msg,
+            "analysis": msg,
+            "plan": {
+                "plan_id": plan_id,
+                "description": plan_desc,
+                "actions": actions
+            },
+            "actions": actions,
+            "badges": ["Action Plan", f"{len(actions)} Trash"],
+            "forgotten_summary": forg_res,
+            "version": config.APP_VERSION,
+            "quick_chips": [
+                "📋 Sort Student Vouchers",
+                "👥 Separate Peer Documents",
+                "🏷️ Clean Download Names"
+            ]
+        }
+
+    # 1b. Deduplication Clean Sweep (Exact SHA-256 & Near-Duplicate Jaccard)
+    if sub_intent in ("deduplicate_clean", "deduplicate_near_clean"):
+        include_near = (sub_intent == "deduplicate_near_clean")
+        dup_res = find_duplicate_clusters(config.BASE_STORAGE_DIR, target_folder, include_near=include_near)
         if dup_res["total_duplicates"] == 0:
             msg = (
                 f"✨ **No duplicate files detected in `{target_folder}/`!**\n\n"
@@ -609,9 +724,9 @@ def handle_file_operation_turn(
                     "source": dup["path"],
                     "path": dup["path"],
                     "destination": f".agent_trash/{dup['filename']}",
-                    "rationale": f"Redundant duplicate of '{keeper['filename']}' ({cluster['size_human']} reclaimed)",
+                    "rationale": f"{dup.get('reason', 'Redundant duplicate')} of '{keeper['filename']}'",
                     "ai_inspected": True,
-                    "inspected_preview": f"Exact SHA-256 match with {keeper['filename']}"
+                    "inspected_preview": f"Matched against keeper {keeper['filename']}"
                 })
         plan_id = str(uuid.uuid4())
         plan_desc = f"Deduplication: Clean {len(actions)} redundant duplicate file(s) ({dup_res['reclaimable_human']})"
@@ -641,6 +756,7 @@ def handle_file_operation_turn(
             ]
         }
 
+    # 2. Format Batch Execution
     if sub_intent == "format_batch_execute":
         target_dir = resolve_target_directory(target_folder)
         unorg_files = get_unorganized_download_files(target_dir)
@@ -965,7 +1081,6 @@ Return JSON:
         plan_desc = f"Organize academic university course materials for {owner_name}"
         for item in manifest:
             doc_class = classify_document(item["name"], item["snippet"], user_profile=user_profile)
-            # STRICT INVARIANT: Never organize Identity Passes (e.g. Sumbal pass.pdf) into University folders!
             if doc_class["is_academic_study"]:
                 target_d = doc_class["target_dir"]
                 clean_title = doc_class["suggested_title"]

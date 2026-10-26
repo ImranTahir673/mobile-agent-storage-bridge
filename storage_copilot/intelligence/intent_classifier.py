@@ -1,4 +1,3 @@
-# storage_copilot/intelligence/intent_classifier.py
 import re
 from enum import Enum
 from typing import Dict, Any, List, Optional
@@ -90,20 +89,6 @@ def classify_intent(
     - UserIntent.CONVERSATION
     - UserIntent.QUERY_INFO
     - UserIntent.FILE_OPERATION
-
-    Returns:
-    {
-        "intent": UserIntent,
-        "confidence": float,
-        "raw_prompt": str,
-        "normalized_prompt": str,
-        "cleaned_query": str,
-        "resolved_goal": str,
-        "sub_intent": str,
-        "fast_path_matched": bool,
-        "extracted_entity": str,
-        "is_affirmative": bool
-    }
     """
     raw_prompt = (prompt or "").strip()
     normalized_prompt = normalize_user_prompt(raw_prompt)
@@ -116,9 +101,7 @@ def classify_intent(
     last_asst = _extract_last_assistant_message(conversation_history) or (recent_context or "")
     lower_asst = last_asst.lower()
 
-    # -------------------------------------------------------------------------
     # 1. Empty or Cancellation / Greeting Check
-    # -------------------------------------------------------------------------
     if not raw_prompt or clean_p_exact in GREETING_AND_CHAT_EXACT or lower_norm in GREETING_AND_CHAT_EXACT:
         return {
             "intent": UserIntent.CONVERSATION,
@@ -133,9 +116,7 @@ def classify_intent(
             "is_affirmative": False
         }
 
-    # -------------------------------------------------------------------------
     # 2. Multi-Turn Affirmative Context Resolution ("Yes", "Proceed", "Do it")
-    # -------------------------------------------------------------------------
     is_pure_affirmative = (
         clean_p_start in AFFIRMATIVE_WORDS
         or lower_norm in AFFIRMATIVE_WORDS
@@ -144,7 +125,6 @@ def classify_intent(
     )
 
     if is_pure_affirmative:
-        # Check if the user explicitly attached a goal to their "Yes", e.g. "Yes organize all my uni files"
         remainder = re.sub(
             r"^(?:yes|yeah|yep|sure|ok|okay|go ahead|proceed|do it|please do)[\s,!.]*",
             "",
@@ -181,7 +161,10 @@ def classify_intent(
             }
 
         if last_asst:
-            if "duplicate file audit" in lower_asst or "clean up these redundant copies" in lower_asst or "redundant duplicate" in lower_asst:
+            if "forgotten files audit" in lower_asst or "clean forgotten files" in lower_asst:
+                resolved = "clean forgotten files"
+                sub = "forgotten_clean"
+            elif "duplicate file audit" in lower_asst or "clean up these redundant copies" in lower_asst or "redundant duplicate" in lower_asst:
                 resolved = "clean duplicate downloads"
                 sub = "deduplicate_clean"
             elif any(p in lower_asst for p in ("peer document", "peer files", "separate peer", "classmate", "peer separation")):
@@ -223,7 +206,6 @@ def classify_intent(
                 "is_affirmative": True
             }
 
-        # No prior assistant context -> default to conversation
         return {
             "intent": UserIntent.CONVERSATION,
             "confidence": 0.95,
@@ -237,9 +219,7 @@ def classify_intent(
             "is_affirmative": True
         }
 
-    # -------------------------------------------------------------------------
     # 3. Conversational / Advice / Out-of-Scope Fast-Path
-    # -------------------------------------------------------------------------
     for pattern in CONVERSATION_PATTERNS:
         if re.search(pattern, lower_norm):
             return {
@@ -255,10 +235,8 @@ def classify_intent(
                 "is_affirmative": False
             }
 
-    # -------------------------------------------------------------------------
-    # 4. Special Domain Fast-Paths (Deduplication, Organized Folders, Format Sorting)
-    # -------------------------------------------------------------------------
-    # 4a. View Organized Folders (Read-only status check)
+    # 4. Special Domain Fast-Paths (Organized Folders, Forgotten Files, Deduplication, Format Sorting)
+    # 4a. View Organized Folders
     if any(k in lower_norm for k in (
         "view organized folders", "view organized folder", "see organized folders",
         "show organized folders", "check organized folders", "list organized folders",
@@ -277,18 +255,52 @@ def classify_intent(
             "is_affirmative": False
         }
 
-    # 4b. Deduplication (Audit vs Clean)
-    if any(k in lower_norm for k in ("duplicate", "duplicates", "deduplicate", "repeated file", "repeated files")):
+    # 4b. Phase 6 Forgotten Files Finder ("forgotten files", "stale files", "stale downloads", "orphaned screenshots")
+    if any(k in lower_norm for k in (
+        "forgotten file", "forgotten files", "forgotten download", "forgotten downloads",
+        "stale file", "stale files", "stale download", "stale downloads", "orphaned screenshot", "orphaned screenshots"
+    )):
+        is_clean_forgotten = any(k in lower_norm for k in ("clean", "cleanup", "delete", "trash", "remove", "wipe", "sweep", "clear"))
+        if is_clean_forgotten:
+            return {
+                "intent": UserIntent.FILE_OPERATION,
+                "confidence": 1.0,
+                "raw_prompt": raw_prompt,
+                "normalized_prompt": normalized_prompt,
+                "cleaned_query": "clean forgotten files",
+                "resolved_goal": "clean forgotten files",
+                "sub_intent": "forgotten_clean",
+                "fast_path_matched": True,
+                "extracted_entity": "forgotten files",
+                "is_affirmative": False
+            }
+        else:
+            return {
+                "intent": UserIntent.QUERY_INFO,
+                "confidence": 1.0,
+                "raw_prompt": raw_prompt,
+                "normalized_prompt": normalized_prompt,
+                "cleaned_query": "find forgotten files",
+                "resolved_goal": "find forgotten files",
+                "sub_intent": "forgotten_audit",
+                "fast_path_matched": True,
+                "extracted_entity": "forgotten files",
+                "is_affirmative": False
+            }
+
+    # 4c. Deduplication (Exact & Near-Duplicate Audit vs Clean)
+    if any(k in lower_norm for k in ("duplicate", "duplicates", "deduplicate", "repeated file", "repeated files", "near duplicate", "near duplicates")):
         is_clean_dup = any(k in lower_norm for k in ("clean", "delete", "trash", "remove", "wipe", "sweep", "clear"))
+        is_near_dup = any(k in lower_norm for k in ("near", "similar", "fuzzy", "revised", "jaccard", "deep"))
         if is_clean_dup:
             return {
                 "intent": UserIntent.FILE_OPERATION,
                 "confidence": 1.0,
                 "raw_prompt": raw_prompt,
                 "normalized_prompt": normalized_prompt,
-                "cleaned_query": "clean duplicate downloads",
-                "resolved_goal": "clean duplicate downloads",
-                "sub_intent": "deduplicate_clean",
+                "cleaned_query": "clean near duplicate downloads" if is_near_dup else "clean duplicate downloads",
+                "resolved_goal": "clean near duplicate downloads" if is_near_dup else "clean duplicate downloads",
+                "sub_intent": "deduplicate_near_clean" if is_near_dup else "deduplicate_clean",
                 "fast_path_matched": True,
                 "extracted_entity": "duplicates",
                 "is_affirmative": False
@@ -299,15 +311,15 @@ def classify_intent(
                 "confidence": 1.0,
                 "raw_prompt": raw_prompt,
                 "normalized_prompt": normalized_prompt,
-                "cleaned_query": "find duplicate files",
-                "resolved_goal": "find duplicate files",
-                "sub_intent": "deduplicate_audit",
+                "cleaned_query": "find near duplicate files" if is_near_dup else "find duplicate files",
+                "resolved_goal": "find near duplicate files" if is_near_dup else "find duplicate files",
+                "sub_intent": "deduplicate_near_audit" if is_near_dup else "deduplicate_audit",
                 "fast_path_matched": True,
                 "extracted_entity": "duplicates",
                 "is_affirmative": False
             }
 
-    # 4c. Format-Based Sorting (Next Batch Execution vs Proposal Breakdown)
+    # 4d. Format-Based Sorting (Next Batch Execution vs Proposal Breakdown)
     if any(k in lower_norm for k in ("next batch", "process next batch", "continue batch", "run next batch")):
         return {
             "intent": UserIntent.FILE_OPERATION,
@@ -337,7 +349,6 @@ def classify_intent(
         )
     )
     if is_format_sort:
-        # Format sorting initial request shows the breakdown table and asks for confirmation (type="conversation", actions=[])
         return {
             "intent": UserIntent.CONVERSATION,
             "confidence": 1.0,
@@ -351,9 +362,7 @@ def classify_intent(
             "is_affirmative": False
         }
 
-    # -------------------------------------------------------------------------
     # 5. Hybrid / Explicit Mutation Check vs Explicit Read-Only Query Check
-    # -------------------------------------------------------------------------
     has_mutation_verb = any(re.search(rf"\b{re.escape(v)}\b", lower_norm) for v in MUTATION_VERBS)
     starts_with_query = any(lower_norm.startswith(q) for q in EXPLICIT_QUERY_PREFIXES)
     has_temporal_query_marker = any(k in lower_norm for k in (
@@ -362,8 +371,6 @@ def classify_intent(
         "files from today", "files from yesterday", "past 7 days", "list of files"
     ))
 
-    # Rule from Phase 2 Section 5 (Trap #2):
-    # Any presence of true mutation verbs upgrades hybrid requests ("Find and clean receipts", "Move files older than 30 days") to FILE_OPERATION.
     if has_mutation_verb:
         return {
             "intent": UserIntent.FILE_OPERATION,
@@ -393,7 +400,6 @@ def classify_intent(
             "is_affirmative": False
         }
 
-    # Check if prompt is a bare document/topic search query (e.g. "48 laws of power", "Sumbal pass", "Java book")
     parsed_q = parse_query_intent(normalized_prompt)
     if parsed_q.get("is_directory_listing") or parsed_q.get("is_temporal"):
         return {
@@ -409,9 +415,7 @@ def classify_intent(
             "is_affirmative": False
         }
 
-    # -------------------------------------------------------------------------
     # 6. Ambiguous Prompt -> Cheap Micro-LLM Classifier Fallback
-    # -------------------------------------------------------------------------
     llm_res = call_gemini_micro_classifier(normalized_prompt, recent_context=last_asst[:250] if last_asst else "")
     if llm_res and isinstance(llm_res, dict) and llm_res.get("intent"):
         raw_intent_str = str(llm_res.get("intent", "")).upper().strip()
@@ -431,9 +435,7 @@ def classify_intent(
                 "model_source": llm_res.get("_model_used", "gemini-3.5-flash-lite")
             }
 
-    # -------------------------------------------------------------------------
-    # 7. Offline Fallback when Gemini is Unavailable or Unconfigured
-    # -------------------------------------------------------------------------
+    # 7. Offline Fallback
     if parsed_q.get("target_tokens"):
         return {
             "intent": UserIntent.QUERY_INFO,
