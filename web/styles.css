@@ -792,6 +792,10 @@ body {
     padding: 8px 10px;
   }
 
+  .brand-group {
+    gap: 8px;
+  }
+
   .brand-logo {
     font-size: 20px;
   }
@@ -817,10 +821,36 @@ body {
   .tool-btn {
     padding: 4px 8px;
     font-size: 11px;
+    user-select: none;
+    -webkit-user-select: none;
+    -webkit-tap-highlight-color: transparent;
   }
 
   .inline-toggle {
     font-size: 10px;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+
+  .undo-banner {
+    padding: 8px 10px;
+    gap: 8px;
+  }
+
+  .undo-title {
+    font-size: 12px;
+  }
+
+  .undo-subtitle {
+    font-size: 10px;
+  }
+
+  .btn-undo {
+    padding: 6px 10px;
+    font-size: 11px;
+    white-space: nowrap;
+    user-select: none;
+    -webkit-user-select: none;
   }
 
   .chat-container {
@@ -835,21 +865,46 @@ body {
   }
 
   .diff-card {
-    padding: 8px 10px;
+    padding: 10px 12px;
+    cursor: pointer;
+    user-select: none;
+    -webkit-user-select: none;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  .diff-checkbox {
+    width: 20px;
+    height: 20px;
+    accent-color: #38bdf8;
   }
 
   .diff-paths {
     font-size: 11px;
   }
 
+  .plan-review-footer {
+    justify-content: stretch;
+  }
+
+  .btn-execute-plan {
+    width: 100%;
+    padding: 12px 14px;
+    font-size: 13.5px;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+
   .quick-chips-bar {
-    padding: 5px 8px;
-    gap: 5px;
+    padding: 6px 8px;
+    gap: 6px;
   }
 
   .chip-btn {
     font-size: 11px;
-    padding: 4px 9px;
+    padding: 5px 10px;
+    user-select: none;
+    -webkit-user-select: none;
+    -webkit-tap-highlight-color: transparent;
   }
 
   .composer-bar {
@@ -866,10 +921,28 @@ body {
     height: 42px;
     padding: 0 14px;
     font-size: 13px;
+    user-select: none;
+    -webkit-user-select: none;
   }
 
   .modal-card {
     width: 95%;
-    padding: 14px;
+    max-height: 85dvh;
+    overflow-y: auto;
+    padding: 16px;
+  }
+}
+
+@media (max-width: 480px) {
+  .brand-title {
+    font-size: 13.5px;
+  }
+
+  .brand-subtitle .dot-sep:nth-of-type(1) {
+    display: none;
+  }
+
+  .folder-select {
+    max-width: 110px;
   }
 }

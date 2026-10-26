@@ -372,6 +372,15 @@ function buildSelectivePlanReviewCard(plan) {
     });
     checkboxes.push(chk);
 
+    card.addEventListener("click", (e) => {
+      if (e.target !== chk) {
+        chk.checked = !chk.checked;
+        if (chk.checked) selectedIndices.add(idx);
+        else selectedIndices.delete(idx);
+        updateSelectionUI();
+      }
+    });
+
     const badgeType = act.badge || (act.type || "MOVE").toUpperCase();
     const srcPath = act.source || act.path || "";
     const dstPath = act.destination || (act.type === "trash" ? ".agent_trash/" : "");
@@ -666,6 +675,12 @@ dom.btnOpenSettings.addEventListener("click", () => {
 
 dom.btnCloseSettings.addEventListener("click", () => {
   dom.settingsModal.classList.add("hidden");
+});
+
+dom.settingsModal.addEventListener("click", (e) => {
+  if (e.target === dom.settingsModal) {
+    dom.settingsModal.classList.add("hidden");
+  }
 });
 
 dom.btnSaveSettings.addEventListener("click", async () => {
