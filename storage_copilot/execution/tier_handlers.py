@@ -4,11 +4,9 @@ import re
 import json
 import uuid
 from collections import defaultdict
-from datetime import datetime
 from typing import Dict, Any, List, Optional
 
 from storage_copilot import config
-from storage_copilot.security.path_resolver import resolve_safe_path
 from storage_copilot.security.pii_sanitizer import sanitize_pii
 from storage_copilot.storage.scanner import (
     scan_directory_manifest,
@@ -17,11 +15,11 @@ from storage_copilot.storage.scanner import (
 from storage_copilot.storage.content_extractor import extract_file_snippet
 from storage_copilot.storage.deduplication import find_duplicate_clusters
 from storage_copilot.storage.collision_resolver import ensure_unique_plan_destinations
+from storage_copilot.storage.namer import ContentDerivedNamer, extract_course_code
 from storage_copilot.intelligence.gemini_client import call_gemini_json, call_gemini_text
 from storage_copilot.intelligence.document_classifier import classify_document, parse_query_intent
 from storage_copilot.intelligence.search_engine import (
     score_file_relevance,
-    score_document_match,
     compute_query_relevance_score
 )
 from storage_copilot.execution.plan_builder import format_plan_badges
@@ -96,7 +94,6 @@ def handle_conversation_turn(
     raw_prompt = classification.get("raw_prompt", prompt)
     lower_p = raw_prompt.lower()
 
-    # Special Case: Format Sorting Breakdown Proposal
     if sub_intent == "format_sorting_proposal":
         target_dir = resolve_target_directory(target_folder)
         unorg_files = get_unorganized_download_files(target_dir)
@@ -166,7 +163,6 @@ To ensure system stability and safety, files will be moved in batches (25 files 
             ]
         }
 
-    # Lightweight metadata-only count (no PDF parsing / no deep recursive scan)
     target_dir = resolve_target_directory(target_folder)
     shallow_filenames = []
     if os.path.exists(target_dir) and os.path.isdir(target_dir):
@@ -178,7 +174,6 @@ To ensure system stability and safety, files will be moved in batches (25 files 
         except Exception:
             pass
 
-    # Out-of-scope request check (e.g., "Send an email to my professor")
     if any(w in lower_p for w in ("email", "mail", "sms", "whatsapp", "call", "browse", "web")):
         msg = (
             f"I operate strictly as an **on-device local storage copilot** for your Android filesystem, {owner_name}. "
@@ -204,7 +199,6 @@ To ensure system stability and safety, files will be moved in batches (25 files 
             ]
         }
 
-    # Try Gemini conversational response if online
     conv_history_str = _format_conversation_history(conversation_history)
     sys_prompt = f"""You are Storage Copilot, an articulate on-device AI storage assistant running locally on Android for {owner_name} (IDs: {ctx['identifiers']}).
 Target Folder: '{target_folder}/' ({len(shallow_filenames)} files present: {', '.join(shallow_filenames[:15]) if shallow_filenames else 'Empty'}).
@@ -238,7 +232,6 @@ Respond directly and warmly to {owner_name} in concise Markdown.
             ]
         }
 
-    # Dynamic Offline Storage Advice
     advice_msg = generate_dynamic_storage_advice(
         config.BASE_STORAGE_DIR,
         target_folder=target_folder,
@@ -287,7 +280,6 @@ def handle_query_info_turn(
     lower_raw = raw_prompt.lower()
     lower_norm = normalized_prompt.lower()
 
-    # 1. Special Sub-Intent: Read-Only Duplicate Audit
     if sub_intent == "deduplicate_audit":
         dup_res = find_duplicate_clusters(config.BASE_STORAGE_DIR, target_folder)
         if dup_res["total_duplicates"] == 0:
@@ -347,7 +339,6 @@ def handle_query_info_turn(
             ]
         }
 
-    # 2. Special Sub-Intent: View Organized Folders Reconnaissance
     if sub_intent == "view_organized_folders":
         target_dir = resolve_target_directory(target_folder)
         dl_subfolders = []
@@ -407,8 +398,7 @@ def handle_query_info_turn(
             "quick_chips": chips
         }
 
-    # 3. General File Search / Temporal Lookup / Directory Inventory
-    scan_data = scan_directory_manifest(target_folder=target_folder)
+    scan_data = scan_directory_manifest(target_folder=target_folder, query_prompt=raw_prompt)
     manifest = scan_data["manifest"]
     parsed_q = parse_query_intent(normalized_prompt, default_folder=target_folder)
 
@@ -427,7 +417,6 @@ def handle_query_info_turn(
 
     sorted_by_newest = sorted(manifest, key=lambda x: x.get("mtime", 0.0), reverse=True)
 
-    # Filter candidate matches
     matched_items = []
     if is_directory_inventory and not parsed_q.get("target_tokens"):
         matched_items = sorted_by_newest
@@ -447,13 +436,12 @@ def handle_query_info_turn(
     elif any(w in lower_norm for w in ("lecture", "lectures", "notes", "assignment", "academic", "university")):
         matched_items = [
             f for f in manifest
-            if classify_document(f["name"], f.get("snippet") or "")["is_academic_study"]
+            if classify_document(f["name"], f.get("snippet") or "", user_profile=ctx["profile"])["is_academic_study"]
         ]
     else:
         matched_items = [f for f in manifest if f.get("is_relevant")]
         matched_items.sort(key=lambda x: (x.get("relevance_score", 0.0), x.get("mtime", 0.0)), reverse=True)
 
-    # Deep document inspection for top matched file if content inquiry
     deep_context_block = ""
     if matched_items:
         top_item = matched_items[0]
@@ -465,7 +453,6 @@ def handle_query_info_turn(
         except Exception:
             pass
 
-    # Try Gemini synthesis if configured and unblocked
     if matched_items:
         top_slice = [
             {
@@ -474,7 +461,7 @@ def handle_query_info_turn(
                 "size_kb": m["size_kb"],
                 "modified_date": m["modified_date"],
                 "relative_age": m["relative_age"],
-                "category": classify_document(m["name"], m.get("snippet", ""))["type_label"],
+                "category": classify_document(m["name"], m.get("snippet", ""), user_profile=ctx["profile"])["type_label"],
                 "snippet": (m.get("snippet") or "")[:250]
             }
             for m in matched_items[:15]
@@ -511,7 +498,6 @@ Rules:
                 ]
             }
 
-    # Deterministic Grounded Citation Builder (Offline / Fallback)
     if matched_items:
         if is_directory_inventory and not parsed_q.get("target_tokens"):
             lines = [f"### 📂 Directory Inventory for `{target_folder}/` ({len(matched_items)} files)\n"]
@@ -519,7 +505,7 @@ Rules:
             lines = [f"Found **{len(matched_items)} matching document(s)** in `{target_folder}/`:\n"]
 
         for m in matched_items[:15]:
-            doc_class = classify_document(m["name"], m.get("snippet") or "")
+            doc_class = classify_document(m["name"], m.get("snippet") or "", user_profile=ctx["profile"])
             type_label = doc_class.get("type_label", "Document")
             snip_preview = (m.get("snippet") or "").strip().replace("\n", " ")[:140]
             detail_str = f" — *{type_label}*"
@@ -573,16 +559,19 @@ def handle_file_operation_turn(
     """
     Synthesizes validated, collision-free Action Plans for moving, renaming,
     sorting, archiving, deduplicating, or soft-deleting files.
+    Uses Phase 5 ContentDerivedNamer for dynamic sequence and title extraction.
     """
     ctx = _load_profile_context()
     owner_name = ctx["owner_name"]
     peer_names = ctx["peer_names"]
+    user_profile = ctx["profile"]
+    namer = ContentDerivedNamer(user_profile=user_profile)
+
     sub_intent = classification.get("sub_intent", "")
     raw_prompt = classification.get("raw_prompt", prompt)
     resolved_goal = classification.get("resolved_goal") or classification.get("normalized_prompt") or raw_prompt
     lower_p = resolved_goal.lower()
 
-    # 1. Special Sub-Intent: Deduplication Clean Sweep
     if sub_intent == "deduplicate_clean":
         dup_res = find_duplicate_clusters(config.BASE_STORAGE_DIR, target_folder)
         if dup_res["total_duplicates"] == 0:
@@ -652,7 +641,6 @@ def handle_file_operation_turn(
             ]
         }
 
-    # 2. Special Sub-Intent: Format Batch Execution
     if sub_intent == "format_batch_execute":
         target_dir = resolve_target_directory(target_folder)
         unorg_files = get_unorganized_download_files(target_dir)
@@ -732,12 +720,10 @@ def handle_file_operation_turn(
             ]
         }
 
-    # 3. Scan Target Directory Manifest for Semantic File Operations
-    scan_data = scan_directory_manifest(target_folder=target_folder)
+    scan_data = scan_directory_manifest(target_folder=target_folder, query_prompt=raw_prompt)
     manifest = scan_data["manifest"]
     manifest_lookup = scan_data["manifest_lookup"]
 
-    # Try Online Gemini Plan Synthesis if configured and not standard deterministic preset
     use_deterministic_first = any(k in lower_p for k in (
         "university", "academic", "voucher", "fee", "challan", "peer", "separate",
         "clean download names", "older than", "days old", "screenshot", "cleanup"
@@ -826,7 +812,7 @@ Return JSON:
                     ]
                 }
 
-    # 4. Deterministic Grounded Rule Engine (Offline-Proof & Taxonomically Strict)
+    # 4. Deterministic Grounded Rule Engine powered by Phase 5 ContentDerivedNamer
     plan_actions = []
     plan_desc = ""
     created_dirs = set()
@@ -900,31 +886,29 @@ Return JSON:
             if fn.endswith((".tmp", ".log")):
                 continue
             if re.search(r"^(?:DOC-|\d{4}\.\d{4,5}|IMG_|WhatsApp|Screenshot|[a-f0-9]{16,})", fn, re.I) or ".." in fn or "wa0" in fn.lower():
-                snip = item["snippet"].lower()
-                if any(k in snip for k in ("knowledge representation", "artificial intelligence", "lecture", "course", "assignment", "semester", "bsai")):
+                snip = item["snippet"] or ""
+                snip_lower = snip.lower()
+
+                if any(k in snip_lower for k in ("knowledge representation", "artificial intelligence", "lecture", "course", "assignment", "semester", "bsai", "lab ", "chapter ")):
+                    subject = extract_course_code(snip, fn)
+                    target_d = f"Documents/University/{subject}"
+                    clean_title = namer.derive_academic_title(fn, snip, concise_mode=False)
+                elif "1508" in fn or "neural" in snip_lower or "arxiv" in snip_lower:
                     target_d = "Documents/University/AI"
-                    if "knowledge representation" in snip:
-                        clean_title = "Knowledge_Representation_Lecture.pdf"
-                    elif "assignment" in snip:
-                        clean_title = "AI_Course_Assignment.pdf"
-                    else:
-                        clean_title = "AI_Lecture_Notes.pdf"
-                elif "1508" in fn or "neural" in snip:
-                    clean_title = "Neural_Algorithm_Artistic_Style_Paper.pdf"
-                    target_d = "Documents/University/AI"
-                elif any(p_name.lower() in snip for p_name in peer_names):
-                    p_found = next(p for p in peer_names if p.lower() in snip)
+                    clean_title = namer.derive_academic_title(fn, snip, concise_mode=False)
+                elif any(p_name.lower() in snip_lower or p_name.lower() in fn.lower() for p_name in peer_names):
+                    p_found = next(p for p in peer_names if p.lower() in snip_lower or p.lower() in fn.lower())
                     target_d = f"Documents/Peers/{p_found}"
-                    clean_title = f"{p_found}_Receipt.pdf"
-                elif "voucher" in snip or "fee" in snip:
+                    clean_title = namer.derive_peer_title(fn, p_found, snip, standardize_cryptic=True)
+                elif "voucher" in snip_lower or "fee" in snip_lower:
                     target_d = "Documents/University/Vouchers"
-                    clean_title = "Student_Fee_Voucher.pdf"
-                elif "bill" in snip or "invoice" in snip or "utility" in snip or "electricity" in snip:
+                    clean_title = namer.derive_voucher_title(fn, snip, standardize_cryptic=True)
+                elif "bill" in snip_lower or "invoice" in snip_lower or "utility" in snip_lower or "electricity" in snip_lower:
                     target_d = "Documents/Finances"
-                    clean_title = "Electricity_Bill_Invoice.pdf"
+                    clean_title = namer.derive_financial_bill_title(fn, snip, concise_invoice=True)
                 else:
-                    clean_title = re.sub(r"^\d{4}\.\d{4,5}v?\d*_", "Research_Paper_", fn)
                     target_d = "Documents/University/AI"
+                    clean_title = namer.derive_academic_title(fn, snip, concise_mode=False)
 
                 if target_d not in created_dirs:
                     plan_actions.append({"action_id": f"step-{step_idx}", "type": "make_dir", "path": target_d})
@@ -980,7 +964,7 @@ Return JSON:
     )):
         plan_desc = f"Organize academic university course materials for {owner_name}"
         for item in manifest:
-            doc_class = classify_document(item["name"], item["snippet"])
+            doc_class = classify_document(item["name"], item["snippet"], user_profile=user_profile)
             # STRICT INVARIANT: Never organize Identity Passes (e.g. Sumbal pass.pdf) into University folders!
             if doc_class["is_academic_study"]:
                 target_d = doc_class["target_dir"]
@@ -1002,7 +986,6 @@ Return JSON:
                 step_idx += 1
 
     else:
-        # General organization sweep ("Sort all the other files like docs and pdfs in the download...")
         plan_desc = f"Sort and organize candidate documents in '{target_folder}' into structured taxonomy"
         for item in manifest:
             fn = item["name"]
@@ -1016,7 +999,7 @@ Return JSON:
                 clean_title = fn
                 rationale = f"Routed to peer folder for {matched_peer} to protect personal storage"
             else:
-                doc_class = classify_document(fn, snip)
+                doc_class = classify_document(fn, snip, user_profile=user_profile)
                 target_d = doc_class["target_dir"]
                 clean_title = doc_class["suggested_title"]
                 if doc_class["category"] == "TEMPORARY_TRASH":
