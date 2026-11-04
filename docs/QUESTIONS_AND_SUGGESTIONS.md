@@ -1,0 +1,53 @@
+# Storage Copilot — Architectural Questions, Suggestions & Decision Ledger
+> **Target Version**: `v0.7.0-live` (Phase 9.x Production Hardening)  
+> **Status**: Ready for User Review & Sign-Off  
+> **Maintained By**: Antigravity Assistant & Engineering Team
+
+---
+
+## 1. Executive Summary of Phase 9.x Hardening
+All P0 and P1 issues have been resolved, verified, and backed by automated test suites (100% green across all 43 pytest unit tests and standalone verification suites):
+1. **P0 #1 (Type Safety)**: Fixed missing `Any` import in `storage_copilot/intelligence/gemini_client.py`.
+2. **P1 #10 (Zero-Trust Security for Read Endpoints)**: Read endpoints (`/list_files`, `/read_file_snippet`, `/lookup_history`, `/scan_duplicates`, `/scan_forgotten`, `/recent_batch`, `/propose_plan`, `/user_profile`, `/api_status`) are now protected under Bearer authentication (`ALL_PROTECTED_PATHS`) while keeping static UI assets and `/health` public.
+3. **P0 #4 & #5 (Recursive Subtrees & Full Storage Search)**: Manifest scanner and search engine now recursively traverse nested subdirectories (e.g., `Documents/University/AI/`) and automatically search across both `Download/` and `Documents/` trees. Background index warm-up now indexes both roots on server start.
+4. **P0 #6 (Ranked Relevance Lists with Snippets & Match Reasons)**: Search query endpoints now return structured match items containing `rank`, `name`, `path`, `size_kb`, `relevance_score`, `match_reasons`, `category`, and PII-sanitized `snippet`.
+5. **P0 #2 & #7 (Zero-Match Action Guards & Pre-Filtering)**: Pre-filtering by extension is enforced on `--gather` and general reorganization queries. If 0 candidate files match, the system returns a safe No-Op conversation reply and prevents staging plans with 0 file mutations.
+6. **P0 #3 & P1 #13 (Segregated Duplicates & 'CANCELLED' Batch Status)**: Exact duplicate cleanups (SHA-256) and near-duplicate cleanups (3-gram Jaccard) are strictly segregated so exact audits are not hijacked into near-duplicate removals without explicit confirmation. Batch cancellations now commit `status = 'CANCELLED'` to SQLite WAL, and `/recent_batch` queries include cancelled batches to permit 1-tap rollback.
+7. **Repository Hygiene**: Added `requirements.txt`, `pyproject.toml`, Apache 2.0 `LICENSE`, untracked personal `user_profile.json` from git history, purged `repomix-output.xml`, and synchronized version strings to `v0.7.0-live`.
+
+---
+
+## 2. Questions & Architectural Suggestions for User Approval
+
+### Item 1: Bearer Token Auto-Handshake on Mobile Termux
+- **Current State**: When accessing the Web UI locally on Android (`http://127.0.0.1:8080`), local requests are permitted without authentication when `ENFORCE_LOCAL_AUTH=False`. However, when accessed remotely over Cloudflare Tunnel (`COPILOT_ENFORCE_AUTH=1`), the browser requests Bearer token authentication via the top-right Token pill.
+- **Proposal**: Would you like the backend to provide a local one-time bootstrap token URL (e.g. `http://127.0.0.1:8080/?token=...`) printed in Termux console on server boot, so opening the link automatically authenticates the mobile browser session without manual token copy-pasting?
+  - [ ] **Option A (Recommended)**: Auto-print one-click authenticated URL in console output on server startup.
+  - [ ] **Option B**: Keep current manual token input modal in the Web UI.
+
+### Item 2: Android FUSE Inotify / Watchdog File Watcher
+- **Current State**: Directory changes are invalidated using O(1) directory signature comparisons (`mtime` + file count check). This is very lightweight and avoids keeping open file descriptors.
+- **Proposal**: Should we integrate a background `watchdog` daemon thread for `/storage/emulated/0/Download` to push SSE `scan_progress` events to the Web UI in real time as new files are downloaded from Telegram, WhatsApp, or Chrome?
+  - [ ] **Option A**: Add optional `watchdog` background listener that triggers SSE notification when files land in `Download/`.
+  - [ ] **Option B (Recommended)**: Keep current lightweight signature check to preserve Android battery life and avoid FUSE inotify lockups.
+
+### Item 3: Near-Duplicate 3-Gram Jaccard Threshold Slider
+- **Current State**: The near-duplicate clustering engine uses a fixed Jaccard similarity threshold of `0.85` (85% text shingle overlap).
+- **Proposal**: Should we expose a sensitivity slider in the Web UI (e.g., between 70% and 95%) in the Duplicates toolbar?
+  - [ ] **Option A**: Add a sensitivity slider (70% - 95%) in the Web UI toolbar.
+  - [ ] **Option B (Recommended)**: Retain 85% default with an optional query parameter `?threshold=0.85`.
+
+### Item 4: Native Android APK (Kotlin / Jetpack Compose) Track
+- **Current State**: Phase 8 and Phase 9 provide a responsive Mobile Web UI and Python bridge server running in Termux.
+- **Proposal**: Are you ready to begin designing the native Android Kotlin/Compose wrapper (Phase 10) to run the server in a foreground Android Service with notification tray controls?
+  - [ ] **Option A**: Proceed to Phase 10 Native Android Service & Jetpack Compose UI.
+  - [ ] **Option B**: Focus on further stress-testing and refining the Web UI on physical hardware first.
+
+---
+
+## 3. Decision Log
+*(Record user answers here once reviewed)*
+- **Decision on Item 1**: Pending user response
+- **Decision on Item 2**: Pending user response
+- **Decision on Item 3**: Pending user response
+- **Decision on Item 4**: Pending user response

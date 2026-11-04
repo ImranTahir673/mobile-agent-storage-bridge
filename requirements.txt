@@ -1,0 +1,7 @@
+# Core Server & REST API
+flask>=2.0.0,<4.0.0
+requests>=2.25.0,<3.0.0
+waitress>=2.0.0,<4.0.0
+
+# Optional / Development & Testing
+pytest>=7.0.0

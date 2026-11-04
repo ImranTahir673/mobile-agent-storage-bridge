@@ -227,7 +227,7 @@ def execute_action_plan(
                 if cancel_token.is_cancelled:
                     conn.commit()
                     cursor.execute(
-                        "UPDATE batches SET status = 'COMPLETED', executed_actions = ?, completed_at = CURRENT_TIMESTAMP WHERE batch_id = ?",
+                        "UPDATE batches SET status = 'CANCELLED', executed_actions = ?, completed_at = CURRENT_TIMESTAMP WHERE batch_id = ?",
                         (len(executed_actions), plan_id)
                     )
                     conn.commit()

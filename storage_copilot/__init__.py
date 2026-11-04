@@ -1,6 +1,6 @@
 """
 Storage Copilot - On-Device Storage Bridge & Intelligent File Organizer
-Package Version: v0.6.2-live
+Package Version: v0.7.0-live
 """
 
 from storage_copilot.app import create_app

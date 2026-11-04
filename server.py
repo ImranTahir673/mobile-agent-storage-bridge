@@ -1,6 +1,6 @@
 """
 Storage Copilot - Mobile Storage Bridge & Intelligent File Organizer
-v0.6.7-live Entry Point, Production Threaded WSGI Runner & Backward Compatibility Shim.
+v0.7.0-live Entry Point, Production Threaded WSGI Runner & Backward Compatibility Shim.
 
 All core modules have been refactored into the `storage_copilot` package.
 This module re-exports all public symbols and synchronizes runtime path overrides
@@ -40,6 +40,8 @@ from storage_copilot.security.path_resolver import resolve_safe_path, PROTECTED_
 from storage_copilot.security.pii_sanitizer import sanitize_pii, contains_tier1_pii, PII_PATTERNS
 from storage_copilot.security.auth import (
     PROTECTED_MUTATION_PATHS,
+    PROTECTED_READ_PATHS,
+    ALL_PROTECTED_PATHS,
     load_or_create_auth_token,
     get_or_create_auth_token,
     get_active_auth_token,

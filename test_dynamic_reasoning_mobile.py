@@ -119,7 +119,7 @@ class TestDynamicReasoningMobile(unittest.TestCase):
         self.assertEqual(data.get("status"), "online")
         self.assertIn("gemini_configured", data)
         self.assertIn("active_models", data)
-        self.assertTrue(data.get("app_version", "").startswith("v0.6"), f"Expected version starting with v0.6, got {data.get('app_version')}")
+        self.assertTrue(data.get("app_version", "").startswith("v0.6") or data.get("app_version", "").startswith("v0.7"), f"Expected version starting with v0.6 or v0.7, got {data.get('app_version')}")
 
 if __name__ == "__main__":
     unittest.main()

@@ -24,6 +24,22 @@ PROTECTED_MUTATION_PATHS = {
     "/user_profile",
 }
 
+# Read endpoints that access storage metadata or plan synthesis and require Bearer protection
+PROTECTED_READ_PATHS = {
+    "/list_files",
+    "/read_file_snippet",
+    "/lookup_history",
+    "/scan_duplicates",
+    "/scan_forgotten",
+    "/recent_batch",
+    "/propose_plan",
+    "/user_profile",
+    "/api_status",
+}
+
+# All endpoints protected under Dual-Mode Zero-Trust
+ALL_PROTECTED_PATHS = PROTECTED_MUTATION_PATHS | PROTECTED_READ_PATHS
+
 # Streaming endpoints that support ?token=<token> query parameter for browser EventSource
 STREAM_AUTH_PATHS = {
     "/stream",
@@ -198,9 +214,9 @@ def verify_bearer_token(candidate_token: str) -> bool:
 
 
 def requires_mutation_auth(req: Request) -> bool:
-    """Determines if the current request targets a protected mutation or stream endpoint."""
+    """Determines if the current request targets a protected endpoint."""
     path = req.path.rstrip("/") or "/"
-    if req.method.upper() in ("POST", "PUT", "DELETE", "PATCH") and path in PROTECTED_MUTATION_PATHS:
+    if path in ALL_PROTECTED_PATHS:
         return True
     if path in STREAM_AUTH_PATHS and req.method.upper() == "GET":
         return True
@@ -211,7 +227,7 @@ def verify_mutation_auth(req: Request) -> tuple[bool, Optional[str], int]:
     """
     Enforces Dual-Mode Zero-Trust authentication and CORS origin protection.
     Returns (is_authorized, error_message, http_status_code).
-    Handles both protected mutation endpoints and SSE stream endpoints.
+    Handles both protected mutation endpoints, read endpoints, and SSE stream endpoints.
     """
     # 1. Always enforce Origin allowlist against Cross-Site Request Forgery (CSRF)
     origin = req.headers.get("Origin")
@@ -223,9 +239,9 @@ def verify_mutation_auth(req: Request) -> tuple[bool, Optional[str], int]:
 
     path = req.path.rstrip("/") or "/"
     is_stream = path in STREAM_AUTH_PATHS and req.method.upper() == "GET"
-    is_mutation = req.method.upper() in ("POST", "PUT", "DELETE", "PATCH") and path in PROTECTED_MUTATION_PATHS
+    is_protected = (path in ALL_PROTECTED_PATHS) or is_stream
 
-    if not (is_stream or is_mutation):
+    if not is_protected:
         return True, None, 200
 
     provided_token = extract_request_token(req, allow_query_token=is_stream)

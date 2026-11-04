@@ -20,28 +20,32 @@ test_cases = [
     ("Send an email to my professor", "conversation", 0)
 ]
 
-print("=" * 80)
-print("TESTING PROMPT UNDERSTANDING: SUGGESTIONS vs PLANS vs QUERIES")
-print("=" * 80)
+def run_tests():
+    all_passed = True
+    for prompt, expected_type, expected_actions in test_cases:
+        res = client.post('/propose_plan', json={'prompt': prompt, 'target_folder': 'Download'})
+        data = res.get_json()
+        resp_type = data.get('type')
+        actions = len(data.get('actions', []))
+        msg = data.get('message', '').replace('\n', ' ')[:100]
 
-all_passed = True
-for prompt, expected_type, expected_actions in test_cases:
-    res = client.post('/propose_plan', json={'prompt': prompt, 'target_folder': 'Download'})
-    data = res.get_json()
-    resp_type = data.get('type')
-    actions = len(data.get('actions', []))
-    msg = data.get('message', '').replace('\n', ' ')[:100]
+        pass_type = (resp_type == expected_type)
+        pass_act = (expected_actions is None and actions > 0) or (expected_actions is not None and actions == expected_actions)
+        status = "PASS" if (pass_type and pass_act) else "FAIL"
+        if status == "FAIL":
+            all_passed = False
 
-    pass_type = (resp_type == expected_type)
-    pass_act = (expected_actions is None and actions > 0) or (expected_actions is not None and actions == expected_actions)
-    status = "PASS" if (pass_type and pass_act) else "FAIL"
-    if status == "FAIL":
-        all_passed = False
+        print(f"[{status}] Prompt: \"{prompt}\"")
+        print(f"       => Result Type: {resp_type} (expected: {expected_type}) | Actions: {actions}")
+        print(f"       => Reply: {msg}...")
+        print("-" * 80)
 
-    print(f"[{status}] Prompt: \"{prompt}\"")
-    print(f"       => Result Type: {resp_type} (expected: {expected_type}) | Actions: {actions}")
-    print(f"       => Reply: {msg}...")
-    print("-" * 80)
+    print(f"OVERALL RESULT: {'ALL PASSED' if all_passed else 'SOME FAILED'}")
+    return all_passed
 
-print(f"OVERALL RESULT: {'ALL PASSED' if all_passed else 'SOME FAILED'}")
-sys.exit(0 if all_passed else 1)
+if __name__ == "__main__":
+    print("=" * 80)
+    print("TESTING PROMPT UNDERSTANDING: SUGGESTIONS vs PLANS vs QUERIES")
+    print("=" * 80)
+    passed = run_tests()
+    sys.exit(0 if passed else 1)

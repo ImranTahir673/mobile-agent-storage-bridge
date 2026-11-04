@@ -14,44 +14,13 @@ prompts_test = [
     ("Yes organize all my uni files", "plan", 1, None),
 ]
 
-print("=" * 80)
-print("TEST 1: LOCAL OFFLINE INTELLIGENCE MODE (GEMINI_API_KEY = '')")
-print("=" * 80)
-os.environ["GEMINI_API_KEY"] = ""
-
-all_passed_offline = True
-for prompt, exp_type, min_acts, max_acts in prompts_test:
-    res = client.post('/propose_plan', json={'prompt': prompt, 'target_folder': 'Download'})
-    data = res.get_json()
-    t = data.get('type')
-    acts = len(data.get('actions', []))
-    msg = data.get('message', '').replace('\n', ' ')[:90]
-
-    type_ok = (t == exp_type)
-    acts_ok = (acts >= min_acts) if max_acts is None else (min_acts <= acts <= max_acts)
-    passed = type_ok and acts_ok
-    if not passed:
-        all_passed_offline = False
-
-    status = "PASS" if passed else "FAIL"
-    print(f"[{status}] \"{prompt}\"")
-    print(f"       => Result: Type={t} (expected {exp_type}), Actions={acts}")
-    print(f"       => Msg: {msg}...")
-    print("-" * 80)
-
-print(f"OFFLINE MODE: {'ALL PASSED' if all_passed_offline else 'SOME FAILED'}")
-print()
-
-# Test with Gemini live if key was originally loaded
-from server import load_environment
-load_environment()
-online_key = os.getenv("GEMINI_API_KEY")
-
-if online_key:
+def main():
     print("=" * 80)
-    print("TEST 2: ONLINE GEMINI LLM MODE")
+    print("TEST 1: LOCAL OFFLINE INTELLIGENCE MODE (GEMINI_API_KEY = '')")
     print("=" * 80)
-    all_passed_online = True
+    os.environ["GEMINI_API_KEY"] = ""
+
+    all_passed_offline = True
     for prompt, exp_type, min_acts, max_acts in prompts_test:
         res = client.post('/propose_plan', json={'prompt': prompt, 'target_folder': 'Download'})
         data = res.get_json()
@@ -63,14 +32,50 @@ if online_key:
         acts_ok = (acts >= min_acts) if max_acts is None else (min_acts <= acts <= max_acts)
         passed = type_ok and acts_ok
         if not passed:
-            all_passed_online = False
+            all_passed_offline = False
 
         status = "PASS" if passed else "FAIL"
         print(f"[{status}] \"{prompt}\"")
         print(f"       => Result: Type={t} (expected {exp_type}), Actions={acts}")
         print(f"       => Msg: {msg}...")
         print("-" * 80)
-    print(f"ONLINE MODE: {'ALL PASSED' if all_passed_online else 'SOME FAILED'}")
-    sys.exit(0 if (all_passed_offline and all_passed_online) else 1)
-else:
-    sys.exit(0 if all_passed_offline else 1)
+
+    print(f"OFFLINE MODE: {'ALL PASSED' if all_passed_offline else 'SOME FAILED'}")
+    print()
+
+    # Test with Gemini live if key was originally loaded
+    from server import load_environment
+    load_environment()
+    online_key = os.getenv("GEMINI_API_KEY")
+
+    if online_key:
+        print("=" * 80)
+        print("TEST 2: ONLINE GEMINI LLM MODE")
+        print("=" * 80)
+        all_passed_online = True
+        for prompt, exp_type, min_acts, max_acts in prompts_test:
+            res = client.post('/propose_plan', json={'prompt': prompt, 'target_folder': 'Download'})
+            data = res.get_json()
+            t = data.get('type')
+            acts = len(data.get('actions', []))
+            msg = data.get('message', '').replace('\n', ' ')[:90]
+
+            type_ok = (t == exp_type)
+            acts_ok = (acts >= min_acts) if max_acts is None else (min_acts <= acts <= max_acts)
+            passed = type_ok and acts_ok
+            if not passed:
+                all_passed_online = False
+
+            status = "PASS" if passed else "FAIL"
+            print(f"[{status}] \"{prompt}\"")
+            print(f"       => Result: Type={t} (expected {exp_type}), Actions={acts}")
+            print(f"       => Msg: {msg}...")
+            print("-" * 80)
+        print(f"ONLINE MODE: {'ALL PASSED' if all_passed_online else 'SOME FAILED'}")
+        return all_passed_offline and all_passed_online
+    else:
+        return all_passed_offline
+
+if __name__ == "__main__":
+    success = main()
+    sys.exit(0 if success else 1)
