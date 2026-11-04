@@ -38,6 +38,13 @@ def _rollback_internal(cursor, batch_id: str) -> int:
                     trash_copy = os.path.join(config.TRASH_DIR, f"{ts}_copy_{os.path.basename(u_src)}")
                     shutil.move(u_src, trash_copy)
 
+            elif u_type == "trash":
+                # For newly written file rollback: soft-delete newly written file into .agent_trash
+                if os.path.exists(u_src):
+                    target_dst = u_dst if u_dst else os.path.join(config.TRASH_DIR, os.path.basename(u_src))
+                    os.makedirs(os.path.dirname(target_dst), exist_ok=True)
+                    shutil.move(u_src, target_dst)
+
             cursor.execute("UPDATE action_ledger SET status = 'REVERTED', reverted_at = CURRENT_TIMESTAMP WHERE id = ?", (act_id,))
             reverted_count += 1
         except Exception as e:

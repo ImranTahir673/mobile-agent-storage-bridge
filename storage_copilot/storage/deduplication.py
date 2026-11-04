@@ -33,8 +33,9 @@ def calculate_file_hash(filepath: str) -> str:
 
 def compute_text_shingles(text: str, k: int = 3) -> Set[str]:
     """
-    Extracts normalized character k-gram shingles from document text for Jaccard similarity.
-    Normalizes punctuation and whitespace, generating character k-grams.
+    Extracts normalized shingles from document text for Jaccard similarity.
+    Uses normalized word 3-grams for long texts (>= 40 words) and
+    normalized character 4-grams for short texts (< 40 words).
     """
     if not text:
         return set()
@@ -44,9 +45,15 @@ def compute_text_shingles(text: str, k: int = 3) -> Set[str]:
     normalized = re.sub(r"[^a-z0-9]+", " ", cleaned.lower()).strip()
     if not normalized:
         return set()
-    if len(normalized) < k:
-        return {normalized}
-    return {normalized[i:i + k] for i in range(len(normalized) - k + 1)}
+
+    words = normalized.split()
+    if len(words) >= 40:
+        return {" ".join(words[i:i + 3]) for i in range(len(words) - 2)}
+    else:
+        char_k = 4 if k == 3 else k
+        if len(normalized) < char_k:
+            return {normalized}
+        return {normalized[i:i + char_k] for i in range(len(normalized) - char_k + 1)}
 
 
 def compute_jaccard_similarity(text_a: str, text_b: str, k: int = 3) -> float:

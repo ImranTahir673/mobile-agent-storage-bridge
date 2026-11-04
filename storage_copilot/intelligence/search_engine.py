@@ -5,6 +5,12 @@ from typing import Dict, Any, Tuple
 from storage_copilot.intelligence.document_classifier import parse_query_intent, classify_document
 from storage_copilot.advice.advisor import get_format_category
 
+BINARY_SYSTEM_MEDIA_EXTS = {
+    ".mp4", ".mkv", ".mov", ".avi", ".webm", ".3gp",
+    ".mp3", ".m4a", ".wav", ".aac", ".ogg", ".opus", ".flac",
+    ".rsa", ".sf", ".apk", ".xapk", ".dex", ".so", ".bin", ".exe", ".iso"
+}
+
 
 def score_file_relevance(
     file_info: Dict[str, Any],
@@ -95,25 +101,46 @@ def score_file_relevance(
     # 4. Document & Format Category Alignment (+10) & Cautionary Penalties (-50)
     classification = classify_document(file_info.get("filename") or file_info.get("name") or "", snip)
     doc_cat = classification.get("category", "")
+    fn_ext = os.path.splitext(fn)[1].lower()
 
-    if any(t in target_tokens for t in ("pass", "entry", "passport", "id", "identity")):
+    # P0 #6 Penalty: Query asks for document (voucher, bill, receipt, lecture, certificate) but file is media/binary
+    if re.search(r"\b(?:voucher|bill|receipt|lecture|certificate|certification|invoice|challan)\b", raw_query, re.I):
+        if fn_ext in BINARY_SYSTEM_MEDIA_EXTS:
+            score -= 50.0
+            reasons.append("Binary/media penalty for document query")
+
+    if any(re.search(rf"\b{re.escape(t)}\b", raw_query, re.I) for t in ("pass", "entry", "passport", "id", "identity")):
         if doc_cat == "IDENTITY_PASS":
             score += 15.0
             reasons.append("Category match: Identity Pass")
-    elif any(t in target_tokens for t in ("bill", "electricity", "utility", "invoice", "receipt")):
-        if doc_cat in ("FINANCIAL_BILL", "ACADEMIC_VOUCHER") or "receipt" in fn or "receipt" in snip:
+    elif any(re.search(rf"\b{re.escape(t)}\b", raw_query, re.I) for t in ("bill", "electricity", "utility", "invoice", "receipt")):
+        has_receipt_word = bool(re.search(r"\b(?:receipt|receipts|bill|bills|invoice|invoices)\b", fn_normalized, re.I) or re.search(r"\b(?:receipt|receipts|bill|bills|invoice|invoices)\b", snip, re.I))
+        if doc_cat in ("FINANCIAL_BILL", "ACADEMIC_VOUCHER") or has_receipt_word:
             score += 15.0
             reasons.append("Category match: Financial Bill/Receipt")
-    elif any(t in target_tokens for t in ("voucher", "fee", "challan", "slip")):
-        if doc_cat == "ACADEMIC_VOUCHER":
+    elif any(re.search(rf"\b{re.escape(t)}\b", raw_query, re.I) for t in ("voucher", "fee", "challan", "slip")):
+        if doc_cat == "ACADEMIC_VOUCHER" or re.search(r"\b(?:voucher|vouchers|fee|challan)\b", fn_normalized, re.I):
             score += 15.0
             reasons.append("Category match: Academic Voucher")
-    elif any(t in target_tokens for t in ("lecture", "lectures", "notes", "assignment", "neural", "course", "university", "academic")):
+    elif any(re.search(rf"\b{re.escape(t)}\b", raw_query, re.I) for t in ("lecture", "lectures", "notes", "assignment", "neural", "course", "university", "academic")):
         if doc_cat == "ACADEMIC_STUDY":
             score += 25.0
             reasons.append("Category match: Academic Study Material")
         elif doc_cat == "IDENTITY_PASS":
             score -= 50.0  # Strict penalty: never treat an Identity Pass as an academic lecture
+
+    # Certificate Query Boost: .pdf/.docx containing 'certificate' or 'certification'
+    if re.search(r"\b(?:certificate|certification|degree|diploma)\b", raw_query, re.I):
+        if fn_ext in (".pdf", ".docx", ".doc"):
+            if re.search(r"\b(?:certificate|certification|degree|diploma)\b", fn_normalized, re.I) or re.search(r"\b(?:certificate|certification)\b", snip, re.I):
+                score += 35.0
+                reasons.append("Certificate document boost")
+
+    # Screenshot Match across all folders
+    if re.search(r"\bscreenshot(?:s)?\b", raw_query, re.I):
+        if "screenshot" in fn_normalized or "screenshot" in fn:
+            score += 40.0
+            reasons.append("Screenshot match")
 
     # 5. Temporal / Date-Range & Folder Alignment (+15)
     if parsed.get("folder_constraint"):

@@ -1,8 +1,16 @@
 # storage_copilot/api/stream_routes.py
-from flask import Blueprint, Response, request, stream_with_context
+from flask import Blueprint, Response, request, jsonify, stream_with_context
 from storage_copilot.execution.event_bus import event_bus
 
 stream_bp = Blueprint("stream", __name__)
+
+
+@stream_bp.route("/stream_ticket", methods=["POST"])
+def create_stream_ticket():
+    """Issues an ephemeral 60-second single-use ticket for EventSource SSE connection."""
+    from storage_copilot.security.auth import issue_stream_ticket
+    ticket = issue_stream_ticket(validity_seconds=60.0)
+    return jsonify({"ticket": ticket, "expires_in": 60})
 
 
 @stream_bp.route("/stream", methods=["GET"])

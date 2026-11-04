@@ -56,7 +56,7 @@ MUTATION_VERBS = (
     "organize", "sort", "clean", "cleanup", "tidy", "deduplicate",
     "move", "relocate", "transfer", "rename", "trash", "delete",
     "remove", "wipe", "archive", "separate", "isolate", "group",
-    "arrange", "consolidate"
+    "arrange", "consolidate", "gather", "collect"
 )
 
 EXPLICIT_QUERY_PREFIXES = (

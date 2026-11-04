@@ -32,7 +32,8 @@ def classify_document(
             "type_label": "Identity / Entry Pass",
             "is_academic_study": False,
             "target_dir": "Documents/Personal/Identity",
-            "suggested_title": filename
+            "suggested_title": filename,
+            "confidence": 0.90
         }
 
     # 2. Academic Financial Vouchers / Fee Slips
@@ -47,7 +48,8 @@ def classify_document(
             "type_label": "Academic Tuition Voucher",
             "is_academic_study": False,
             "target_dir": "Documents/University/Vouchers",
-            "suggested_title": clean_title
+            "suggested_title": clean_title,
+            "confidence": 0.90
         }
 
     # 3. Utility Bills & Commercial Invoices
@@ -63,7 +65,8 @@ def classify_document(
             "type_label": "Utility / Financial Bill",
             "is_academic_study": False,
             "target_dir": "Documents/Finances",
-            "suggested_title": bill_title
+            "suggested_title": bill_title,
+            "confidence": 0.90
         }
 
     # 4. Academic Coursework & Study Materials (Lectures, Assignments, Labs, Papers)
@@ -83,7 +86,8 @@ def classify_document(
             "type_label": "Academic Study Material",
             "is_academic_study": True,
             "target_dir": f"Documents/University/{subject}",
-            "suggested_title": suggested
+            "suggested_title": suggested,
+            "confidence": 0.90
         }
 
     # 5. Career & Professional Resumes (CV, Resume, Portfolio)
@@ -97,7 +101,8 @@ def classify_document(
             "type_label": "Career / Resume",
             "is_academic_study": False,
             "target_dir": "Documents/Personal/Career",
-            "suggested_title": filename
+            "suggested_title": filename,
+            "confidence": 0.90
         }
 
     # 6. Temporary & Screenshots
@@ -107,16 +112,58 @@ def classify_document(
             "type_label": "Temporary / Screenshot",
             "is_academic_study": False,
             "target_dir": ".agent_trash",
-            "suggested_title": filename
+            "suggested_title": filename,
+            "confidence": 0.90
         }
 
-    # 7. General Document
+    # 7. Media (Audio / Video / Photo)
+    media_exts = (
+        ".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".heic", ".svg",
+        ".mp4", ".mkv", ".mov", ".avi", ".webm", ".3gp",
+        ".mp3", ".m4a", ".wav", ".aac", ".ogg", ".opus", ".flac"
+    )
+    if fn_lower.endswith(media_exts):
+        return {
+            "category": "MEDIA",
+            "type_label": "Media / Audio / Video",
+            "is_academic_study": False,
+            "target_dir": "Documents/Media",
+            "suggested_title": filename,
+            "confidence": 0.85
+        }
+
+    # 8. Archive (Compressed Archives)
+    archive_exts = (".zip", ".rar", ".7z", ".tar", ".gz", ".bz2", ".xz")
+    if fn_lower.endswith(archive_exts):
+        return {
+            "category": "ARCHIVE",
+            "type_label": "Archive / Compressed",
+            "is_academic_study": False,
+            "target_dir": "Documents/Archives",
+            "suggested_title": filename,
+            "confidence": 0.85
+        }
+
+    # 9. Android Packages (APK / App Bundles)
+    apk_exts = (".apk", ".xapk", ".apks")
+    if fn_lower.endswith(apk_exts):
+        return {
+            "category": "APK_PACKAGE",
+            "type_label": "Android Package / APK",
+            "is_academic_study": False,
+            "target_dir": "Documents/Apps_and_APKs",
+            "suggested_title": filename,
+            "confidence": 0.85
+        }
+
+    # 10. Explicit Review Bucket Rule (Fallback for low-confidence / general documents)
     return {
         "category": "GENERAL_DOCUMENT",
-        "type_label": "General Document",
+        "type_label": "Needs Review",
         "is_academic_study": False,
-        "target_dir": "Documents/Personal",
-        "suggested_title": filename
+        "target_dir": "Documents/Review",
+        "suggested_title": filename,
+        "confidence": 0.40
     }
 
 
@@ -148,10 +195,17 @@ def parse_query_intent(query: str, default_folder: str = "Download") -> dict:
     elif re.search(r"\b(?:in|from|inside)\s+(?:the\s+)?document(?:s)?\b", q_lower) or "documents" in q_lower:
         folder_constraint = "Documents"
 
-    is_directory_listing = bool(re.search(
-        r"(?:give|show|list|display|get)\s+(?:me\s+)?(?:a\s+)?(?:the\s+)?(?:list\s+of\s+)?(?:all\s+)?(?:the\s+)?files",
-        q_lower
-    ) or q_lower in ("list files", "show files", "list download", "list downloads"))
+    is_directory_listing = bool(
+        re.search(
+            r"(?:give|show|list|display|get)\s+(?:me\s+)?(?:a\s+)?(?:the\s+)?(?:list\s+of\s+)?(?:all\s+)?(?:the\s+)?files",
+            q_lower
+        )
+        or re.search(
+            r"(?:what\s+is|what's|whats)\s+(?:in|inside)\s+(?:my\s+|the\s+)?(?:download|downloads|documents|folder|directory)",
+            q_lower
+        )
+        or q_lower in ("list files", "show files", "list download", "list downloads")
+    )
 
     is_temporal = bool(re.search(r"\b(?:today|recent|new|just now|yesterday|latest)\b", q_lower))
 
@@ -165,6 +219,8 @@ def parse_query_intent(query: str, default_folder: str = "Download") -> dict:
 
     words = [re.sub(r"[^\w-]", "", w.lower()) for w in re.split(r"[\s_]+", cleaned) if w]
     target_tokens = [w for w in words if w and w not in SEARCH_STOPWORDS and len(w) > 1]
+    if is_directory_listing:
+        target_tokens = []
 
     cleaned_target = " ".join([w for w in words if w and w not in {"the", "a", "an", "for", "in", "to", "can", "you", "find", "me", "book", "file", "document"}])
 
