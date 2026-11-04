@@ -1106,6 +1106,22 @@ def main():
                 custom_instruction = f"{gather_directive}\n- Additional Instructions: {custom_instruction}"
             else:
                 custom_instruction = gather_directive
+
+            # Phase 9.x P0 #2 & #7: Enforce extension pre-filtering on gather
+            gather_lower = args.gather.lower()
+            detected_exts = set()
+            for ext in (".pdf", ".docx", ".pptx", ".xlsx", ".txt", ".png", ".jpg", ".jpeg", ".mp4", ".mp3", ".zip", ".py"):
+                if ext in gather_lower or f"{ext[1:]}s" in gather_lower or f"{ext[1:]} files" in gather_lower:
+                    detected_exts.add(ext)
+            if detected_exts:
+                available_files = bridge.list_files(args.target_folder)
+                matching_ext_files = [
+                    f for f in available_files
+                    if any(f.lower().endswith(e) for e in detected_exts)
+                ]
+                if not matching_ext_files:
+                    print(f"\n[INFO] Extension pre-filter: Zero files matching {sorted(list(detected_exts))} in '{args.target_folder}'. Zero actions proposed.")
+                    return
         elif not custom_instruction and not args.auto_approve and sys.stdin.isatty():
             try:
                 user_input = input("\nCustom Goal / Instruction (press Enter for general cleanup): ").strip()
@@ -1135,6 +1151,16 @@ def main():
 
         print("\n[Stage 2: Plan Synthesis Complete] Vetted Action Plan:")
         print(json.dumps(action_plan, indent=2))
+
+        # Phase 9.x P0 #2 & #7: Prevent proposing and executing actions on zero file matches
+        file_actions = [
+            a for a in action_plan.get("actions", [])
+            if a.get("type") in ("move", "copy", "trash", "delete")
+        ]
+        if not file_actions:
+            print("\n[INFO] Zero eligible candidate files matched the criteria. No actions proposed.")
+            print("[*] Storage remains untouched.")
+            return
 
         # ======================================================================
         # Step A: Dry-Run Submission to POST /execute_plan

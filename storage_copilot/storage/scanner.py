@@ -182,16 +182,19 @@ class ManifestIndexManager:
             return (0.0, 0)
         try:
             dir_mtime = os.stat(target_dir).st_mtime
-            entries = list(os.scandir(target_dir))
-            count = len(entries)
             max_entry_mtime = dir_mtime
-            for e in entries:
-                try:
-                    em = e.stat().st_mtime
-                    if em > max_entry_mtime:
-                        max_entry_mtime = em
-                except Exception:
-                    continue
+            count = 0
+            for root, dirs, files in os.walk(target_dir):
+                dirs[:] = [d for d in dirs if not d.startswith(".")]
+                for f in files:
+                    if not f.startswith("."):
+                        count += 1
+                        try:
+                            em = os.stat(os.path.join(root, f)).st_mtime
+                            if em > max_entry_mtime:
+                                max_entry_mtime = em
+                        except Exception:
+                            continue
             return (round(max_entry_mtime, 3), count)
         except Exception:
             return (0.0, 0)
@@ -225,10 +228,12 @@ class ManifestIndexManager:
                 self._index.clear()
 
     def warm_up_async(self, target_folder: str = "Download") -> threading.Thread:
-        """Spawns a non-blocking background daemon thread to index target_folder."""
+        """Spawns a non-blocking background daemon thread to index target_folder and Documents."""
         def _worker():
             try:
                 scan_directory_manifest(target_folder=target_folder, lazy_snippets=True)
+                if target_folder.lower() != "documents":
+                    scan_directory_manifest(target_folder="Documents", lazy_snippets=True)
             except Exception:
                 pass
 
@@ -286,19 +291,33 @@ def scan_directory_manifest(
     scanned_entries = []
     subfolders = []
     if os.path.exists(target_dir) and os.path.isdir(target_dir):
-        for entry in os.scandir(target_dir):
-            if entry.is_dir() and not entry.name.startswith("."):
-                cnt = 0
-                try:
-                    for sub_entry in os.scandir(entry.path):
-                        if sub_entry.is_file() and not sub_entry.name.startswith("."):
-                            cnt += 1
-                            scanned_entries.append(sub_entry)
-                    subfolders.append(f"{entry.name} ({cnt} items)")
-                except Exception:
-                    subfolders.append(entry.name)
-            elif entry.is_file() and not entry.name.startswith("."):
-                scanned_entries.append(entry)
+        def _walk_entries(curr_dir: str, depth: int = 0):
+            if depth > 10 or len(scanned_entries) >= max_files:
+                return
+            try:
+                with os.scandir(curr_dir) as it:
+                    dir_list = []
+                    file_list = []
+                    for e in it:
+                        if e.name.startswith("."):
+                            continue
+                        try:
+                            if e.is_dir(follow_symlinks=False):
+                                dir_list.append(e)
+                            elif e.is_file(follow_symlinks=False):
+                                file_list.append(e)
+                        except Exception:
+                            continue
+                    scanned_entries.extend(file_list)
+                    if curr_dir != target_dir:
+                        rel_sub = os.path.relpath(curr_dir, target_dir).replace("\\", "/")
+                        subfolders.append(f"{rel_sub} ({len(file_list)} items)")
+                    for d in dir_list:
+                        _walk_entries(d.path, depth + 1)
+            except Exception:
+                pass
+
+        _walk_entries(target_dir, 0)
 
     total_entries = min(len(scanned_entries), max_files)
     _publish_event("scan_progress", {

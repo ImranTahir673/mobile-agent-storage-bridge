@@ -17,7 +17,7 @@ def init_db():
             intent TEXT NOT NULL,
             total_actions INTEGER NOT NULL,
             executed_actions INTEGER DEFAULT 0,
-            status TEXT CHECK(status IN ('PENDING', 'RUNNING', 'COMPLETED', 'FAILED', 'ROLLED_BACK')) NOT NULL,
+            status TEXT CHECK(status IN ('PENDING', 'RUNNING', 'COMPLETED', 'CANCELLED', 'FAILED', 'ROLLED_BACK')) NOT NULL,
             completed_at TIMESTAMP,
             rolled_back_at TIMESTAMP
         );

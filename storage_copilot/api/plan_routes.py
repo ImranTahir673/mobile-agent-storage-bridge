@@ -51,7 +51,7 @@ def get_recent_batch():
         cursor.execute("""
             SELECT batch_id, intent, total_actions, executed_actions, status, completed_at, rolled_back_at 
             FROM batches 
-            WHERE status IN ('COMPLETED', 'ROLLED_BACK', 'FAILED') 
+            WHERE status IN ('COMPLETED', 'CANCELLED', 'ROLLED_BACK', 'FAILED') 
             ORDER BY created_at DESC LIMIT 1
         """)
         row = cursor.fetchone()

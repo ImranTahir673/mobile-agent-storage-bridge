@@ -458,7 +458,19 @@ def handle_query_info_turn(
         }
 
     scan_data = scan_directory_manifest(target_folder=target_folder, query_prompt=raw_prompt)
-    manifest = scan_data["manifest"]
+    manifest = list(scan_data["manifest"])
+
+    # Phase 9.x: Expand search scope to include Documents/ subtree when searching Download (and vice versa)
+    other_folder = "Documents" if target_folder.lower() == "download" else "Download"
+    other_dir = os.path.join(config.BASE_STORAGE_DIR, other_folder)
+    if os.path.exists(other_dir) and os.path.isdir(other_dir):
+        other_scan = scan_directory_manifest(target_folder=other_folder, query_prompt=raw_prompt)
+        existing_paths = {m["full_path"] for m in manifest}
+        for itm in other_scan.get("manifest", []):
+            if itm["full_path"] not in existing_paths:
+                manifest.append(itm)
+                existing_paths.add(itm["full_path"])
+
     parsed_q = parse_query_intent(normalized_prompt, default_folder=target_folder)
 
     is_oldest_req = any(w in lower_raw or w in lower_norm for w in ("oldest", "earliest", "first downloaded", "longest ago"))
@@ -501,6 +513,29 @@ def handle_query_info_turn(
         matched_items = [f for f in manifest if f.get("is_relevant")]
         matched_items.sort(key=lambda x: (x.get("relevance_score", 0.0), x.get("mtime", 0.0)), reverse=True)
 
+    # Build structured ranked match objects with snippets and match reasons (Phase 9.x P0 #6)
+    ranked_matches = []
+    for idx, m in enumerate(matched_items[:15], 1):
+        doc_class = classify_document(m["name"], m.get("snippet", ""), user_profile=ctx["profile"])
+        type_label = doc_class.get("type_label", "Document")
+        reasons = m.get("match_reasons") or []
+        if not reasons:
+            if m.get("is_relevant"):
+                reasons = ["Query relevance match"]
+            else:
+                reasons = ["Indexed file in storage"]
+        ranked_matches.append({
+            "rank": idx,
+            "name": m["name"],
+            "path": m["path"],
+            "size_kb": m["size_kb"],
+            "relevance_score": round(m.get("relevance_score", 0.0), 2),
+            "match_reasons": reasons,
+            "category": type_label,
+            "snippet": (m.get("snippet") or "")[:250],
+            "modified_date": m.get("modified_date") or m.get("relative_age", "Unknown")
+        })
+
     deep_context_block = ""
     if matched_items:
         top_item = matched_items[0]
@@ -513,18 +548,7 @@ def handle_query_info_turn(
             pass
 
     if matched_items:
-        top_slice = [
-            {
-                "name": m["name"],
-                "path": m["path"],
-                "size_kb": m["size_kb"],
-                "modified_date": m["modified_date"],
-                "relative_age": m["relative_age"],
-                "category": classify_document(m["name"], m.get("snippet", ""), user_profile=ctx["profile"])["type_label"],
-                "snippet": (m.get("snippet") or "")[:250]
-            }
-            for m in matched_items[:15]
-        ]
+        top_slice = ranked_matches
         sys_prompt = f"""You are Storage Copilot answering a READ-ONLY file lookup for {owner_name}.
 Matched Files in '{target_folder}/':
 {json.dumps(top_slice, indent=2)}
@@ -561,17 +585,18 @@ Rules:
         if is_directory_inventory and not parsed_q.get("target_tokens"):
             lines = [f"### 📂 Directory Inventory for `{target_folder}/` ({len(matched_items)} files)\n"]
         else:
-            lines = [f"Found **{len(matched_items)} matching document(s)** in `{target_folder}/`:\n"]
+            lines = [f"Found **{len(matched_items)} matching document(s)** across storage:\n"]
 
-        for m in matched_items[:15]:
-            doc_class = classify_document(m["name"], m.get("snippet") or "", user_profile=ctx["profile"])
-            type_label = doc_class.get("type_label", "Document")
-            snip_preview = (m.get("snippet") or "").strip().replace("\n", " ")[:140]
-            detail_str = f" — *{type_label}*"
+        for rm in ranked_matches:
+            snip_preview = rm["snippet"].strip().replace("\n", " ")[:140]
+            rel_pct = int(rm["relevance_score"] * 100) if rm["relevance_score"] <= 1.0 else int(rm["relevance_score"])
+            detail_str = f" — *{rm['category']}* (Relevance: {rel_pct}%)"
+            if rm["match_reasons"]:
+                detail_str += f" [{', '.join(rm['match_reasons'][:2])}]"
             if snip_preview and snip_preview != "None (binary/image)":
-                detail_str += f": \"{snip_preview}\""
+                detail_str += f"\n  > \"{snip_preview}\""
             lines.append(
-                f"- **{m['name']}** (`{m['path']}`, {m['size_kb']} KB, {m.get('modified_date') or m.get('relative_age', 'Unknown')}){detail_str}"
+                f"{rm['rank']}. **{rm['name']}** (`{rm['path']}`, {rm['size_kb']} KB, {rm['modified_date']}){detail_str}"
             )
         msg = "\n".join(lines)
     else:
@@ -587,10 +612,7 @@ Rules:
         "intent": "QUERY_INFO",
         "message": msg,
         "analysis": msg,
-        "matches": [
-            {"name": m["name"], "path": m["path"], "size_kb": m["size_kb"]}
-            for m in matched_items[:15]
-        ],
+        "matches": ranked_matches,
         "badges": ["Search", "Read-Only"],
         "version": config.APP_VERSION,
         "model_source": "offline-heuristic",
@@ -698,20 +720,38 @@ def handle_file_operation_turn(
         include_near = (
             sub_intent == "deduplicate_near_clean"
             or bool(classification.get("include_near"))
-            or bool(session_ctx.get("include_near"))
-            or int(session_ctx.get("near_duplicates_count", 0)) > 0
+            or (bool(session_ctx.get("include_near")) and int(session_ctx.get("near_duplicates_count", 0)) > 0 and int(session_ctx.get("exact_duplicates_count", 0)) == 0)
         )
         dup_res = find_duplicate_clusters(config.BASE_STORAGE_DIR, target_folder, include_near=include_near)
-        # Phase 9 Safeguard: If exact SHA-256 scan found 0 duplicates, automatically check 3-gram Jaccard near-duplicates!
         if dup_res["total_duplicates"] == 0 and not include_near:
             near_res = find_duplicate_clusters(config.BASE_STORAGE_DIR, target_folder, include_near=True)
             if near_res["total_duplicates"] > 0:
-                dup_res = near_res
-                include_near = True
+                msg = (
+                    f"✨ **No exact duplicate files detected in `{target_folder}/`!**\n\n"
+                    f"However, **{near_res['total_duplicates']} near-duplicate document(s)** with similar content (3-gram Jaccard $\\ge 85\\%$) were found.\n\n"
+                    "💡 *To clean these revised copies, say **'Clean near duplicate downloads'** or tap the button below.*"
+                )
+                return {
+                    "type": "conversation",
+                    "intent": "FILE_OPERATION",
+                    "message": msg,
+                    "analysis": msg,
+                    "version": config.APP_VERSION,
+                    "actions": [],
+                    "plan": [],
+                    "badges": ["Deduplication", "Near-Duplicates Available"],
+                    "duplicate_summary": near_res,
+                    "quick_chips": [
+                        "🧹 Clean near duplicate downloads",
+                        "📋 Sort Student Vouchers",
+                        "👥 Separate Peer Documents"
+                    ]
+                }
+
         if dup_res["total_duplicates"] == 0:
             msg = (
                 f"✨ **No duplicate files detected in `{target_folder}/`!**\n\n"
-                "All documents possess unique cryptographic SHA-256 signatures. No redundant copies were found to clean."
+                "All documents possess unique cryptographic signatures. No redundant copies were found to clean."
             )
             return {
                 "type": "conversation",
@@ -734,16 +774,24 @@ def handle_file_operation_turn(
         actions = []
         for cluster in dup_res["clusters"]:
             keeper = cluster["keeper"]
+            m_type = cluster.get("match_type", "EXACT_SHA256")
+            is_near_cluster = (m_type == "NEAR_JACCARD")
+            badge_label = "Near-Duplicate Soft Delete" if is_near_cluster else "Soft Delete"
             for dup in cluster["duplicates"]:
+                rat = (
+                    f"Near-duplicate ({int(cluster.get('similarity', 0.85) * 100)}% Jaccard) of '{keeper['filename']}'"
+                    if is_near_cluster
+                    else f"{dup.get('reason', 'Redundant duplicate')} of '{keeper['filename']}'"
+                )
                 actions.append({
                     "action_id": f"step-{len(actions) + 1}",
                     "type": "trash",
                     "badge": "TRASH",
-                    "badge_label": "Soft Delete",
+                    "badge_label": badge_label,
                     "source": dup["path"],
                     "path": dup["path"],
                     "destination": f".agent_trash/{dup['filename']}",
-                    "rationale": f"{dup.get('reason', 'Redundant duplicate')} of '{keeper['filename']}'",
+                    "rationale": rat,
                     "ai_inspected": True,
                     "inspected_preview": f"Matched against keeper {keeper['filename']}"
                 })
@@ -1120,52 +1168,71 @@ Return JSON:
                 step_idx += 1
 
     else:
-        plan_desc = f"Sort and organize candidate documents in '{target_folder}' into structured taxonomy"
-        for item in manifest:
-            fn = item["name"]
-            snip = item["snippet"] or ""
-            if fn.startswith("."):
-                continue
+        # Phase 9.x P0 #2 & #7: Enforce extension and query pre-filtering on general organization
+        detected_exts = set()
+        for ext in (".pdf", ".docx", ".pptx", ".xlsx", ".txt", ".png", ".jpg", ".jpeg", ".mp4", ".mp3", ".zip", ".py"):
+            if ext in lower_p or f"{ext[1:]}s" in lower_p or f"{ext[1:]} files" in lower_p:
+                detected_exts.add(ext)
 
-            matched_peer = next((p for p in peer_names if p.lower() in fn.lower() or p.lower() in snip.lower()), None)
-            if matched_peer:
-                target_d = f"Documents/Peers/{matched_peer}"
-                clean_title = fn
-                rationale = f"Routed to peer folder for {matched_peer} to protect personal storage"
-            else:
-                doc_class = classify_document(fn, snip, user_profile=user_profile)
-                target_d = doc_class["target_dir"]
-                clean_title = doc_class["suggested_title"]
-                if doc_class["category"] == "TEMPORARY_TRASH":
-                    plan_actions.append({
-                        "action_id": f"step-{step_idx}",
-                        "type": "trash",
-                        "path": item["path"],
-                        "badge": "TRASH",
-                        "rationale": "Temporary/screenshot file queued for soft-delete with rollback"
-                    })
-                    step_idx += 1
+        target_items = [
+            item for item in manifest
+            if not detected_exts or item.get("extension", "").lower() in detected_exts
+        ]
+
+        if not target_items and detected_exts:
+            plan_actions = []
+        else:
+            plan_desc = f"Sort and organize candidate documents in '{target_folder}' into structured taxonomy"
+            for item in target_items:
+                fn = item["name"]
+                snip = item["snippet"] or ""
+                if fn.startswith("."):
                     continue
-                rationale = f"Semantically categorized as {doc_class['type_label']} into {target_d}"
 
-            if target_d not in created_dirs:
-                plan_actions.append({"action_id": f"step-{step_idx}", "type": "make_dir", "path": target_d})
-                created_dirs.add(target_d)
+                matched_peer = next((p for p in peer_names if p.lower() in fn.lower() or p.lower() in snip.lower()), None)
+                if matched_peer:
+                    target_d = f"Documents/Peers/{matched_peer}"
+                    clean_title = fn
+                    rationale = f"Routed to peer folder for {matched_peer} to protect personal storage"
+                else:
+                    doc_class = classify_document(fn, snip, user_profile=user_profile)
+                    target_d = doc_class["target_dir"]
+                    clean_title = doc_class["suggested_title"]
+                    if doc_class["category"] == "TEMPORARY_TRASH":
+                        plan_actions.append({
+                            "action_id": f"step-{step_idx}",
+                            "type": "trash",
+                            "path": item["path"],
+                            "badge": "TRASH",
+                            "rationale": "Temporary/screenshot file queued for soft-delete with rollback"
+                        })
+                        step_idx += 1
+                        continue
+                    rationale = f"Semantically categorized as {doc_class['type_label']} into {target_d}"
+
+                if target_d not in created_dirs:
+                    plan_actions.append({"action_id": f"step-{step_idx}", "type": "make_dir", "path": target_d})
+                    created_dirs.add(target_d)
+                    step_idx += 1
+
+                plan_actions.append({
+                    "action_id": f"step-{step_idx}",
+                    "type": "move",
+                    "source": item["path"],
+                    "destination": f"{target_d}/{clean_title}",
+                    "badge": "RENAME" if clean_title != fn else "FILE_MOVE",
+                    "rationale": rationale,
+                    "ai_inspected": True,
+                    "inspected_preview": snip[:100]
+                })
                 step_idx += 1
 
-            plan_actions.append({
-                "action_id": f"step-{step_idx}",
-                "type": "move",
-                "source": item["path"],
-                "destination": f"{target_d}/{clean_title}",
-                "badge": "RENAME" if clean_title != fn else "FILE_MOVE",
-                "rationale": rationale,
-                "ai_inspected": True,
-                "inspected_preview": snip[:100]
-            })
-            step_idx += 1
-
-    if not plan_actions:
+    # Phase 9.x: Ensure at least one actual file mutation action exists (prevent proposing empty plans or make_dir only)
+    file_actions = [
+        a for a in plan_actions
+        if a.get("type") in ("move", "copy", "trash", "delete")
+    ]
+    if not file_actions:
         msg = (
             f"ℹ️ No eligible documents found in `{target_folder}/` matching \"{raw_prompt}\".\n\n"
             f"Inspected {len(manifest)} real files on disk. None required modification under this criteria."

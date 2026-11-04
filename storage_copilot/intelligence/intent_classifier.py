@@ -97,11 +97,30 @@ def _resolve_continuity_sub_intent(
     """
     last_sub = session_ctx.get("last_sub_intent") or ""
     inc_near = bool(session_ctx.get("include_near") or session_ctx.get("near_duplicates_count", 0) > 0)
+    asst_has_near = bool("near-duplicate" in lower_asst or "near duplicate" in lower_asst or "jaccard" in lower_asst)
+    asst_has_exact = bool(
+        "duplicate file audit" in lower_asst
+        or "clean up these redundant copies" in lower_asst
+        or "redundant duplicate" in lower_asst
+    )
+
+    def _determine_is_near(user_text: str) -> bool:
+        if any(k in user_text for k in ("near", "similar", "fuzzy", "revised", "jaccard", "deep")):
+            return True
+        if asst_has_exact and not asst_has_near:
+            return False
+        if asst_has_near:
+            return True
+        if last_sub == "deduplicate_near_audit":
+            return True
+        if last_sub == "deduplicate_audit":
+            return False
+        return bool(session_ctx.get("include_near")) and (session_ctx.get("near_duplicates_count", 0) > 0 and session_ctx.get("exact_duplicates_count", 0) == 0)
 
     # Check if user explicitly mentions duplicates or confirms after a duplicate audit
     if any(k in lower_norm for k in ("duplicate", "duplicates", "deduplicate")):
         is_clean = any(k in lower_norm for k in ("clean", "delete", "trash", "remove", "wipe", "sweep", "clear", "yes", "proceed"))
-        is_near = inc_near or any(k in lower_norm for k in ("near", "similar", "fuzzy", "revised", "jaccard", "deep")) or ("near-duplicate" in lower_asst) or ("jaccard" in lower_asst)
+        is_near = _determine_is_near(lower_norm)
         if is_clean:
             return {
                 "intent": UserIntent.FILE_OPERATION,
@@ -130,7 +149,7 @@ def _resolve_continuity_sub_intent(
 
     if remainder and remainder not in ("move all files", "clean them", "clean those", "do it"):
         if any(k in remainder for k in ("duplicate", "duplicates", "deduplicate")):
-            is_near = inc_near or ("near" in remainder) or ("near-duplicate" in lower_asst) or ("jaccard" in lower_asst)
+            is_near = _determine_is_near(remainder)
             return {
                 "intent": UserIntent.FILE_OPERATION,
                 "sub_intent": "deduplicate_near_clean" if is_near else "deduplicate_clean",
@@ -160,27 +179,11 @@ def _resolve_continuity_sub_intent(
             "include_near": False,
         }
 
-    # Check assistant message or session_ctx from previous turn
-    if "forgotten files audit" in lower_asst or "clean forgotten files" in lower_asst or last_sub == "forgotten_audit":
-        return {
-            "intent": UserIntent.FILE_OPERATION,
-            "sub_intent": "forgotten_clean",
-            "resolved_goal": "clean forgotten files",
-            "include_near": False,
-        }
-    if (
-        "duplicate file audit" in lower_asst
-        or "clean up these redundant copies" in lower_asst
-        or "redundant duplicate" in lower_asst
-        or last_sub in ("deduplicate_audit", "deduplicate_near_audit")
-    ):
-        is_near = inc_near or ("near-duplicate" in lower_asst) or ("jaccard" in lower_asst) or (last_sub == "deduplicate_near_audit")
-        return {
-            "intent": UserIntent.FILE_OPERATION,
-            "sub_intent": "deduplicate_near_clean" if is_near else "deduplicate_clean",
-            "resolved_goal": "clean near duplicate downloads" if is_near else "clean duplicate downloads",
-            "include_near": is_near,
-        }
+    # Unanchored affirmative with no prior assistant turn in history -> CONVERSATION
+    if not lower_asst and (not remainder or remainder in ("clean them", "clean those", "do it")):
+        return None
+
+    # Check assistant message from previous turn in conversation history
     if any(p in lower_asst for p in ("peer document", "peer files", "separate peer", "classmate", "peer separation")):
         return {
             "intent": UserIntent.FILE_OPERATION,
@@ -195,18 +198,57 @@ def _resolve_continuity_sub_intent(
             "resolved_goal": "sort student vouchers",
             "include_near": False,
         }
-    if any(p in lower_asst for p in ("file format", "format subfolders", "group by format", "by format", "respective folders", "unorganized files", "files ready to organize")) or last_sub == "format_sorting_proposal":
+    if any(p in lower_asst for p in ("file format", "format subfolders", "group by format", "by format", "respective folders", "unorganized files", "files ready to organize")):
         return {
             "intent": UserIntent.FILE_OPERATION,
             "sub_intent": "format_batch_execute",
             "resolved_goal": "process next batch of files in download",
             "include_near": False,
         }
+    if "forgotten files audit" in lower_asst or "clean forgotten files" in lower_asst:
+        return {
+            "intent": UserIntent.FILE_OPERATION,
+            "sub_intent": "forgotten_clean",
+            "resolved_goal": "clean forgotten files",
+            "include_near": False,
+        }
+    if asst_has_exact or asst_has_near:
+        is_near = _determine_is_near(lower_norm)
+        return {
+            "intent": UserIntent.FILE_OPERATION,
+            "sub_intent": "deduplicate_near_clean" if is_near else "deduplicate_clean",
+            "resolved_goal": "clean near duplicate downloads" if is_near else "clean duplicate downloads",
+            "include_near": is_near,
+        }
     if any(p in lower_asst for p in ("university", "academic", "organize", "recommend", "plan", "voucher")):
         return {
             "intent": UserIntent.FILE_OPERATION,
             "sub_intent": "academic_organization",
             "resolved_goal": "organize all my university files",
+            "include_near": False,
+        }
+
+    # If no assistant message in history, check session_ctx from prior audit
+    if last_sub == "forgotten_audit":
+        return {
+            "intent": UserIntent.FILE_OPERATION,
+            "sub_intent": "forgotten_clean",
+            "resolved_goal": "clean forgotten files",
+            "include_near": False,
+        }
+    if last_sub in ("deduplicate_audit", "deduplicate_near_audit"):
+        is_near = _determine_is_near(lower_norm)
+        return {
+            "intent": UserIntent.FILE_OPERATION,
+            "sub_intent": "deduplicate_near_clean" if is_near else "deduplicate_clean",
+            "resolved_goal": "clean near duplicate downloads" if is_near else "clean duplicate downloads",
+            "include_near": is_near,
+        }
+    if last_sub == "format_sorting_proposal":
+        return {
+            "intent": UserIntent.FILE_OPERATION,
+            "sub_intent": "format_batch_execute",
+            "resolved_goal": "process next batch of files in download",
             "include_near": False,
         }
 

@@ -1,6 +1,6 @@
 # Storage Copilot (Mobile Agent Storage Bridge)
 
-[![Version](https://img.shields.io/badge/version-v0.6.2--live-blue.svg)](file:///d:/Imran%20Tahir/SIDEHUSTLE/bridging-prototype/storage_copilot/config.py)
+[![Version](https://img.shields.io/badge/version-v0.7.0--live-blue.svg)](file:///d:/Imran%20Tahir/SIDEHUSTLE/bridging-prototype/storage_copilot/config.py)
 [![Phase 1](https://img.shields.io/badge/Phase%201-Decomposition%20Complete-green.svg)](file:///d:/Imran%20Tahir/SIDEHUSTLE/bridging-prototype/docs/ROADMAP.md)
 [![Phase 2](https://img.shields.io/badge/Phase%202-Three--Tier%20Routing%20Complete-green.svg)](file:///d:/Imran%20Tahir/SIDEHUSTLE/bridging-prototype/docs/PHASE2_IMPLEMENTATION_PLAN.md)
 [![Phase 3](https://img.shields.io/badge/Phase%203-Security%20Hardening%20Complete%20(177%20Tests)-green.svg)](file:///d:/Imran%20Tahir/SIDEHUSTLE/bridging-prototype/docs/PHASE3_IMPLEMENTATION_PLAN.md)

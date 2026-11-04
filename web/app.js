@@ -551,7 +551,9 @@ async function cancelActiveExecution() {
 
 async function refreshRecentBatchBanner() {
   try {
-    const resp = await fetch("/recent_batch");
+    const resp = await fetch("/recent_batch", {
+      headers: buildHeaders(),
+    });
     const data = await resp.json();
     if (data.status === "success" && data.batch && data.batch.status !== "ROLLED_BACK" && data.batch.executed_actions > 0) {
       state.lastCompletedBatchId = data.batch.batch_id;
@@ -608,7 +610,9 @@ function renderQuickChips(chips) {
 // ============================================================================
 async function checkApiStatus() {
   try {
-    const resp = await fetch("/api_status");
+    const resp = await fetch("/api_status", {
+      headers: buildHeaders(),
+    });
     const data = await resp.json();
     if (data.app_version) {
       dom.versionBadge.textContent = data.app_version;
