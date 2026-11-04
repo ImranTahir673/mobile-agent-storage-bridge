@@ -81,7 +81,13 @@ PII_PATTERNS = [
     # 8. Personal Names in formal administrative labels (Student Name, Applicant, Cardholder, etc.)
     (
         re.compile(
-            r"(?i)\b((?:student\s+name|applicant\s+name|customer\s+name|cardholder\s+name|father(?:'s)?\s+name|full\s+name|name)\s*[:\-])\s*([A-Za-z][A-Za-z0-9\s.]{1,35})(?=[,\n\r;]|\s{2,}|$)"
+            r"(?i)\b((?:student\s+name|applicant\s+name|customer\s+name|cardholder\s+name|father(?:'s)?\s+name|full\s+name|recipient\s+name)\s*[:\-])\s*([A-Za-z][A-Za-z0-9\s.]{1,35})(?=[,\n\r;]|\s{2,}|$)"
+        ),
+        r"\1 [REDACTED_NAME]",
+    ),
+    (
+        re.compile(
+            r"(?i)(Student\s+Fee\s+Slip:[^\n]*?\bName\s*[:\-])\s*([A-Za-z][A-Za-z0-9\s.]{1,35})(?=[,\n\r;]|\s{2,}|$)"
         ),
         r"\1 [REDACTED_NAME]",
     ),

@@ -31,7 +31,8 @@ def resolve_collision(target_path: str, strategy: str) -> str:
 def ensure_unique_plan_destinations(actions: list) -> list:
     """
     Enforces strict destination uniqueness across all actions in a single batch.
-    Prevents duplicate destination collisions by disambiguating with source tokens or numeric counters.
+    Prevents duplicate destination collisions by disambiguating with clean tokens or sequential counters.
+    Never slices word fragments like '_e_copy' or '_ecture'.
     """
     seen_destinations = set()
     cleaned_actions = []
@@ -52,13 +53,17 @@ def ensure_unique_plan_destinations(actions: list) -> list:
                 cand_dst = dst
                 counter = 1
                 while cand_dst.lower() in seen_destinations:
-                    # Disambiguate using unique source marker or counter
+                    # Disambiguate using explicit trailing alphanumeric ID (e.g. WA0025) or clean sequential counter
+                    token = None
                     if counter == 1 and src_stem:
-                        clean_token = re.sub(r"[^\w-]", "", src_stem)
-                        token = clean_token[-6:] if len(clean_token) >= 4 else clean_token
+                        m = re.search(r"(WA\d+|\d+)$", src_stem, re.I)
+                        if m and m.group(1) != "1":
+                            token = m.group(1)
+
+                    if token:
                         cand_dst = f"{base_dir}/{stem}_{token}{ext}" if base_dir else f"{stem}_{token}{ext}"
                     else:
-                        cand_dst = f"{base_dir}/{stem}_{counter}{ext}" if base_dir else f"{stem}_{counter}{ext}"
+                        cand_dst = f"{base_dir}/{stem}_{counter + 1}{ext}" if base_dir else f"{stem}_{counter + 1}{ext}"
                     counter += 1
 
                 seen_destinations.add(cand_dst.lower())

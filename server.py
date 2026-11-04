@@ -153,14 +153,14 @@ from storage_copilot.advice.advisor import (
 )
 
 # API Route Handlers
-from storage_copilot.api.core_routes import health, health_check, serve_static, api_status, configure_api_key
+from storage_copilot.api.core_routes import health, health_check, serve_static, api_status, configure_api_key, storage_overview
 from storage_copilot.api.file_routes import list_files, read_file_snippet, write_file, make_directory, move_file, trash_file
 from storage_copilot.api.history_routes import lookup_history, rollback_batch, rollback_last
 from storage_copilot.api.profile_routes import get_user_profile_path, get_user_profile, update_user_profile
 from storage_copilot.api.dedup_routes import scan_duplicates, scan_forgotten
 from storage_copilot.api.utility_routes import seed_fixtures
 from storage_copilot.api.plan_routes import execute_plan, cancel_execution, get_recent_batch, propose_plan
-from storage_copilot.api.stream_routes import stream_events
+from storage_copilot.api.stream_routes import stream_events, create_stream_ticket
 
 # Initialize default Flask app
 app = create_app()

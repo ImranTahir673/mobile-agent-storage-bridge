@@ -107,3 +107,54 @@ def configure_api_key():
         "message": "Google Gemini API key successfully verified and activated!",
         "masked_key": f"{new_key[:4]}...{new_key[-4:]}"
     })
+
+@core_bp.route("/storage_overview", methods=["GET"])
+def storage_overview():
+    """
+    Returns an overview of storage contents across Download/ and Documents/,
+    including total file counts and category distributions.
+    """
+    from collections import defaultdict
+    from storage_copilot.intelligence.document_classifier import classify_document
+
+    category_counts = defaultdict(int)
+    dl_counts = defaultdict(int)
+    doc_counts = defaultdict(int)
+    dl_files = 0
+    doc_files = 0
+
+    dl_dir = os.path.join(config.BASE_STORAGE_DIR, "Download")
+    if os.path.exists(dl_dir) and os.path.isdir(dl_dir):
+        for root, dirs, files in os.walk(dl_dir):
+            dirs[:] = [d for d in dirs if not d.startswith(".") and d != ".agent_trash"]
+            for f in files:
+                if not f.startswith("."):
+                    dl_files += 1
+                    cat = classify_document(f, "")["category"]
+                    dl_counts[cat] += 1
+                    category_counts[cat] += 1
+
+    doc_dir = os.path.join(config.BASE_STORAGE_DIR, "Documents")
+    if os.path.exists(doc_dir) and os.path.isdir(doc_dir):
+        for root, dirs, files in os.walk(doc_dir):
+            dirs[:] = [d for d in dirs if not d.startswith(".") and d != ".agent_trash"]
+            for f in files:
+                if not f.startswith("."):
+                    doc_files += 1
+                    cat = classify_document(f, "")["category"]
+                    doc_counts[cat] += 1
+                    category_counts[cat] += 1
+
+    total_files = dl_files + doc_files
+
+    return jsonify({
+        "status": "success",
+        "total_files": total_files,
+        "download_files_count": dl_files,
+        "documents_files_count": doc_files,
+        "category_counts": dict(category_counts),
+        "roots": {
+            "Download": {"total_files": dl_files, "category_counts": dict(dl_counts)},
+            "Documents": {"total_files": doc_files, "category_counts": dict(doc_counts)}
+        }
+    })

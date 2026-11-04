@@ -62,21 +62,11 @@ def write_file():
     rel_path = data.get("path", "")
     content = data.get("content", "")
     try:
-        target = resolve_safe_path(rel_path)
+        resolve_safe_path(rel_path)
     except ValueError as e:
         return jsonify({"error": str(e)}), 403
 
-    try:
-        os.makedirs(os.path.dirname(target), exist_ok=True)
-        with open(target, "w", encoding="utf-8") as f:
-            f.write(content)
-        return jsonify({
-            "status": "written",
-            "path": rel_path,
-            "bytes": len(content.encode("utf-8"))
-        })
-    except Exception as e:
-        return jsonify({"error": f"Failed writing file: {e}"}), 500
+    return execute_plan_single("write_file", {"path": rel_path, "content": content})
 
 # Legacy single-operation endpoints forward into safe handlers
 @file_bp.route("/make_directory", methods=["POST"])

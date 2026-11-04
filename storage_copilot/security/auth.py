@@ -2,12 +2,29 @@
 import os
 import re
 import stat
+import time
 import hmac
 import secrets
 from urllib.parse import urlparse
 from typing import Optional
 from flask import Request, Response, jsonify
 from storage_copilot import config
+
+# Ephemeral SSE Stream Tickets: ticket -> expiration_timestamp
+_STREAM_TICKETS: dict = {}
+
+def issue_stream_ticket(validity_seconds: float = 60.0) -> str:
+    """Issues a 60-second single-use random ticket stored in memory."""
+    ticket = secrets.token_urlsafe(32)
+    _STREAM_TICKETS[ticket] = time.time() + validity_seconds
+    return ticket
+
+def validate_stream_ticket(ticket: str) -> bool:
+    """Validates and consumes a single-use stream ticket."""
+    if not ticket or ticket not in _STREAM_TICKETS:
+        return False
+    exp = _STREAM_TICKETS.pop(ticket)
+    return time.time() <= exp
 
 # Endpoints that mutate state or sensitive configuration and require zero-trust protection
 PROTECTED_MUTATION_PATHS = {
@@ -35,6 +52,8 @@ PROTECTED_READ_PATHS = {
     "/propose_plan",
     "/user_profile",
     "/api_status",
+    "/storage_overview",
+    "/stream_ticket",
 }
 
 # All endpoints protected under Dual-Mode Zero-Trust
@@ -243,6 +262,14 @@ def verify_mutation_auth(req: Request) -> tuple[bool, Optional[str], int]:
 
     if not is_protected:
         return True, None, 200
+
+    # P1 #15: Check ephemeral SSE stream ticket for EventSource connections
+    if is_stream:
+        stream_ticket = (req.args.get("ticket") or "").strip()
+        if stream_ticket:
+            if validate_stream_ticket(stream_ticket):
+                return True, None, 200
+            return False, "Unauthorized: Invalid or expired stream ticket.", 401
 
     provided_token = extract_request_token(req, allow_query_token=is_stream)
 

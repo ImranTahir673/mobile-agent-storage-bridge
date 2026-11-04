@@ -105,12 +105,29 @@ function scrollToBottom() {
 // ============================================================================
 // 1. Live Server-Sent Events (SSE) Connection (/stream)
 // ============================================================================
-function connectSSEStream() {
+async function connectSSEStream() {
   if (state.sseSource) {
     state.sseSource.close();
   }
-  const tokenParam = state.bearerToken ? `?token=${encodeURIComponent(state.bearerToken)}` : "";
-  const streamUrl = `/stream${tokenParam}`;
+  let streamUrl = "/stream";
+  if (state.bearerToken) {
+    try {
+      const res = await fetch("/stream_ticket", {
+        method: "POST",
+        headers: buildHeaders(),
+      });
+      if (res.ok) {
+        const tdata = await res.json();
+        if (tdata.ticket) {
+          streamUrl = `/stream?ticket=${encodeURIComponent(tdata.ticket)}`;
+        }
+      } else {
+        streamUrl = `/stream?token=${encodeURIComponent(state.bearerToken)}`;
+      }
+    } catch (_) {
+      streamUrl = `/stream?token=${encodeURIComponent(state.bearerToken)}`;
+    }
+  }
   const es = new EventSource(streamUrl);
   state.sseSource = es;
 
@@ -259,12 +276,18 @@ function appendAssistantResponse(data) {
     .map((b) => `<span class="msg-badge">${b}</span>`)
     .join(" ");
 
+  let fallbackBanner = "";
+  if (data.fallback_notice) {
+    fallbackBanner = `<div class="fallback-notice-banner" style="margin-bottom:8px;padding:6px 10px;background:rgba(234,179,8,0.15);border:1px solid rgba(234,179,8,0.3);border-radius:6px;font-size:0.85em;color:#eab308;">🛡️ ${data.fallback_notice}</div>`;
+  }
+
   div.innerHTML = `
     <div class="msg-header">
       <span class="msg-author">Storage Copilot</span>
       ${aiEngineBadge}
       ${badgesHtml}
     </div>
+    ${fallbackBanner}
     <div class="msg-body">${formatMarkdownSimple(data.message || data.analysis || "")}</div>
   `;
 
@@ -716,7 +739,27 @@ dom.btnSaveSettings.addEventListener("click", async () => {
   connectSSEStream();
 });
 
+async function loadStorageOverview() {
+  try {
+    const res = await fetch("/storage_overview", { headers: buildHeaders() });
+    if (res.ok) {
+      const data = await res.json();
+      const initialMsgBody = dom.chatContainer.querySelector(".chat-message.assistant-message .msg-body");
+      if (initialMsgBody && data.total_files !== undefined) {
+        let summaryText = `<p>Welcome! I am your on-device <strong>Storage Copilot</strong> running with pre-flight RAM PII sanitization, 3-Tier Intent Routing, and an atomic SQLite WAL rollback ledger.</p>`;
+        if (data.total_files === 0) {
+          summaryText += `<p>📊 <strong>Storage Status:</strong> No files detected in <code>Download/</code> or <code>Documents/</code> yet. Tap <strong>🌱 Seed Demo Fixtures</strong> above to get started!</p>`;
+        } else {
+          summaryText += `<p>📊 <strong>Storage Status:</strong> I found <strong>${data.total_files} file(s)</strong> across <code>Download/</code> (${data.download_files_count || 0}) and <code>Documents/</code> (${data.documents_files_count || 0}).</p>`;
+        }
+        initialMsgBody.innerHTML = summaryText;
+      }
+    }
+  } catch (_) {}
+}
+
 // Initialize on page load
 checkApiStatus();
 connectSSEStream();
 refreshRecentBatchBanner();
+loadStorageOverview();

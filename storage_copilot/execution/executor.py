@@ -79,7 +79,7 @@ def execute_action_plan(
     prepared_steps = []
     for idx, act in enumerate(actions):
         act_type = act.get("type")
-        if act_type not in ("make_dir", "move", "copy", "trash"):
+        if act_type not in ("make_dir", "move", "copy", "trash", "write_file"):
             return {"error": f"Unsupported action type '{act_type}' at index {idx}"}, 400
 
         try:
@@ -169,8 +169,54 @@ def execute_action_plan(
                     "trash_id": str(uuid.uuid4())
                 })
 
+            elif act_type == "write_file":
+                dst = resolve_safe_path(act.get("path") or act.get("destination") or "")
+                content = act.get("content", "")
+                if isinstance(content, str):
+                    c_bytes = content.encode("utf-8")
+                else:
+                    c_bytes = bytes(content)
+                size = len(c_bytes)
+
+                file_existed = os.path.exists(dst) and os.path.isfile(dst)
+                if file_existed:
+                    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+                    backup_name = f"{ts}_{uuid.uuid4().hex[:6]}_{os.path.basename(dst)}"
+                    backup_path = os.path.join(config.TRASH_DIR, backup_name)
+                    undo_type = "untrash"
+                    undo_src = backup_path
+                    undo_dst = dst
+                else:
+                    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+                    trash_filename = f"{ts}_{uuid.uuid4().hex[:6]}_{os.path.basename(dst)}"
+                    trashed_path = os.path.join(config.TRASH_DIR, trash_filename)
+                    undo_type = "trash"
+                    undo_src = dst
+                    undo_dst = trashed_path
+
+                prepared_steps.append({
+                    "step_index": idx,
+                    "action_type": "write_file",
+                    "src": None,
+                    "dst": dst,
+                    "content": content,
+                    "file_existed": file_existed,
+                    "undo_type": undo_type,
+                    "undo_src": undo_src,
+                    "undo_dst": undo_dst,
+                    "checksum": None,
+                    "size": size,
+                    "trash_id": str(uuid.uuid4()) if not file_existed else None
+                })
+
         except (ValueError, FileExistsError) as e:
             return {"error": str(e), "failed_step": idx}, 400
+
+    # P1 #12: Enforce 500 MB Cumulative Size Cap across batch
+    MAX_CUMULATIVE_BYTES = 500 * 1024 * 1024  # 500 MB
+    cumulative_bytes = sum(s.get("size", 0) for s in prepared_steps)
+    if cumulative_bytes > MAX_CUMULATIVE_BYTES:
+        return {"error": f"Blast radius exceeded: cumulative batch size exceeds 500 MB limit ({cumulative_bytes} bytes)"}, 400
 
     if dry_run:
         return {
@@ -301,6 +347,15 @@ def execute_action_plan(
                             raise FileNotFoundError(f"Source file missing at step {step['step_index']}: {step['src']}")
                         os.makedirs(config.TRASH_DIR, exist_ok=True)
                         shutil.move(step["src"], step["dst"])
+                    elif step["action_type"] == "write_file":
+                        dst = step["dst"]
+                        if step.get("file_existed") and os.path.exists(dst):
+                            os.makedirs(config.TRASH_DIR, exist_ok=True)
+                            shutil.copy2(dst, step["undo_src"])
+                        os.makedirs(os.path.dirname(dst), exist_ok=True)
+                        content = step.get("content", "")
+                        with open(dst, "w", encoding="utf-8") as wf:
+                            wf.write(content)
 
                     cursor.execute(
                         "UPDATE action_ledger SET status = 'EXECUTED', executed_at = CURRENT_TIMESTAMP WHERE id = ?",
@@ -485,5 +540,10 @@ def execute_plan_single(action_type: str, params: dict):
         "actions": [{"action_id": "step-1", "type": action_type, **params}]
     }
     res_dict, status_code = execute_action_plan(plan_payload)
+    if isinstance(res_dict, dict) and status_code == 200:
+        if action_type == "write_file":
+            res_dict["path"] = params.get("path") or params.get("destination") or ""
+            c = params.get("content", "")
+            res_dict["bytes"] = len(c.encode("utf-8")) if isinstance(c, str) else len(bytes(c))
     from flask import jsonify
     return jsonify(res_dict), status_code

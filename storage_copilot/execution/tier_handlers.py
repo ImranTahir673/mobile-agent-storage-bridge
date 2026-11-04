@@ -18,7 +18,7 @@ from storage_copilot.storage.deduplication import (
 )
 from storage_copilot.storage.collision_resolver import ensure_unique_plan_destinations
 from storage_copilot.storage.namer import ContentDerivedNamer, extract_course_code
-from storage_copilot.intelligence.gemini_client import call_gemini_json, call_gemini_text, call_gemini_text_with_meta
+from storage_copilot.intelligence.gemini_client import call_gemini_json, call_gemini_text, call_gemini_text_with_meta, is_gemini_available
 from storage_copilot.intelligence.session_context import session_context_store
 from storage_copilot.intelligence.document_classifier import classify_document, parse_query_intent
 from storage_copilot.intelligence.search_engine import (
@@ -248,6 +248,7 @@ Respond directly and warmly to {owner_name} in concise Markdown.
         "version": config.APP_VERSION,
         "model_source": "offline-heuristic",
         "is_llm": False,
+        "fallback_notice": "AI unavailable right now, using on-device fallback" if not is_gemini_available() else None,
         "actions": [],
         "plan": [],
         "badges": ["Chat", "Advice"],
@@ -473,6 +474,34 @@ def handle_query_info_turn(
 
     parsed_q = parse_query_intent(normalized_prompt, default_folder=target_folder)
 
+    # P0 #9: Temporal detection for <MonthName> <YYYY> or <YYYY-MM> (e.g. "October 2026" -> "2026-10")
+    months_map = {
+        "january": "01", "jan": "01",
+        "february": "02", "feb": "02",
+        "march": "03", "mar": "03",
+        "april": "04", "apr": "04",
+        "may": "05",
+        "june": "06", "jun": "06",
+        "july": "07", "jul": "07",
+        "august": "08", "aug": "08",
+        "september": "09", "sep": "09", "sept": "09",
+        "october": "10", "oct": "10",
+        "november": "11", "nov": "11",
+        "december": "12", "dec": "12"
+    }
+    expected_ym = None
+    ym_match = re.search(r"\b(\d{4})-(0[1-9]|1[0-2])\b", raw_prompt)
+    if ym_match:
+        expected_ym = f"{ym_match.group(1)}-{ym_match.group(2)}"
+    else:
+        m_regex = r"(?:january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sep|sept|oct|nov|dec)"
+        m1 = re.search(rf"\b({m_regex})\s+(\d{{4}})\b", raw_prompt, re.I)
+        m2 = re.search(rf"\b(\d{{4}})\s+({m_regex})\b", raw_prompt, re.I)
+        if m1:
+            expected_ym = f"{m1.group(2)}-{months_map[m1.group(1).lower()]}"
+        elif m2:
+            expected_ym = f"{m2.group(1)}-{months_map[m2.group(2).lower()]}"
+
     is_oldest_req = any(w in lower_raw or w in lower_norm for w in ("oldest", "earliest", "first downloaded", "longest ago"))
     is_latest_req = any(w in lower_raw or w in lower_norm for w in ("latest", "newest", "most recent"))
     is_directory_inventory = parsed_q.get("is_directory_listing") or any(
@@ -489,8 +518,27 @@ def handle_query_info_turn(
     sorted_by_newest = sorted(manifest, key=lambda x: x.get("mtime", 0.0), reverse=True)
 
     matched_items = []
-    if is_directory_inventory and not parsed_q.get("target_tokens"):
-        matched_items = sorted_by_newest
+    if expected_ym:
+        matched_items = [
+            f for f in manifest
+            if (f.get("modified_date") or "").startswith(expected_ym)
+            or (f.get("date_str") or "").startswith(expected_ym)
+            or (f.get("modified_str") or "").startswith(expected_ym)
+        ]
+        if parsed_q.get("target_tokens"):
+            kw_matched = [f for f in matched_items if f.get("is_relevant")]
+            if kw_matched:
+                matched_items = kw_matched
+        matched_items.sort(key=lambda x: (x.get("relevance_score", 0.0), x.get("mtime", 0.0)), reverse=True)
+    elif is_directory_inventory and not parsed_q.get("target_tokens"):
+        if parsed_q.get("folder_constraint"):
+            fc = parsed_q["folder_constraint"].lower()
+            matched_items = [
+                f for f in sorted_by_newest
+                if f.get("path", "").lower().startswith(fc + "/") or (fc == "download" and not f.get("path", "").lower().startswith("documents/"))
+            ]
+        else:
+            matched_items = sorted_by_newest
     elif is_oldest_req:
         matched_items = list(reversed(sorted_by_newest[-10:])) if sorted_by_newest else []
     elif is_latest_req:
@@ -502,7 +550,7 @@ def handle_query_info_turn(
     elif any(w in lower_norm for w in ("receipt", "receipts", "voucher", "vouchers", "fee", "bill", "bills", "invoice")):
         matched_items = [
             f for f in manifest
-            if any(k in f["name"].lower() or k in (f.get("snippet") or "").lower() for k in ("receipt", "voucher", "bill", "invoice", "fee", "challan"))
+            if any(re.search(rf"\b{re.escape(k)}\b", f["name"].lower()) or re.search(rf"\b{re.escape(k)}\b", (f.get("snippet") or "").lower()) for k in ("receipt", "voucher", "bill", "invoice", "fee", "challan"))
         ]
     elif any(w in lower_norm for w in ("lecture", "lectures", "notes", "assignment", "academic", "university")):
         matched_items = [
@@ -600,7 +648,9 @@ Rules:
             )
         msg = "\n".join(lines)
     else:
-        if "today" in lower_norm:
+        if expected_ym:
+            msg = f"No files were found from **{expected_ym}** in `{target_folder}/` ({len(manifest)} total files indexed)."
+        elif "today" in lower_norm:
             msg = f"No files were downloaded **today** in `{target_folder}/` ({len(manifest)} total files indexed)."
         elif "yesterday" in lower_norm:
             msg = f"No files were received **yesterday** in `{target_folder}/` ({len(manifest)} total files indexed)."
@@ -617,6 +667,7 @@ Rules:
         "version": config.APP_VERSION,
         "model_source": "offline-heuristic",
         "is_llm": False,
+        "fallback_notice": "AI unavailable right now, using on-device fallback" if not is_gemini_available() else None,
         "actions": [],
         "plan": [],
         "quick_chips": [
@@ -906,6 +957,63 @@ def handle_file_operation_turn(
     scan_data = scan_directory_manifest(target_folder=target_folder, query_prompt=raw_prompt)
     manifest = scan_data["manifest"]
     manifest_lookup = scan_data["manifest_lookup"]
+
+    # P0 #2 & #7: Gather Extension & Category Pre-Filter
+    gather_exts = None
+    if re.search(r"\b(?:gather|collect)\s+(?:all\s+)?pdfs?\b|\bonly\s+pdfs?\b|\ball\s+pdfs?\b", lower_p):
+        gather_exts = {".pdf"}
+    elif re.search(r"\b(?:gather|collect)\s+(?:all\s+)?apks?\b|\bonly\s+apks?\b|\ball\s+apks?\b", lower_p):
+        gather_exts = {".apk", ".xapk", ".apks"}
+    elif re.search(r"\b(?:gather|collect)\s+(?:all\s+)?(?:images?|photos?)\b|\bonly\s+(?:images?|photos?)\b|\ball\s+(?:images?|photos?)\b", lower_p):
+        gather_exts = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
+    elif re.search(r"\b(?:gather|collect)\s+(?:all\s+)?(?:docs?|documents?)\b|\bonly\s+docx?\b", lower_p) and not any(k in lower_p for k in ("voucher", "receipt", "bill", "archive")):
+        gather_exts = {".doc", ".docx", ".pdf", ".txt"}
+    elif re.search(r"\b(?:gather|collect)\s+(?:all\s+)?(?:zips?|archives?)\b|\bonly\s+zips?\b|\ball\s+zips?\b", lower_p):
+        gather_exts = {".zip", ".rar", ".7z", ".tar", ".gz"}
+
+    gather_cat = None
+    if re.search(r"\b(?:gather|collect|organize|find)\s+(?:my\s+|all\s+)?(?:receipts?|invoices?)\b", lower_p) and not any(k in lower_p for k in ("voucher", "fee", "challan")):
+        gather_cat = "RECEIPTS"
+    elif re.search(r"\b(?:gather|collect|organize|find)\s+(?:my\s+|all\s+)?(?:certificates?|certifications?)\b", lower_p):
+        gather_cat = "CERTIFICATES"
+
+    if gather_exts:
+        manifest = [item for item in manifest if os.path.splitext(item.get("name", ""))[1].lower() in gather_exts]
+    if gather_cat == "RECEIPTS":
+        manifest = [
+            item for item in manifest
+            if re.search(r"\b(?:receipt|invoice)\b", item.get("name", "").lower())
+            or re.search(r"\b(?:receipt|invoice)\b", (item.get("snippet") or "").lower())
+        ]
+    elif gather_cat == "CERTIFICATES":
+        manifest = [
+            item for item in manifest
+            if re.search(r"\b(?:certificate|certification)\b", item.get("name", "").lower())
+            or re.search(r"\b(?:certificate|certification)\b", (item.get("snippet") or "").lower())
+        ]
+
+    if (gather_exts or gather_cat) and not manifest:
+        constraint_str = list(gather_exts)[0] if gather_exts else (gather_cat or "matching")
+        msg = f"ℹ️ No eligible documents found in `{target_folder}/` matching {constraint_str} (\"{raw_prompt}\").\n\nZero matching files exist to organize."
+        return {
+            "type": "conversation",
+            "intent": "FILE_OPERATION",
+            "message": msg,
+            "analysis": msg,
+            "version": config.APP_VERSION,
+            "model_source": "offline-heuristic",
+            "is_llm": False,
+            "fallback_notice": "AI unavailable right now, using on-device fallback" if not is_gemini_available() else None,
+            "actions": [],
+            "plan": [],
+            "badges": ["No-Op"],
+            "quick_chips": [
+                "📋 Sort Student Vouchers",
+                "👥 Separate Peer Documents",
+                "🏷️ Clean Download Names",
+                "🗑️ Cleanup Old Screenshots"
+            ]
+        }
 
     use_deterministic_first = any(k in lower_p for k in (
         "university", "academic", "voucher", "fee", "challan", "peer", "separate",
@@ -1245,6 +1353,7 @@ Return JSON:
             "version": config.APP_VERSION,
             "model_source": "offline-heuristic",
             "is_llm": False,
+            "fallback_notice": "AI unavailable right now, using on-device fallback" if not is_gemini_available() else None,
             "actions": [],
             "plan": [],
             "badges": ["No-Op"],
@@ -1275,6 +1384,7 @@ Return JSON:
         "version": config.APP_VERSION,
         "model_source": "offline-heuristic",
         "is_llm": False,
+        "fallback_notice": "AI unavailable right now, using on-device fallback" if not is_gemini_available() else None,
         "actions": formatted_actions,
         "plan": action_plan,
         "badges": ["Action Plan", f"{len(formatted_actions)} Actions"],
