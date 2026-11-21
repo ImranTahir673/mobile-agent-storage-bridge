@@ -28,18 +28,23 @@ def cancel_execution():
     """
     Phase 7 Endpoint: Gracefully signals an in-flight batch execution to stop
     after the current step commits to SQLite WAL, leaving filesystem state consistent.
-    Accepts optional `{"batch_id": "...", "reason": "..."}`.
+    Accepts optional {"batch_id": "...", "reason": "..."}.
+    Returns:
+        - 200: cancel_requested
+        - 404: not_found (if batch_id does not exist)
+        - 409: already_completed (if batch is already finished)
     """
     data = request.get_json(silent=True) or {}
     batch_id = (data.get("batch_id") or "").strip() or None
     reason = (data.get("reason") or "User requested cancellation").strip()
-    res = request_batch_cancellation(batch_id=batch_id, reason=reason)
-    publish_event("execution_progress", {
-        "phase": "cancel_requested",
-        "batch_id": batch_id or "active",
-        "reason": reason
-    })
-    return jsonify(res), 200
+    res, status_code = request_batch_cancellation(batch_id=batch_id, reason=reason)
+    if status_code == 200:
+        publish_event("execution_progress", {
+            "phase": "cancel_requested",
+            "batch_id": batch_id or "active",
+            "reason": reason
+        })
+    return jsonify(res), status_code
 
 
 @plan_bp.route("/recent_batch", methods=["GET"])

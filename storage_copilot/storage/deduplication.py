@@ -241,11 +241,17 @@ def find_duplicate_clusters(
 
     if recursive:
         for root, dirs, files in os.walk(target_path):
-            dirs[:] = [d for d in dirs if not d.startswith(".") and d.lower() != "android" and d != ".agent_trash"]
+            dirs[:] = [d for d in dirs if not d.startswith(".") and d.lower() != "android" and d != ".agent_trash" and d != ".demo_sandbox"]
             for fname in files:
                 if fname.startswith("."):
                     continue
                 abs_p = os.path.join(root, fname)
+                try:
+                    from storage_copilot.api.utility_routes import is_fixture_signature
+                    if is_fixture_signature(abs_p):
+                        continue
+                except Exception:
+                    pass
                 try:
                     st = os.stat(abs_p)
                     size = st.st_size
@@ -494,12 +500,25 @@ def find_forgotten_files(
 
     if recursive:
         for root, dirs, files in os.walk(target_path):
-            dirs[:] = [d for d in dirs if not d.startswith(".") and d.lower() != "android" and d != ".agent_trash"]
+            dirs[:] = [d for d in dirs if not d.startswith(".") and d.lower() != "android" and d != ".agent_trash" and d != ".demo_sandbox"]
             for fname in files:
-                _inspect_entry(os.path.join(root, fname), fname)
+                abs_p = os.path.join(root, fname)
+                try:
+                    from storage_copilot.api.utility_routes import is_fixture_signature
+                    if is_fixture_signature(abs_p):
+                        continue
+                except Exception:
+                    pass
+                _inspect_entry(abs_p, fname)
     else:
         for entry in os.scandir(target_path):
             if entry.is_file():
+                try:
+                    from storage_copilot.api.utility_routes import is_fixture_signature
+                    if is_fixture_signature(entry.path):
+                        continue
+                except Exception:
+                    pass
                 _inspect_entry(entry.path, entry.name)
 
     return {

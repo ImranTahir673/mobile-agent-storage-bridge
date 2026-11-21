@@ -114,7 +114,84 @@ def init_db():
             FOREIGN KEY(action_id) REFERENCES action_ledger(id) ON DELETE CASCADE
         );
 
+        CREATE TABLE IF NOT EXISTS file_content_index (
+            path TEXT PRIMARY KEY,
+            mtime REAL NOT NULL,
+            size_bytes INTEGER NOT NULL,
+            sanitized_text TEXT,
+            is_corrupt INTEGER DEFAULT 0,
+            is_scanned INTEGER DEFAULT 0,
+            indexed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+
         CREATE INDEX IF NOT EXISTS idx_actions_batch ON action_ledger(batch_id);
         CREATE INDEX IF NOT EXISTS idx_actions_status ON action_ledger(status);
         CREATE INDEX IF NOT EXISTS idx_trash_original ON trash_index(original_rel_path);
+        CREATE INDEX IF NOT EXISTS idx_fci_path ON file_content_index(path);
         """)
+
+
+def get_indexed_file(path: str, mtime: float, size_bytes: int):
+    """Retrieves cached file content snippet and health if mtime and size_bytes match."""
+    try:
+        with get_db() as conn:
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT path, mtime, size_bytes, sanitized_text, is_corrupt, is_scanned
+                FROM file_content_index
+                WHERE path = ? AND ABS(mtime - ?) < 0.001 AND size_bytes = ?
+            """, (path, mtime, size_bytes))
+            row = cur.fetchone()
+            if row:
+                return {
+                    "path": row["path"],
+                    "mtime": row["mtime"],
+                    "size_bytes": row["size_bytes"],
+                    "sanitized_text": row["sanitized_text"],
+                    "is_corrupt": bool(row["is_corrupt"]),
+                    "is_scanned": bool(row["is_scanned"])
+                }
+    except Exception:
+        pass
+    return None
+
+
+def upsert_indexed_file(
+    path: str,
+    mtime: float,
+    size_bytes: int,
+    sanitized_text: str,
+    is_corrupt: bool = False,
+    is_scanned: bool = False
+) -> None:
+    """Inserts or replaces file content snippet and health metadata in SQLite index."""
+    try:
+        with get_db() as conn:
+            cur = conn.cursor()
+            cur.execute("""
+                INSERT OR REPLACE INTO file_content_index
+                (path, mtime, size_bytes, sanitized_text, is_corrupt, is_scanned, indexed_at)
+                VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            """, (path, mtime, size_bytes, sanitized_text, int(is_corrupt), int(is_scanned)))
+            conn.commit()
+    except Exception:
+        pass
+
+
+def get_canonical_index_stats() -> dict:
+    """Returns canonical index counts across file_content_index."""
+    try:
+        with get_db() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT COUNT(*), SUM(is_corrupt), SUM(is_scanned) FROM file_content_index")
+            row = cur.fetchone()
+            total = row[0] or 0
+            corrupt = row[1] or 0
+            scanned = row[2] or 0
+            return {
+                "total_indexed": total,
+                "corrupt_files": corrupt,
+                "scanned_or_binary_files": scanned
+            }
+    except Exception:
+        return {"total_indexed": 0, "corrupt_files": 0, "scanned_or_binary_files": 0}

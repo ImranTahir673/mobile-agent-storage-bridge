@@ -196,6 +196,8 @@ def run_production_server(host: str = "0.0.0.0", port: int = 8080, threads: int 
     - Falls back to Flask's multi-threaded server (`threaded=True`).
     """
     manifest_index_manager.warm_up_async("Download")
+    active_token = get_active_auth_token()
+    print(f"[Storage Copilot] One-Click Local Boot URL: http://127.0.0.1:{port}/?token={active_token}")
     try:
         from waitress import serve
         print(f"[Storage Copilot] Starting Waitress WSGI server on {host}:{port} (threads={threads})...")

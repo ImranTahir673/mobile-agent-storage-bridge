@@ -9,6 +9,17 @@
  * - Persistent 1-Tap Undo Banner wired to SQLite WAL (/recent_batch & /rollback_batch)
  */
 
+// Check for one-click boot token in URL query parameter (?token=...)
+const urlParams = new URLSearchParams(window.location.search);
+const bootToken = urlParams.get("token");
+if (bootToken) {
+  localStorage.setItem("copilot_bearer_token", bootToken);
+  urlParams.delete("token");
+  const cleanSearch = urlParams.toString();
+  const cleanUrl = window.location.pathname + (cleanSearch ? `?${cleanSearch}` : "") + window.location.hash;
+  window.history.replaceState({}, document.title, cleanUrl);
+}
+
 const state = {
   conversationHistory: [],
   activeBatchId: null,

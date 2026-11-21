@@ -4,9 +4,12 @@ from typing import Dict, Any, List, Optional
 
 from storage_copilot.execution.plan_builder import normalize_user_prompt
 from storage_copilot.intelligence.document_classifier import parse_query_intent
+import os
 from storage_copilot.intelligence.gemini_client import (
     call_gemini_micro_classifier,
-    is_gemini_available
+    is_gemini_available,
+    get_last_fallback_info,
+    set_last_fallback_reason
 )
 from storage_copilot.intelligence.session_context import session_context_store
 from storage_copilot.advice.advisor import is_format_sorting_query
@@ -17,11 +20,6 @@ class UserIntent(str, Enum):
     QUERY_INFO = "QUERY_INFO"
     FILE_OPERATION = "FILE_OPERATION"
 
-
-TRIVIAL_REFLEX_EXACT = {
-    "hi", "hii", "hiii", "hello", "hey", "heyy", "greetings",
-    "thanks", "thank you", "cancel", "no", "nope"
-}
 
 AFFIRMATIVE_WORDS = {
     "yes", "yeah", "yep", "sure", "ok", "okay", "go ahead",
@@ -263,6 +261,35 @@ def classify_intent(
     target_folder: str = "Download"
 ) -> Dict[str, Any]:
     """
+    Phase 9 AI-First Intent Orchestrator with consistent fallback metadata.
+    """
+    res = _classify_intent_internal(
+        prompt=prompt,
+        conversation_history=conversation_history,
+        recent_context=recent_context,
+        available_files_count=available_files_count,
+        target_folder=target_folder
+    )
+    if res.get("is_llm"):
+        res["degraded_fallback"] = False
+        res["fallback_reason"] = None
+        res["fallback_notice"] = None
+    else:
+        fb_diag = get_last_fallback_info()
+        res["degraded_fallback"] = True
+        res["fallback_reason"] = fb_diag.get("fallback_reason", "no_api_key")
+        res["fallback_notice"] = fb_diag.get("fallback_notice", "AI unavailable right now, using on-device fallback")
+    return res
+
+
+def _classify_intent_internal(
+    prompt: str,
+    conversation_history: Optional[List[Dict[str, Any]]] = None,
+    recent_context: Optional[str] = None,
+    available_files_count: int = 0,
+    target_folder: str = "Download"
+) -> Dict[str, Any]:
+    """
     Phase 9 AI-First Intent Orchestrator with Conversational Continuity & Offline Safety Net:
     1. Normalizes mobile typos ('cleen', 'teh', 'fils', 'downlods').
     2. Loads multi-turn session state from `session_context_store`.
@@ -281,31 +308,25 @@ def classify_intent(
 
     session_ctx = session_context_store.get_context(target_folder)
 
-    # 1. Trivial 1-word Greeting / Cancel Reflex (0ms)
-    if not raw_prompt or clean_p_exact in TRIVIAL_REFLEX_EXACT:
-        return {
-            "intent": UserIntent.CONVERSATION,
-            "confidence": 1.0,
-            "raw_prompt": raw_prompt,
-            "normalized_prompt": normalized_prompt,
-            "cleaned_query": normalized_prompt,
-            "resolved_goal": normalized_prompt,
-            "sub_intent": "greeting_or_capability",
-            "include_near": False,
-            "fast_path_matched": True,
-            "is_llm": False,
-            "model_source": "offline-heuristic",
-            "extracted_entity": "",
-            "is_affirmative": False
-        }
-
-    # 2. AI-First Orchestration Mode (Active whenever Gemini API Key is configured & healthy)
+    # 1. AI-First Orchestration Mode (Active whenever Gemini API Key is configured & healthy)
+    # Zero pre-AI greeting or regex shortcuts: every prompt hits Gemini micro-classifier first!
     if is_gemini_available():
-        llm_res = call_gemini_micro_classifier(
-            normalized_prompt,
-            recent_context=last_asst[:350] if last_asst else "",
-            session_state=session_ctx
-        )
+        llm_res = None
+        try:
+            llm_res = call_gemini_micro_classifier(
+                normalized_prompt,
+                recent_context=last_asst[:350] if last_asst else "",
+                session_state=session_ctx
+            )
+        except Exception as e:
+            err_str = str(e).lower()
+            if "429" in err_str or "quota" in err_str or "resource_exhausted" in err_str:
+                set_last_fallback_reason("rate_limited")
+            elif "connection" in err_str or "unreachable" in err_str or "network" in err_str:
+                set_last_fallback_reason("no_internet")
+            else:
+                set_last_fallback_reason("rate_limited")
+            llm_res = None
         if llm_res and isinstance(llm_res, dict) and llm_res.get("intent"):
             raw_intent_str = str(llm_res.get("intent", "")).upper().strip()
             if raw_intent_str in ("CONVERSATION", "QUERY_INFO", "FILE_OPERATION"):
@@ -337,14 +358,39 @@ def classify_intent(
                     "include_near": inc_near,
                     "fast_path_matched": False,
                     "is_llm": True,
+                    "degraded_fallback": False,
+                    "fallback_reason": None,
+                    "fallback_notice": None,
                     "model_source": model_used,
                     "extracted_entity": target_ent,
                     "is_affirmative": False
                 }
 
     # =========================================================================
-    # 3. Deterministic Continuity & Offline Safety Net (When API key is absent or all models 429)
+    # 2. Deterministic Continuity & Offline Safety Net (When API key is absent or all models 429)
     # =========================================================================
+    fb_diag = get_last_fallback_info()
+
+    if not raw_prompt:
+        return {
+            "intent": UserIntent.CONVERSATION,
+            "confidence": 1.0,
+            "raw_prompt": raw_prompt,
+            "normalized_prompt": normalized_prompt,
+            "cleaned_query": normalized_prompt,
+            "resolved_goal": normalized_prompt,
+            "sub_intent": "greeting_or_capability",
+            "include_near": False,
+            "fast_path_matched": True,
+            "is_llm": False,
+            "degraded_fallback": True,
+            "fallback_reason": fb_diag["fallback_reason"],
+            "fallback_notice": fb_diag["fallback_notice"],
+            "model_source": "offline-heuristic",
+            "extracted_entity": "",
+            "is_affirmative": False
+        }
+
     continuity_match = _resolve_continuity_sub_intent(lower_norm, lower_asst, session_ctx)
     if continuity_match is not None:
         return {
@@ -358,6 +404,9 @@ def classify_intent(
             "include_near": continuity_match.get("include_near", False),
             "fast_path_matched": True,
             "is_llm": False,
+            "degraded_fallback": True,
+            "fallback_reason": fb_diag["fallback_reason"],
+            "fallback_notice": fb_diag["fallback_notice"],
             "model_source": "continuity-engine",
             "extracted_entity": continuity_match["resolved_goal"],
             "is_affirmative": True

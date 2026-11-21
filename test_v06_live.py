@@ -62,6 +62,16 @@ def test_suite():
     assert_test("DOC-20250413-WA0018..pdf" in s_resp.get("files", []), "Includes WhatsApp AI assignment fixture")
     assert_test("DOC-20250413-WA0019..pdf" in s_resp.get("files", []), "Includes WhatsApp Utility bill fixture")
 
+    active_test_files = {
+        "DOC-20250413-WA0017..pdf": "Knowledge Representation and Reasoning Lecture 4: First-Order Predicate Logic. BSAI Semester 6 University Course. (Active)",
+        "DOC-20250413-WA0018..pdf": "Artificial Intelligence Course Assignment 2: Heuristic Search and A* Exploration by Imran Tahir (BSAI-182). (Active)",
+        "DOC-20250413-WA0019..pdf": "Electricity Utility Bill Invoice for March 2025. Consumer ID: 948201. Amount Due: PKR 8,500. Status: Pending. (Active)",
+        "WhatsApp_Doc_Ahmed_Receipt.pdf": "Payment receipt for Ahmed, Department Library Fee. (Active)"
+    }
+    for fname, content in active_test_files.items():
+        with open(os.path.join(server.BASE_DIR, "Download", fname), "w", encoding="utf-8") as f:
+            f.write(content)
+
     # 3. Three-Tier Intent Classifier - TIER 1: CONVERSATION
     print("\n--- Test 3: Tier 1 CONVERSATION Intent (No Canned Template) ---")
     # 3a. Greeting

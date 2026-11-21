@@ -35,6 +35,53 @@ DEEP_TIER_MODELS = [
 # Per-model cooldown circuit breaker: model_name -> unix_timestamp_unblocked
 MODEL_COOLDOWN_UNTIL: Dict[str, float] = {}
 
+# Fine-grained failure diagnostics for honest fallback notices
+_last_fallback_info: Dict[str, Any] = {
+    "reason": "no_api_key",
+    "notice": "AI unavailable right now, using on-device fallback"
+}
+
+
+def set_last_fallback_reason(reason: str, notice: Optional[str] = None) -> None:
+    """Sets the fine-grained fallback reason and human-readable notice."""
+    global _last_fallback_info
+    notices = {
+        "no_api_key": "AI unavailable right now, using on-device fallback",
+        "no_internet": "AI unavailable right now (no internet connection), using on-device fallback",
+        "daily_quota_exceeded": "AI unavailable right now (daily Gemini quota reached), using on-device fallback",
+        "rate_limited": "AI unavailable right now (temporary rate limit), using on-device fallback",
+    }
+    _last_fallback_info = {
+        "reason": reason,
+        "notice": notice or notices.get(reason, f"AI unavailable right now ({reason}), using on-device fallback")
+    }
+
+
+def get_last_fallback_info() -> Dict[str, Any]:
+    """Returns fine-grained fallback diagnostics: degraded_fallback, fallback_reason, and fallback_notice."""
+    global _last_fallback_info
+    api_key = (os.getenv("GEMINI_API_KEY") or "").strip()
+    if not api_key or len(api_key) < 5:
+        return {
+            "degraded_fallback": True,
+            "fallback_reason": "no_api_key",
+            "fallback_notice": "AI unavailable right now, using on-device fallback"
+        }
+    return {
+        "degraded_fallback": True,
+        "fallback_reason": _last_fallback_info.get("reason", "rate_limited"),
+        "fallback_notice": _last_fallback_info.get("notice", "AI unavailable right now, using on-device fallback")
+    }
+
+
+def mark_ai_success() -> None:
+    """Resets fallback reason on successful AI response."""
+    global _last_fallback_info
+    _last_fallback_info = {
+        "reason": "none",
+        "notice": ""
+    }
+
 
 def reset_model_cooldowns() -> None:
     """Clears all per-model cooldowns and resets global quota lock."""
@@ -72,8 +119,17 @@ def is_gemini_available() -> bool:
     """Returns True if GEMINI_API_KEY is configured and at least one model is healthy."""
     api_key = (os.getenv("GEMINI_API_KEY") or "").strip()
     if not api_key or len(api_key) < 5:
+        set_last_fallback_reason("no_api_key")
         return False
-    return len(get_healthy_models("fast")) > 0
+    healthy = get_healthy_models("fast")
+    if not healthy:
+        now = time.time()
+        if any(MODEL_COOLDOWN_UNTIL.get(m, 0.0) - now > 180.0 for m in GEMINI_MODELS):
+            set_last_fallback_reason("daily_quota_exceeded")
+        else:
+            set_last_fallback_reason("rate_limited")
+        return False
+    return True
 
 
 class InferenceProvider:
@@ -99,10 +155,12 @@ class DirectGeminiProvider(InferenceProvider):
     ) -> dict:
         api_key = (os.getenv("GEMINI_API_KEY") or "").strip()
         if not api_key:
+            set_last_fallback_reason("no_api_key")
             return {}
 
         candidate_models = get_healthy_models(task_tier=task_tier)
         if not candidate_models:
+            set_last_fallback_reason("rate_limited")
             return {}
 
         payload = {
@@ -113,6 +171,7 @@ class DirectGeminiProvider(InferenceProvider):
 
         from storage_copilot.execution.plan_builder import extract_json_plan
 
+        saw_network_error = False
         for model in candidate_models:
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
             try:
@@ -129,6 +188,7 @@ class DirectGeminiProvider(InferenceProvider):
                                 if parsed and isinstance(parsed, dict):
                                     parsed["_model_used"] = model
                                     parsed["_is_llm"] = True
+                                    mark_ai_success()
                                     return parsed
                             except Exception:
                                 continue
@@ -137,17 +197,29 @@ class DirectGeminiProvider(InferenceProvider):
                     if "GenerateRequestsPerDay" in resp_text or "quotaId" in resp_text or "RESOURCE_EXHAUSTED" in resp_text:
                         print(f"[Storage Copilot Gemini] Model '{model}' hit quota (429). Cascading to next healthy model...")
                         mark_model_cooldown(model, seconds=300.0)
+                        set_last_fallback_reason("daily_quota_exceeded")
                         continue
+                    set_last_fallback_reason("rate_limited")
                     mark_model_cooldown(model, seconds=15.0)
                     continue
                 elif resp.status_code in (404, 503):
                     mark_model_cooldown(model, seconds=60.0)
+                    set_last_fallback_reason("rate_limited")
                     continue
                 else:
+                    set_last_fallback_reason("rate_limited")
                     continue
+            except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
+                saw_network_error = True
+                set_last_fallback_reason("no_internet")
+                continue
             except Exception:
+                saw_network_error = True
+                set_last_fallback_reason("no_internet")
                 continue
 
+        if saw_network_error:
+            set_last_fallback_reason("no_internet")
         return {}
 
     def generate_text_with_meta(
@@ -159,10 +231,12 @@ class DirectGeminiProvider(InferenceProvider):
     ) -> Tuple[str, Optional[str]]:
         api_key = (os.getenv("GEMINI_API_KEY") or "").strip()
         if not api_key:
+            set_last_fallback_reason("no_api_key")
             return "", None
 
         candidate_models = get_healthy_models(task_tier=task_tier)
         if not candidate_models:
+            set_last_fallback_reason("rate_limited")
             return "", None
 
         payload = {
@@ -171,6 +245,7 @@ class DirectGeminiProvider(InferenceProvider):
             "generationConfig": {"temperature": 0.2}
         }
 
+        saw_network_error = False
         for model in candidate_models:
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
             try:
@@ -183,23 +258,36 @@ class DirectGeminiProvider(InferenceProvider):
                         if parts:
                             text = (parts[0].get("text") or "").strip()
                             if text:
+                                mark_ai_success()
                                 return text, model
                 elif resp.status_code == 429:
                     resp_text = resp.text or ""
                     if "GenerateRequestsPerDay" in resp_text or "quotaId" in resp_text or "RESOURCE_EXHAUSTED" in resp_text:
                         print(f"[Storage Copilot Gemini Text] Model '{model}' hit quota (429). Cascading to next model...")
                         mark_model_cooldown(model, seconds=300.0)
+                        set_last_fallback_reason("daily_quota_exceeded")
                         continue
+                    set_last_fallback_reason("rate_limited")
                     mark_model_cooldown(model, seconds=15.0)
                     continue
                 elif resp.status_code in (404, 503):
                     mark_model_cooldown(model, seconds=60.0)
+                    set_last_fallback_reason("rate_limited")
                     continue
                 else:
+                    set_last_fallback_reason("rate_limited")
                     continue
+            except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
+                saw_network_error = True
+                set_last_fallback_reason("no_internet")
+                continue
             except Exception:
+                saw_network_error = True
+                set_last_fallback_reason("no_internet")
                 continue
 
+        if saw_network_error:
+            set_last_fallback_reason("no_internet")
         return "", None
 
     def classify_micro(
@@ -210,10 +298,12 @@ class DirectGeminiProvider(InferenceProvider):
     ) -> dict:
         api_key = (os.getenv("GEMINI_API_KEY") or "").strip()
         if not api_key:
+            set_last_fallback_reason("no_api_key")
             return {}
 
         candidate_models = get_healthy_models(task_tier="fast")
         if not candidate_models:
+            set_last_fallback_reason("rate_limited")
             return {}
 
         session_info = ""
@@ -255,6 +345,7 @@ class DirectGeminiProvider(InferenceProvider):
 
         from storage_copilot.execution.plan_builder import extract_json_plan
 
+        saw_network_error = False
         for model in candidate_models:
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
             try:
@@ -269,20 +360,35 @@ class DirectGeminiProvider(InferenceProvider):
                             if parsed and isinstance(parsed, dict) and "intent" in parsed:
                                 parsed["_model_used"] = model
                                 parsed["_is_llm"] = True
+                                mark_ai_success()
                                 return parsed
                 elif resp.status_code == 429:
                     resp_text = resp.text or ""
                     if "GenerateRequestsPerDay" in resp_text or "quotaId" in resp_text or "RESOURCE_EXHAUSTED" in resp_text:
                         mark_model_cooldown(model, seconds=300.0)
+                        set_last_fallback_reason("daily_quota_exceeded")
                         continue
+                    set_last_fallback_reason("rate_limited")
                     mark_model_cooldown(model, seconds=15.0)
                     continue
                 elif resp.status_code in (404, 503):
                     mark_model_cooldown(model, seconds=60.0)
+                    set_last_fallback_reason("rate_limited")
                     continue
+                else:
+                    set_last_fallback_reason("rate_limited")
+                    continue
+            except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
+                saw_network_error = True
+                set_last_fallback_reason("no_internet")
+                continue
             except Exception:
+                saw_network_error = True
+                set_last_fallback_reason("no_internet")
                 continue
 
+        if saw_network_error:
+            set_last_fallback_reason("no_internet")
         return {}
 
 

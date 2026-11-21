@@ -38,6 +38,7 @@ PROTECTED_MUTATION_PATHS = {
     "/rollback_batch",
     "/rollback_last",
     "/seed_fixtures",
+    "/clear_demo_sandbox",
     "/user_profile",
 }
 
@@ -54,6 +55,7 @@ PROTECTED_READ_PATHS = {
     "/api_status",
     "/storage_overview",
     "/stream_ticket",
+    "/scan_seed_fixtures",
 }
 
 # All endpoints protected under Dual-Mode Zero-Trust

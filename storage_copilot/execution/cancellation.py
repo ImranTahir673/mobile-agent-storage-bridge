@@ -47,33 +47,69 @@ class CancellationManager:
         self,
         batch_id: Optional[str] = None,
         reason: str = "User requested cancellation"
-    ) -> Dict[str, Any]:
+    ) -> Tuple[Dict[str, Any], int]:
         """
-        Flags a specific `batch_id` (or all currently active batches if `batch_id` is omitted)
-        for graceful cancellation. Can also pre-register cancellation for a known `batch_id`
-        before its execution loop begins.
+        Flags a specific batch_id (or active batches if omitted) for graceful cancellation.
+        Returns:
+            - (data, 200) with status="cancel_requested" when flagged
+            - (data, 404) with status="not_found" when batch_id is unknown
+            - (data, 409) with status="already_completed" when batch has already finished
         """
-        cancelled_ids: List[str] = []
+        from storage_copilot.db.ledger import get_db
+
         with self._lock:
             if batch_id:
                 token = self._tokens.get(batch_id)
-                if token is None:
-                    token = CancellationToken(batch_id)
-                    self._tokens[batch_id] = token
-                token.cancel(reason=reason)
-                cancelled_ids.append(batch_id)
+                if token is not None and not token.is_cancelled:
+                    token.cancel(reason=reason)
+                    return {
+                        "status": "cancel_requested",
+                        "cancelled_batches": [batch_id],
+                        "reason": reason
+                    }, 200
+
+                try:
+                    with get_db() as conn:
+                        cur = conn.cursor()
+                        cur.execute("SELECT status FROM batches WHERE batch_id = ?", (batch_id,))
+                        row = cur.fetchone()
+                        if not row:
+                            return {"status": "not_found", "error": f"Batch '{batch_id}' not found"}, 404
+                        b_status = row["status"]
+                        if b_status in ("COMPLETED", "CANCELLED", "ROLLED_BACK", "FAILED"):
+                            return {
+                                "status": "already_completed",
+                                "error": f"Batch '{batch_id}' has already finished with status '{b_status}'"
+                            }, 409
+                        elif b_status in ("PENDING", "RUNNING"):
+                            token = CancellationToken(batch_id)
+                            self._tokens[batch_id] = token
+                            token.cancel(reason=reason)
+                            return {
+                                "status": "cancel_requested",
+                                "cancelled_batches": [batch_id],
+                                "reason": reason
+                            }, 200
+                except Exception:
+                    return {"status": "not_found", "error": f"Batch '{batch_id}' not found"}, 404
+
+                return {"status": "not_found", "error": f"Batch '{batch_id}' not found"}, 404
+
             else:
+                cancelled_ids: List[str] = []
                 for bid in list(self._active_batch_ids):
                     tok = self._tokens.get(bid)
-                    if tok:
+                    if tok and not tok.is_cancelled:
                         tok.cancel(reason=reason)
                         cancelled_ids.append(bid)
+                if not cancelled_ids:
+                    return {"status": "not_found", "error": "No active batches currently executing"}, 404
 
-        return {
-            "status": "cancel_requested",
-            "cancelled_batches": cancelled_ids,
-            "reason": reason
-        }
+                return {
+                    "status": "cancel_requested",
+                    "cancelled_batches": cancelled_ids,
+                    "reason": reason
+                }, 200
 
     def is_cancelled(self, batch_id: str) -> bool:
         with self._lock:
@@ -99,5 +135,5 @@ cancellation_manager = CancellationManager()
 def request_batch_cancellation(
     batch_id: Optional[str] = None,
     reason: str = "User requested cancellation"
-) -> Dict[str, Any]:
+) -> Tuple[Dict[str, Any], int]:
     return cancellation_manager.request_cancel(batch_id=batch_id, reason=reason)

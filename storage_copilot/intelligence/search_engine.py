@@ -71,7 +71,11 @@ def score_file_relevance(
 
     # 2. Token Overlap in Filename (+25)
     if target_tokens:
-        matched_fn_tokens = [t for t in target_tokens if t in fn or t in fn_normalized]
+        matched_fn_tokens = []
+        for t in target_tokens:
+            t_stem = t[:-1] if (t.endswith("s") and len(t) > 3) else t
+            if t in fn or t in fn_normalized or t_stem in fn or t_stem in fn_normalized:
+                matched_fn_tokens.append(t)
         if matched_fn_tokens:
             coverage = len(matched_fn_tokens) / len(target_tokens)
             if coverage == 1.0:
@@ -91,20 +95,52 @@ def score_file_relevance(
             score += 20.0
             reasons.append(f"Content mentions '{cleaned_target}'")
         elif target_tokens:
-            matched_snip_tokens = [t for t in target_tokens if t in snip]
+            matched_snip_tokens = []
+            for t in target_tokens:
+                t_stem = t[:-1] if (t.endswith("s") and len(t) > 3) else t
+                if t in snip or t_stem in snip:
+                    matched_snip_tokens.append(t)
             if matched_snip_tokens:
                 snip_coverage = len(matched_snip_tokens) / len(target_tokens)
                 if snip_coverage >= 0.5:
                     score += round(20.0 * snip_coverage, 1)
                     reasons.append(f"Content keywords: {', '.join(matched_snip_tokens)}")
 
-    # 4. Document & Format Category Alignment (+10) & Cautionary Penalties (-50)
+    # 4. Document & Format Category Alignment (+10) & Cautionary Penalties (-50 to -80)
     classification = classify_document(file_info.get("filename") or file_info.get("name") or "", snip)
     doc_cat = classification.get("category", "")
     fn_ext = os.path.splitext(fn)[1].lower()
+    file_path_l = (file_info.get("path") or "").lower()
+
+    # App signature / META-INF penalty (-80.0) so real certificates outrank APK signatures
+    if (
+        fn_ext in (".rsa", ".sf", ".dsa", ".mf")
+        or "meta-inf" in file_path_l
+        or "meta-inf" in fn
+        or fn in ("cert.rsa", "cert.sf", "manifest.mf")
+    ):
+        score -= 80.0
+        reasons.append("META-INF / app signature penalty (-80)")
+
+    # Peer file penalty (-25.0): Demote classmate documents if query does not explicitly name that peer
+    if "documents/peers/" in file_path_l or "/peers/" in file_path_l:
+        match_peer = re.search(r"/peers/([^/]+)", file_path_l)
+        peer_name = match_peer.group(1).lower() if match_peer else ""
+        if peer_name and peer_name not in raw_query:
+            score -= 25.0
+            reasons.append(f"Unrequested peer directory penalty (-25 for {peer_name})")
+
+    # Demote scanned/binary or unreadable text when user performs a content/text search
+    is_scanned_binary = bool(
+        file_info.get("is_scanned_or_binary")
+        or "scanned document — text not extractable" in snip
+    )
+    if is_scanned_binary and target_tokens:
+        score -= 40.0
+        reasons.append("Unextractable binary/scanned document penalty (-40)")
 
     # P0 #6 Penalty: Query asks for document (voucher, bill, receipt, lecture, certificate) but file is media/binary
-    if re.search(r"\b(?:voucher|bill|receipt|lecture|certificate|certification|invoice|challan)\b", raw_query, re.I):
+    if re.search(r"\b(?:voucher|vouchers|bill|bills|receipt|receipts|lecture|lectures|certificate|certificates|certification|invoice|invoices|challan|challans)\b", raw_query, re.I):
         if fn_ext in BINARY_SYSTEM_MEDIA_EXTS:
             score -= 50.0
             reasons.append("Binary/media penalty for document query")
@@ -130,9 +166,9 @@ def score_file_relevance(
             score -= 50.0  # Strict penalty: never treat an Identity Pass as an academic lecture
 
     # Certificate Query Boost: .pdf/.docx containing 'certificate' or 'certification'
-    if re.search(r"\b(?:certificate|certification|degree|diploma)\b", raw_query, re.I):
+    if re.search(r"\b(?:certificate|certificates|certification|certifications|degree|degrees|diploma|diplomas)\b", raw_query, re.I):
         if fn_ext in (".pdf", ".docx", ".doc"):
-            if re.search(r"\b(?:certificate|certification|degree|diploma)\b", fn_normalized, re.I) or re.search(r"\b(?:certificate|certification)\b", snip, re.I):
+            if re.search(r"\b(?:certificate|certificates|certification|certifications|degree|degrees|diploma|diplomas)\b", fn_normalized, re.I) or re.search(r"\b(?:certificate|certificates|certification)\b", snip, re.I):
                 score += 35.0
                 reasons.append("Certificate document boost")
 

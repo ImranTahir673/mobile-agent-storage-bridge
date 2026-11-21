@@ -95,13 +95,49 @@ def should_hydrate_file_upfront(
 
 
 def get_cached_sanitized_snippet(file_path: str, mtime: float, max_chars: int = 1000) -> str:
-    """Returns PII-sanitized file snippet using O(1) RAM cache when mtime is unchanged."""
+    """Returns PII-sanitized file snippet using O(1) RAM cache + persistent SQLite index."""
     cache_key = (file_path, mtime, max_chars)
     if cache_key in _SNIPPET_CACHE:
         return _SNIPPET_CACHE[cache_key]
 
+    size_bytes = 0
+    try:
+        size_bytes = os.path.getsize(file_path) if os.path.exists(file_path) else 0
+    except Exception:
+        pass
+
+    # Consult persistent SQLite file_content_index table
+    try:
+        from storage_copilot.db.ledger import get_indexed_file, upsert_indexed_file
+        indexed_row = get_indexed_file(file_path, mtime, size_bytes)
+        if indexed_row and indexed_row.get("sanitized_text") is not None:
+            text = indexed_row["sanitized_text"][:max_chars]
+            if len(_SNIPPET_CACHE) > 2500:
+                _SNIPPET_CACHE.clear()
+            _SNIPPET_CACHE[cache_key] = text
+            return text
+    except Exception:
+        pass
+
+    from storage_copilot.storage.content_extractor import inspect_file_health, is_human_readable_text
+    health = inspect_file_health(file_path)
     raw_text = extract_file_snippet(file_path, max_chars)
-    sanitized = sanitize_pii(raw_text)
+    _, clean_text, is_scanned_binary = is_human_readable_text(raw_text)
+    sanitized = sanitize_pii(clean_text)
+
+    try:
+        from storage_copilot.db.ledger import upsert_indexed_file
+        upsert_indexed_file(
+            file_path,
+            mtime,
+            size_bytes,
+            sanitized,
+            is_corrupt=health.get("is_corrupt", False),
+            is_scanned=is_scanned_binary
+        )
+    except Exception:
+        pass
+
     if len(_SNIPPET_CACHE) > 2500:
         _SNIPPET_CACHE.clear()
     _SNIPPET_CACHE[cache_key] = sanitized
@@ -299,12 +335,18 @@ def scan_directory_manifest(
                     dir_list = []
                     file_list = []
                     for e in it:
-                        if e.name.startswith("."):
+                        if e.name.startswith(".") or e.name.lower() == "android" or e.name == ".agent_trash" or e.name == ".demo_sandbox":
                             continue
                         try:
                             if e.is_dir(follow_symlinks=False):
                                 dir_list.append(e)
                             elif e.is_file(follow_symlinks=False):
+                                try:
+                                    from storage_copilot.api.utility_routes import is_fixture_signature
+                                    if is_fixture_signature(e.path):
+                                        continue
+                                except Exception:
+                                    pass
                                 file_list.append(e)
                         except Exception:
                             continue

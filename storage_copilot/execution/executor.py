@@ -70,6 +70,17 @@ def execute_action_plan(
     if not actions:
         return {"error": "Action plan contains no actions"}, 400
 
+    allow_large_batch = bool(plan.get("allow_large_batch", False))
+    max_batch_limit = getattr(config, "DEFAULT_MAX_ACTIONS_PER_BATCH", 20)
+    if len(actions) > max_batch_limit and not allow_large_batch:
+        return {
+            "error": f"Blast radius exceeded: batch size {len(actions)} exceeds limit of {max_batch_limit} actions (set allow_large_batch=True to override)"
+        }, 400
+
+    MAX_CUMULATIVE_BYTES = 500 * 1024 * 1024  # 500 MB
+    if int(plan.get("total_bytes") or 0) > MAX_CUMULATIVE_BYTES:
+        return {"error": f"Blast radius exceeded: cumulative batch size exceeds 500 MB limit ({plan.get('total_bytes')} bytes)"}, 400
+
     if len(actions) > MAX_BATCH_ACTIONS:
         return {"error": f"Execution limit exceeded: batch size {len(actions)} > {MAX_BATCH_ACTIONS} maximum"}, 400
 
@@ -214,12 +225,15 @@ def execute_action_plan(
 
     # P1 #12: Enforce 500 MB Cumulative Size Cap across batch
     MAX_CUMULATIVE_BYTES = 500 * 1024 * 1024  # 500 MB
-    cumulative_bytes = sum(s.get("size", 0) for s in prepared_steps)
+    cumulative_bytes = max(
+        sum(s.get("size", 0) for s in prepared_steps),
+        int(plan.get("total_bytes") or 0)
+    )
     if cumulative_bytes > MAX_CUMULATIVE_BYTES:
         return {"error": f"Blast radius exceeded: cumulative batch size exceeds 500 MB limit ({cumulative_bytes} bytes)"}, 400
 
     if dry_run:
-        return {
+        res_data = {
             "dry_run": True,
             "plan_id": plan_id,
             "actions_validated": len(prepared_steps),
@@ -232,7 +246,10 @@ def execute_action_plan(
                 }
                 for s in prepared_steps
             ]
-        }, 200
+        }
+        if partial_recovery:
+            res_data["execution_mode"] = "PARTIAL_RECOVERY_OPT_IN"
+        return res_data, 200
 
     total_steps = len(prepared_steps)
     chunks = [prepared_steps[i:i + chunk_size] for i in range(0, total_steps, chunk_size)]
@@ -510,7 +527,7 @@ def execute_action_plan(
             except Exception:
                 pass
 
-        return {
+        success_payload = {
             "status": "success",
             "batch_id": plan_id,
             "executed_actions": len(executed_actions),
@@ -523,7 +540,10 @@ def execute_action_plan(
             "gradual_execution": True,
             "execution_summary": execution_summary,
             "batch_info": batch_info
-        }, 200
+        }
+        if partial_recovery:
+            success_payload["execution_mode"] = "PARTIAL_RECOVERY_OPT_IN"
+        return success_payload, 200
 
     except Exception as e:
         conn.rollback()

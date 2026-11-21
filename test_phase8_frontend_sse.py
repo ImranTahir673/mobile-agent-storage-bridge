@@ -46,7 +46,14 @@ class TestPhase8FrontendAndSSE(unittest.TestCase):
 
     def setUp(self):
         event_bus.clear_history()
-        self.client.post("/seed_fixtures", json={"duplicates": True})
+        vouchers = {
+            "BSAI-182_fee_voucher_fall.pdf": "Student Fee Voucher: Name: Imran Tahir, Roll No: BSAI-182, Amount: PKR 45,000, Status: Paid. (Active)",
+            "fawad fee.pdf": "Student Fee Slip: Name: Fawad, Roll No: BSAI-190, Amount: PKR 45,000, Status: Paid. (Active)",
+            "DOC-20250413-WA0017..pdf": "Knowledge Representation and Reasoning Lecture 4: First-Order Predicate Logic. BSAI Semester 6 University Course. (Active)"
+        }
+        for fname, content in vouchers.items():
+            with open(os.path.join(self.dl_dir, fname), "w", encoding="utf-8") as f:
+                f.write(content)
 
     def test_01_web_ui_static_assets_and_phase8_controls(self):
         """Verify GET /?ui=1, /app.js, and /styles.css serve the upgraded Phase 8 Web UI."""

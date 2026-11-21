@@ -25,7 +25,8 @@ class TestPhase2ThreeTierIntent(unittest.TestCase):
         os.makedirs(os.path.join(server.BASE_DIR, "Documents"), exist_ok=True)
         server.init_db()
         cls.client = server.app.test_client()
-        cls.client.post("/seed_fixtures")
+        with open(os.path.join(server.BASE_DIR, "Download", "Fee_Voucher_Semester_2026.pdf"), "w", encoding="utf-8") as f:
+            f.write("Student Tuition Fee Voucher for BSAI Semester 2026. Amount Due: PKR 50,000. Roll BSAI-200.")
 
     def test_01_conversation_fast_path_prompts(self):
         prompts = [

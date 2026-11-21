@@ -52,11 +52,12 @@ def classify_document(
             "confidence": 0.90
         }
 
-    # 3. Utility Bills & Commercial Invoices
+    # 3. Utility Bills & Commercial Invoices & Tax Documents
     is_utility = any(k in combined for k in (
         "utility bill", "electricity bill", "electric bill", "gas bill", "water bill",
-        "consumer id", "amount due", "invoice for march", "invoice for april", "bill invoice"
-    )) or ("bill" in fn_lower and "voucher" not in fn_lower)
+        "consumer id", "amount due", "invoice for march", "invoice for april", "bill invoice",
+        "tax return", "income tax", "fbr", "tax challan", "tax invoice"
+    )) or ("bill" in fn_lower and "voucher" not in fn_lower) or "fbr" in fn_lower
 
     if is_utility:
         bill_title = namer.derive_financial_bill_title(filename, snippet, concise_invoice=False)
@@ -175,7 +176,8 @@ SEARCH_STOPWORDS = {
     "get", "find", "search", "locate", "check", "view", "book", "books", "document", "documents",
     "paper", "copy", "copies", "download", "downloads", "inside", "here", "there", "of",
     "is", "are", "have", "has", "do", "does", "did", "also", "you", "language", "guide",
-    "guides", "looking", "need", "folder", "folders", "directory", "directories", "fikes", "vest"
+    "guides", "looking", "need", "folder", "folders", "directory", "directories", "fikes", "vest",
+    "code", "script"
 }
 
 
@@ -222,7 +224,7 @@ def parse_query_intent(query: str, default_folder: str = "Download") -> dict:
     if is_directory_listing:
         target_tokens = []
 
-    cleaned_target = " ".join([w for w in words if w and w not in {"the", "a", "an", "for", "in", "to", "can", "you", "find", "me", "book", "file", "document"}])
+    cleaned_target = " ".join([w for w in words if w and w not in {"the", "a", "an", "for", "in", "to", "can", "you", "find", "me", "book", "file", "document", "code", "script"}])
 
     return {
         "raw_query": query,

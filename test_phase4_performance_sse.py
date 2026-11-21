@@ -49,7 +49,8 @@ class TestPhase4PerformanceSSE(unittest.TestCase):
         os.makedirs(os.path.join(server.BASE_DIR, "Documents"), exist_ok=True)
         server.init_db()
         cls.client = server.app.test_client()
-        cls.client.post("/seed_fixtures")
+        with open(os.path.join(server.BASE_DIR, "Download", "fee_voucher_active.pdf"), "w", encoding="utf-8") as f:
+            f.write("Student Tuition Fee Voucher for BSAI Semester 2026. Amount: PKR 45,000. Roll BSAI-182.")
 
     def setUp(self):
         server.ENFORCE_LOCAL_AUTH = False

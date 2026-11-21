@@ -64,7 +64,7 @@ Eliminated vulnerabilities in the mobile Flask server and replaced ad-hoc tool e
 
 - [x] **1.2 Policy Gatekeeper Integration**
   - Implemented storage blacklist enforcement (`/Android`, `.agent_trash`, system roots, root dot-files).
-  - Implemented blast radius validation: Rejects any batch exceeding 20 actions or 500 MB cumulative size.
+  - Implemented blast radius validation: Enforces DEFAULT_MAX_ACTIONS_PER_BATCH = 20 (unless allow_large_batch=True for micro-batches) and MAX_CUMULATIVE_BYTES = 500 * 1024 * 1024 (500 MB). Strictly confines partial recovery to opt-in with 'execution_mode': 'PARTIAL_RECOVERY_OPT_IN'.
   - Implemented collision detection modes (`FAIL`, `RENAME_NUMERIC`, `RENAME_TIMESTAMP`, `SKIP`).
 
 - [x] **1.3 SQLite Action Ledger (`ledger.db`) Implementation**

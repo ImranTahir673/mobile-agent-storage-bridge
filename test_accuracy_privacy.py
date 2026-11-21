@@ -95,6 +95,16 @@ def run_tests():
     print("\n--- Test 3: Seed Demo Fixtures ---")
     s_resp = requests.post(f"{BASE_URL}/seed_fixtures").json()
     assert_test(s_resp.get("status") == "success", "Seed fixtures succeeded")
+    test_files = {
+        "DOC-20250413-WA0017..pdf": "Knowledge Representation and Reasoning Lecture 4: First-Order Predicate Logic. BSAI Semester 6 University Course. (Test Copy)",
+        "DOC-20250413-WA0018..pdf": "Artificial Intelligence Course Assignment 2: Heuristic Search and A* Exploration by Imran Tahir (BSAI-182). (Test Copy)",
+        "DOC-20250413-WA0019..pdf": "Electricity Utility Bill Invoice for March 2025. Consumer ID: 948201. Amount Due: PKR 8,500. Status: Pending. (Test Copy)",
+        "Sumbal pass.pdf": "University Entry Pass: Student Name: Sumbal, Department: AI. (Test Copy)",
+        "1508.06576v2_neural_style.pdf": "A Neural Algorithm of Artistic Style by Leon A. Gatys. ArXiv research paper on deep learning neural representations. (Test Copy)"
+    }
+    for fname, content in test_files.items():
+        with open(os.path.join(server.BASE_DIR, "Download", fname), "w", encoding="utf-8") as f:
+            f.write(content)
 
     # 4. Critical Bug Fix: "Organize all my University files in 1 place" MUST NOT touch Sumbal pass
     print("\n--- Test 4: Critical Fix: Organizing University Files Excludes Identity Pass ---")

@@ -128,6 +128,9 @@ To ensure absolute confidentiality during cloud-assisted reasoning, the system e
 | **Tier 1** | **Zero-Tolerance Redaction** | • CNIC: `\b\d{5}-\d{7}-\d\b`<br>• Phone: `(?:\+92[- ]?\|0)?3\d{2}[- ]?\d{7}\b`<br>• Card: `\b(?:\d{4}[- ]?){3}\d{4}\b`<br>• IBAN: `\b[A-Z]{2}\d{2}[A-Z0-9]{11,30}\b`<br>• Email: `\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b`<br>• Secrets / Passwords / PINs | **Scrubbed to token** (`[REDACTED_*]`) | Prevents identity theft, financial fraud, and credential leakage. |
 | **Tier 2** | **Safe Retained Context** | • Challan / Voucher No: `Challan #182-9021`<br>• Student ID: `BSAI-182`, `21K-3819`<br>• Course Code: `CS-401`, `AI-202`<br>• Bank / Issuer: `HBL`, `Meezan`, `FAST`<br>• Amounts: `PKR 145,000`, `$45.00`<br>• Dates: `October 2026`, `2026-10-06` | **Retained in plaintext** | Vital for accurate classification (distinguishing fee vouchers from lab reports and identifying course subjects). |
 
+> [!NOTE]
+> **Source-Code Header Author Names**: Author names or student names appearing in code comment headers (e.g., `Author: ...`) are intentionally sanitized during pre-flight redaction as part of our privacy-first invariant, preventing identity leakage in cloud-assisted reasoning.
+
 ---
 
 ## 4. Context-Aware Peer Routing Subsystem (`user_profile.json`)

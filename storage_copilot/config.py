@@ -142,6 +142,12 @@ def init_storage_dirs():
 init_storage_dirs()
 
 
+# Blast Radius Safety Limits
+DEFAULT_MAX_ACTIONS_PER_BATCH = 20
+MAX_CUMULATIVE_BYTES = 500 * 1024 * 1024  # 500 MB
+MAX_BATCH_ACTIONS = 1000
+
+
 def format_bytes_human(size_bytes: int) -> str:
     """Formats raw byte counts into human-readable strings (KB, MB, GB)."""
     if size_bytes < 1024:

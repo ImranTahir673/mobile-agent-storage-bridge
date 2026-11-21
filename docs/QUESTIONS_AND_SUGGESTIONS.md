@@ -1,68 +1,76 @@
 # Storage Copilot — Architectural Questions, Suggestions & Decision Ledger
-> **Target Version**: `v0.7.0-live` (Phase 9.x Production Hardening & v2 Audit Complete)  
+> **Target Version**: `v0.7.0-live` (Phase 9.3 Post-Retest Hardening Complete)  
 > **Status**: Ready for User Review & Sign-Off  
 > **Maintained By**: Antigravity Assistant & Engineering Team
 
 ---
 
-## 1. Executive Summary of Phase 9.x Hardening (Parts 1 & 2)
+## 1. Executive Summary of Phase 9.x & 9.3 Hardening
 
-All P0, P1, P2, and Product Pillar requirements from the v2 specification have been implemented, verified, and backed by automated test suites (100% green across all 55 pytest tests, 29 temporal tests, 51 deduplication tests, 37 accuracy/privacy tests, and batch rollback verification):
+All P0, P1, P2, and Product Pillar requirements from the owner's v2 specification and Phase 9.3 hardening directives have been implemented, verified, and backed by automated test suites:
 
-### Phase 9.x Part 1 Completions
-1. **P0 #1 (Type Safety)**: Fixed missing `Any` import in `storage_copilot/intelligence/gemini_client.py`.
-2. **P1 #10 (Zero-Trust Security for Read Endpoints)**: Read endpoints (`/list_files`, `/read_file_snippet`, `/lookup_history`, `/scan_duplicates`, `/scan_forgotten`, `/recent_batch`, `/propose_plan`, `/user_profile`, `/api_status`, `/storage_overview`, `/stream_ticket`) are secured under Bearer authentication (`ALL_PROTECTED_PATHS`) while keeping static UI assets and `/health` public.
-3. **P0 #4 & #5 (Recursive Subtrees & Full Storage Search)**: Manifest scanner and search engine now recursively traverse nested subdirectories (e.g., `Documents/University/AI/`) and automatically search across both `Download/` and `Documents/` trees. Background index warm-up indexes both roots on server start.
-4. **P0 #6 (Ranked Relevance Lists with Snippets & Match Reasons)**: Search query endpoints return structured match items containing `rank`, `name`, `path`, `size_kb`, `relevance_score`, `match_reasons`, `category`, and PII-sanitized `snippet`.
-5. **P0 #2 & #7 (Zero-Match Action Guards & Pre-Filtering)**: Pre-filtering by extension and category is enforced on `--gather` and general reorganization queries. If 0 candidate files match, the system returns a safe No-Op conversation reply and prevents staging plans with 0 file mutations.
-6. **P0 #3 & P1 #13 (Segregated Duplicates & 'CANCELLED' Batch Status)**: Exact duplicate cleanups (SHA-256) and near-duplicate cleanups (3-gram Jaccard) are strictly segregated. Batch cancellations commit `status = 'CANCELLED'` to SQLite WAL, and `/recent_batch` queries include cancelled batches to permit 1-tap rollback.
-7. **Repository Hygiene**: Added `requirements.txt`, `pyproject.toml`, Apache 2.0 `LICENSE`, untracked personal `user_profile.json` from git history, and synchronized version strings to `v0.7.0-live`.
-
-### Phase 9.x Part 2 Completions
-8. **P1 #18 (Collision Suffix Disambiguation)**: Completely removed `clean_token[-6:]` word slicing in `storage_copilot/storage/collision_resolver.py`. Batches with colliding destination stems now cleanly disambiguate using sequential numbering (`_2`, `_3`) or full trailing alphanumeric IDs (`WA0025`), eliminating word fragments like `_e_copy` or `_ecture`.
-9. **Product Pillar #2 (Fixed General-Niche Taxonomy & Review Bucket)**: In `storage_copilot/intelligence/document_classifier.py`, every classification returns a `confidence: float`. High-confidence categories return `0.90`. Top-level format buckets added for `MEDIA` (`Documents/Media`, 0.85), `ARCHIVE` (`Documents/Archives`, 0.85), and `APK_PACKAGE` (`Documents/Apps_and_APKs`, 0.85). Ambiguous fallback documents route safely to `Documents/Review` with `type_label = "Needs Review"` and `confidence = 0.40`.
-10. **Product Pillar #3 (AI Inference Seam & Honest Fallback Notice)**: Introduced `InferenceProvider` interface and `DirectGeminiProvider` in `gemini_client.py`. When offline, rate-limited, or unconfigured, system degrades gracefully to local heuristics and displays an explicit notice: `"AI unavailable right now, using on-device fallback"`, with UI banner rendering.
-11. **P0 #8 (Folder Inventory Queries)**: In `document_classifier.py`, folder queries like `"what is in my download folder?"` match directory listing regex and clear target tokens to list contents rather than filtering by keyword.
-12. **P0 #6 (Search Relevance Penalties & Boosts)**: In `storage_copilot/intelligence/search_engine.py`, added `-50.0` penalty for binary/media files on document queries, word-boundary category matching (`\b`), certificate boost (+35.0) for documents, and cross-folder screenshot boost (+40.0).
-13. **P0 #9 (Temporal Month/Year Filtering)**: In `tier_handlers.py`, added `<MonthName> <YYYY>` / `<YYYY-MM>` parsing (e.g., `"October 2026"`) with direct manifest date filtering.
-14. **P1 #11 & #12 (`/write_file` SQLite WAL Pre-Logging & 500 MB Cap)**: Full ledger integration for `write_file` actions with atomic rollback via `.agent_trash` (`untrash` on overwrite, `trash` on newly written files) and enforcement of a 500 MB cumulative batch size cap.
-15. **P2 #22 (PII Sanitizer Refinement)**: Preserves generic `"name":` in JSON/code payloads while redacting formal administrative identity labels (`Student Name:`, `Fee Slip Name:`, etc.).
-16. **P2 #21 (Adaptive Shingling for Near-Dedup)**: Uses character 4-grams for short texts (< 40 words) and word 3-grams for long texts (>= 40 words), ensuring short documents with minor edits achieve >= 0.85 Jaccard similarity.
-17. **Ephemeral SSE Stream Tickets & Storage Overview**: Implemented `POST /stream_ticket` issuing 30-second single-use tickets (`?ticket=`) for secure EventSource connections, and `GET /storage_overview` providing file distribution stats on boot to power the Web UI welcome card.
-
----
-
-## 2. Questions & Architectural Suggestions for User Approval
-
-### Item 1: Bearer Token Auto-Handshake on Mobile Termux
-- **Current State**: When accessing the Web UI locally on Android (`http://127.0.0.1:8080`), local requests are permitted without authentication when `ENFORCE_LOCAL_AUTH=False`. However, when accessed remotely over Cloudflare Tunnel (`COPILOT_ENFORCE_AUTH=1`), the browser requests Bearer token authentication via the top-right Token pill.
-- **Proposal**: Would you like the backend to provide a local one-time bootstrap token URL (e.g. `http://127.0.0.1:8080/?token=...`) printed in Termux console on server boot, so opening the link automatically authenticates the mobile browser session without manual token copy-pasting?
-  - [ ] **Option A (Recommended)**: Auto-print one-click authenticated URL in console output on server startup.
-  - [ ] **Option B**: Keep current manual token input modal in the Web UI.
-
-### Item 2: Android FUSE Inotify / Watchdog File Watcher
-- **Current State**: Directory changes are invalidated using O(1) directory signature comparisons (`mtime` + file count check). This is very lightweight and avoids keeping open file descriptors.
-- **Proposal**: Should we integrate a background `watchdog` daemon thread for `/storage/emulated/0/Download` to push SSE `scan_progress` events to the Web UI in real time as new files are downloaded from Telegram, WhatsApp, or Chrome?
-  - [ ] **Option A**: Add optional `watchdog` background listener that triggers SSE notification when files land in `Download/`.
-  - [ ] **Option B (Recommended)**: Keep current lightweight signature check to preserve Android battery life and avoid FUSE inotify lockups.
-
-### Item 3: Near-Duplicate 3-Gram Jaccard Threshold Slider
-- **Current State**: The near-duplicate clustering engine uses a fixed Jaccard similarity threshold of `0.85` (85% text shingle overlap).
-- **Proposal**: Should we expose a sensitivity slider in the Web UI (e.g., between 70% and 95%) in the Duplicates toolbar?
-  - [ ] **Option A**: Add a sensitivity slider (70% - 95%) in the Web UI toolbar.
-  - [ ] **Option B (Recommended)**: Retain 85% default with an optional query parameter `?threshold=0.85`.
-
-### Item 4: Native Android APK (Kotlin / Jetpack Compose) Track
-- **Current State**: Phase 8 and Phase 9 provide a responsive Mobile Web UI and Python bridge server running in Termux.
-- **Proposal**: Are you ready to begin designing the native Android Kotlin/Compose wrapper (Phase 10) to run the server in a foreground Android Service with notification tray controls?
-  - [ ] **Option A**: Proceed to Phase 10 Native Android Service & Jetpack Compose UI.
-  - [ ] **Option B**: Focus on further stress-testing and refining the Web UI on physical hardware first.
+### Phase 9.3 Key Completions
+1. **Purged `user_profile.json` from Git History**:
+   - Executed `git filter-repo --path user_profile.json --invert-paths --force`.
+   - Verified `git log --all -- user_profile.json` is completely empty across all historical commits.
+   - Re-linked remote origin to `https://github.com/ImranTahir673/mobile-agent-storage-bridge.git`.
+   - **Notice**: Because commit hashes were rewritten during git history scrubbing, pushing to GitHub will require a force push (`git push origin main --force`).
+2. **Seed-Fixture Isolation & Cleanup**:
+   - `POST /seed_fixtures` writes only to `<BASE_DIR>/.demo_sandbox/Download/` (never polluting real `/storage/emulated/0/Download/`).
+   - Added `FIXTURE_SIGNATURES` (exact SHA-256 hashes of the 12 seed stubs).
+   - Scanner and deduplication engines automatically exclude `.demo_sandbox/` and files matching `FIXTURE_SIGNATURES`.
+   - Added `GET /scan_seed_fixtures` (detects any seed stubs accidentally placed in real storage and returns standard `trash` plan) and `POST /clear_demo_sandbox` to purge demo files.
+3. **AI-First Always & Specific Diagnostics**:
+   - Removed all pre-AI greeting/regex shortcuts (`TRIVIAL_REFLEX_EXACT`). Gemini micro-classifier runs on every prompt when API key is configured.
+   - When offline, rate-limited, daily quota exhausted, or unconfigured, sets explicit diagnostic fields: `degraded_fallback: True`, `fallback_reason` (`no_api_key`, `no_internet`, `daily_quota_exceeded`, `rate_limited`), and user-facing `fallback_notice`.
+4. **Corrupt File Detection & Binary Clean Snippets**:
+   - Added `inspect_file_health(file_path)`: flags 0-byte files, stub/truncated PDFs (missing `%PDF-` header or unparseable), and corrupt zip/docx files with `is_corrupt=True`.
+   - Organise turns route damaged files into `Documents/Review/Damaged/` quarantine bucket.
+   - Added `is_human_readable_text()`: intercepts raw `%PDF-` streams or >20% binary non-printable content, returning `"Scanned document — text not extractable"` with `is_scanned_or_binary=True`.
+5. **Search Ranking & Quarantine Penalties**:
+   - Added `-80.0` penalty for `META-INF/` files (`.sf`, `.rsa`, `.dsa`, `.mf`).
+   - Added `-25.0` penalty for `Documents/Peers/*` when the query does not explicitly name that peer.
+   - Added `-40.0` penalty for `is_scanned_or_binary=True` on document content queries.
+6. **Persistent SQLite Content Index & Blast Radius Limits**:
+   - Added `file_content_index` table in `.ledger.db` with indexed mtime cache for instant warm searches (< 2.0s over 500 files).
+   - Enforced default 20 actions per batch (unless `allow_large_batch=True`) and 500 MB cumulative size cap.
+   - Unknown batch cancel requests return 404; completed batches return 409.
+7. **Modular Tier Handlers**:
+   - Monolithic `tier_handlers.py` decomposed into `conversation_handler.py`, `query_handler.py`, and `operation_handler.py`, with `tier_handlers.py` serving as a thin facade.
+8. **One-Click Local Boot URL**:
+   - Server prints `[Storage Copilot] One-Click Local Boot URL: http://127.0.0.1:<PORT>/?token=<TOKEN>` on boot.
+   - `web/app.js` captures `?token=` parameter on load, stores it in `localStorage` and `state.bearerToken`, and strips it from the address bar via `window.history.replaceState`.
 
 ---
 
-## 3. Decision Log
-*(Record user answers here once reviewed)*
-- **Decision on Item 1**: Pending user response
-- **Decision on Item 2**: Pending user response
-- **Decision on Item 3**: Pending user response
-- **Decision on Item 4**: Pending user response
+## 2. Structured Questions & Suggestions for User Review
+
+### Item 1: AI-Fallback Quality Bar
+- **Current State**: When Gemini is offline, rate-limited, or unconfigured, the system degrades to deterministic local heuristics with an explicit notice (`fallback_notice`: `"AI unavailable right now, using on-device fallback"`). Local heuristics classify core queries (receipts, course codes, forgotten files, exact & near duplicates, format sorting) reliably.
+- **Proposal**: For complex multi-intent conversational queries during an AI outage, should the offline fallback:
+  - [ ] **Option A (Recommended)**: Propose safe read-only reconnaissance (QUERY_INFO) or prompt the user to clarify, never guessing destructive file operations while degraded.
+  - [ ] **Option B**: Attempt aggressive heuristic pattern extraction for multi-step mutations even while degraded.
+
+### Item 2: `InferenceProvider` Backend-Seam Readiness
+- **Current State**: Phase 9.x introduced the abstract `InferenceProvider` interface and `DirectGeminiProvider`. Currently, calls go directly to the Google Gemini API.
+- **Proposal**: As the prototype matures towards Phase 10, how should the backend seam evolve?
+  - [ ] **Option A (Recommended)**: Retain `DirectGeminiProvider` for direct on-device execution (BYOK - Bring Your Own Key) while keeping the provider seam open for an optional self-hosted or proxy inference provider later.
+  - [ ] **Option B**: Implement an on-device local LLM provider seam (e.g., MediaPipe LLM Inference / Gemma 2B on NPU).
+
+### Item 3: Gated Sample-File Demo-Mode Design
+- **Current State**: Seed fixtures are quarantined in `<BASE_DIR>/.demo_sandbox/Download/` with `FIXTURE_SIGNATURES` tracking SHA-256 hashes. Normal scans completely ignore this directory unless in demo mode.
+- **Proposal**: How should the Web UI present demo mode vs live production mode?
+  - [ ] **Option A (Recommended)**: Add a visual "Demo Mode" toggle pill in the UI header. When active, queries target `.demo_sandbox/Download/`; when inactive, operations target the real `/storage/emulated/0/Download/`.
+  - [ ] **Option B**: Keep current behavior where demo fixtures are strictly isolated in `.demo_sandbox/` and only inspected via dedicated `/scan_seed_fixtures` or developer testing.
+
+---
+
+## 3. Git History Rewrite Notice & Force Push Instructions
+
+> [!WARNING]
+> Because `git filter-repo --path user_profile.json --invert-paths --force` was executed to scrub private identity data (`user_profile.json`) from the entire git commit history, commit hashes have diverged from the remote repository.
+> When you are ready to publish these changes to GitHub, execute:
+> ```bash
+> git push origin main --force
+> ```
+> This will synchronize the clean, redacted git history with the remote repository.

@@ -82,6 +82,7 @@ class TestPhase7MicroBatchAndWatchdogYields(unittest.TestCase):
             "description": "45-file micro-batch test",
             "chunk_size": 20,
             "yield_ms": 50,
+            "allow_large_batch": True,
             "actions": actions
         }
 
@@ -151,6 +152,7 @@ class TestPhase7MicroBatchAndWatchdogYields(unittest.TestCase):
             "chunk_size": 20,
             "yield_ms": 10,
             "partial_recovery": True,
+            "allow_large_batch": True,
             "actions": actions
         }
 
@@ -208,6 +210,7 @@ class TestPhase7MicroBatchAndWatchdogYields(unittest.TestCase):
             "description": "30-file cancellation test",
             "chunk_size": 10,
             "yield_ms": 10,
+            "allow_large_batch": True,
             "actions": actions
         }
 
