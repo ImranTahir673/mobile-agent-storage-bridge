@@ -1,5 +1,5 @@
 # Storage Copilot — Architectural Questions, Suggestions & Decision Ledger
-> **Target Version**: `v0.7.0-live` (Phase 9.3 Post-Retest Hardening Complete)  
+> **Target Version**: `v0.8.0` (Phase 9.3 Post-Retest Hardening Complete)  
 > **Status**: Ready for User Review & Sign-Off  
 > **Maintained By**: Antigravity Assistant & Engineering Team
 
@@ -43,7 +43,7 @@ All P0, P1, P2, and Product Pillar requirements from the owner's v2 specificatio
 
 ---
 
-## 2. Structured Questions & Suggestions for User Review
+## 2. Structured Questions & Suggestions for User Review (Active Items)
 
 ### Item 1: AI-Fallback Quality Bar
 - **Current State**: When Gemini is offline, rate-limited, or unconfigured, the system degrades to deterministic local heuristics with an explicit notice (`fallback_notice`: `"AI unavailable right now, using on-device fallback"`). Local heuristics classify core queries (receipts, course codes, forgotten files, exact & near duplicates, format sorting) reliably.
@@ -65,7 +65,27 @@ All P0, P1, P2, and Product Pillar requirements from the owner's v2 specificatio
 
 ---
 
-## 3. Git History Rewrite Notice & Force Push Instructions
+## 3. Decided Archive Section (Phase 9.3 Decisions)
+
+### Item 1: Bearer Token Auto-Handshake on Mobile Termux
+- **Proposal**: Auto-print one-time bootstrap token URL (`http://127.0.0.1:<PORT>/?token=...`) on server boot vs manual token modal input.
+- **Decision**: **Option A (Decided)** — Implemented in `server.py` and `web/app.js`. Server prints one-click local boot URL on startup; Web UI captures `?token=` parameter, stores it, and cleans the URL bar via `window.history.replaceState`.
+
+### Item 2: Android FUSE Inotify / Watchdog File Watcher
+- **Proposal**: Add background `watchdog` daemon thread pushing SSE events vs lightweight directory signature checks (`mtime` + count).
+- **Decision**: **Option B (Decided)** — No watchdog daemon. Retained lightweight O(1) signature check to preserve Android battery life and avoid FUSE inotify descriptor lockups.
+
+### Item 3: Near-Duplicate 3-Gram Jaccard Threshold Slider
+- **Proposal**: Expose a 70%–95% sensitivity slider in Web UI vs retaining fixed 85% threshold.
+- **Decision**: **Option B (Decided)** — No sensitivity slider UI. Retained fixed 85% default with adaptive character 4-gram shingling for short texts.
+
+### Item 4: Native Android APK (Kotlin / Jetpack Compose) Track
+- **Proposal**: Begin Phase 10 Native Android Service & Jetpack Compose UI vs continuing Web UI & Termux post-retest hardening.
+- **Decision**: **Option B (Decided)** — No Kotlin / Phase 10 yet. Focus on physical Android Termux testing and Web UI hardening first.
+
+---
+
+## 4. Git History Rewrite Notice & Force Push Instructions
 
 > [!WARNING]
 > Because `git filter-repo --path user_profile.json --invert-paths --force` was executed to scrub private identity data (`user_profile.json`) from the entire git commit history, commit hashes have diverged from the remote repository.

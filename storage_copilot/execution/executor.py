@@ -248,7 +248,12 @@ def execute_action_plan(
             ]
         }
         if partial_recovery:
+            res_data["partial_recovery"] = True
             res_data["execution_mode"] = "PARTIAL_RECOVERY_OPT_IN"
+            res_data["mode_label"] = "Partial-Recovery Mode (Pre-executed steps remain committed on error)"
+            res_data["diff_warning"] = "⚠️ Partial-Recovery Mode Active: Prior successful steps will remain committed if a subsequent step encounters an error."
+            for s in res_data["summary"]:
+                s["mode_label"] = "Partial-Recovery"
         return res_data, 200
 
     total_steps = len(prepared_steps)

@@ -491,6 +491,8 @@ def render_diff_table(plan: Dict[str, Any], dry_run_summary: Optional[List[Dict[
     if custom_goal:
         print(f" Custom Goal:        {custom_goal}")
     print(f" Collision Policy:   {plan.get('collision_strategy', 'FAIL')}")
+    if plan.get("partial_recovery") or str(plan.get("on_error", "")).strip().lower() in ("partial", "keep_committed", "preserve") or (dry_run_summary and any(s.get("mode_label") for s in dry_run_summary if isinstance(s, dict))):
+        print(f" Recovery Policy:    PARTIAL-RECOVERY (Pre-executed steps remain committed on error)")
     print(f" Total Actions:      {len(plan.get('actions', []))}")
     print("-" * 95)
 

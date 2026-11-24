@@ -356,6 +356,13 @@ function buildSelectivePlanReviewCard(plan) {
   const box = document.createElement("div");
   box.className = "plan-review-box";
 
+  if (plan.partial_recovery || plan.on_error === "partial" || plan.execution_mode === "PARTIAL_RECOVERY_OPT_IN" || plan.mode_label) {
+    const banner = document.createElement("div");
+    banner.className = "partial-recovery-banner";
+    banner.textContent = "⚠️ Partial-Recovery Mode Active: Pre-executed steps remain committed if an error occurs.";
+    box.appendChild(banner);
+  }
+
   const actions = plan.actions || [];
   const selectedIndices = new Set(actions.map((_, idx) => idx));
 

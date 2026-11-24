@@ -1,6 +1,6 @@
 """
 Storage Copilot - Mobile Storage Bridge & Intelligent File Organizer
-v0.7.0-live Entry Point, Production Threaded WSGI Runner & Backward Compatibility Shim.
+v0.8.0 Entry Point, Production Threaded WSGI Runner & Backward Compatibility Shim.
 
 All core modules have been refactored into the `storage_copilot` package.
 This module re-exports all public symbols and synchronizes runtime path overrides
