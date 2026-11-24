@@ -347,6 +347,30 @@ def _classify_intent_internal(
                         intent_enum = UserIntent.CONVERSATION
                         sub_intent = "format_sorting_proposal"
 
+                # FIX 3 (P0): Vague prompt continuity guard - NEVER allow a destructive sub_intent or vague mutation via continuity alone
+                is_vague_cleanup = any(lower_norm == v or lower_norm.startswith(v) for v in (
+                    "clean up a bit", "clean up", "clean a bit", "cleanup a bit", "do a cleanup", "clean a little", "clean something"
+                ))
+                if is_vague_cleanup:
+                    intent_enum = UserIntent.CONVERSATION
+                    sub_intent = "clarification_needed"
+                    resolved_goal = "ask clarification for vague cleanup request"
+                elif intent_enum == UserIntent.FILE_OPERATION and sub_intent in ("deduplicate_clean", "deduplicate_near_clean", "forgotten_clean"):
+                    has_explicit_dup = any(w in lower_norm for w in ("duplicate", "duplicates", "dedup", "clone", "redundant", "copy", "copies"))
+                    has_explicit_forg = any(w in lower_norm for w in ("forgotten", "stale", "old files", "unused", "trash"))
+                    has_explicit_affirmative = bool(re.search(r"^(?:yes|yeah|yep|sure|ok|okay|proceed|do it|confirm|please do)\b", lower_norm))
+                    if not has_explicit_dup and not has_explicit_forg and not has_explicit_affirmative:
+                        if any(w in lower_norm for w in ("electricity", "bill", "thing", "receipt", "document", "file", "voucher", "paper", "pass")):
+                            intent_enum = UserIntent.QUERY_INFO
+                            sub_intent = "read_only_search"
+                            search_q = re.sub(r"\b(?:that|the|this)\s+", "", lower_norm).replace("thing", "").strip() or lower_norm
+                            resolved_goal = f"find {search_q}"
+                            target_ent = search_q
+                        else:
+                            intent_enum = UserIntent.CONVERSATION
+                            sub_intent = "clarification_needed"
+                            resolved_goal = "ask clarification for vague cleanup request"
+
                 return {
                     "intent": intent_enum,
                     "confidence": 0.96,
@@ -600,6 +624,45 @@ def _classify_intent_internal(
             "is_llm": False,
             "model_source": "offline-heuristic",
             "extracted_entity": "Download",
+            "is_affirmative": False
+        }
+
+    # FIX 3 (P0): Vague cleanup prompts in offline heuristic must ask clarification, not mutate
+    if any(lower_norm == v or lower_norm.startswith(v) for v in (
+        "clean up a bit", "clean a bit", "cleanup a bit", "do a cleanup", "clean a little", "clean something"
+    )):
+        return {
+            "intent": UserIntent.CONVERSATION,
+            "confidence": 1.0,
+            "raw_prompt": raw_prompt,
+            "normalized_prompt": normalized_prompt,
+            "cleaned_query": normalized_prompt,
+            "resolved_goal": "ask clarification for vague cleanup request",
+            "sub_intent": "clarification_needed",
+            "include_near": False,
+            "fast_path_matched": True,
+            "is_llm": False,
+            "model_source": "offline-heuristic",
+            "extracted_entity": "",
+            "is_affirmative": False
+        }
+
+    # FIX 3 (P0): "that X thing" or vague reference query -> QUERY_INFO
+    if re.search(r"\b(?:that|the|this)\s+\w+\s+thing\b", lower_norm):
+        search_target = re.sub(r"\b(?:that|the|this)\s+", "", lower_norm).replace("thing", "").strip() or lower_norm
+        return {
+            "intent": UserIntent.QUERY_INFO,
+            "confidence": 1.0,
+            "raw_prompt": raw_prompt,
+            "normalized_prompt": normalized_prompt,
+            "cleaned_query": search_target,
+            "resolved_goal": f"find {search_target}",
+            "sub_intent": "read_only_search",
+            "include_near": False,
+            "fast_path_matched": True,
+            "is_llm": False,
+            "model_source": "offline-heuristic",
+            "extracted_entity": search_target,
             "is_affirmative": False
         }
 

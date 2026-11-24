@@ -50,10 +50,11 @@ def set_last_fallback_reason(reason: str, notice: Optional[str] = None) -> None:
         "no_internet": "AI unavailable right now (no internet connection), using on-device fallback",
         "daily_quota_exceeded": "AI unavailable right now (daily Gemini quota reached), using on-device fallback",
         "rate_limited": "AI unavailable right now (temporary rate limit), using on-device fallback",
+        "ai_unavailable": "The AI could not answer this one, so this answer comes from offline mode.",
     }
     _last_fallback_info = {
         "reason": reason,
-        "notice": notice or notices.get(reason, f"AI unavailable right now ({reason}), using on-device fallback")
+        "notice": notice or notices.get(reason, "The AI could not answer this one, so this answer comes from offline mode.")
     }
 
 
@@ -67,10 +68,16 @@ def get_last_fallback_info() -> Dict[str, Any]:
             "fallback_reason": "no_api_key",
             "fallback_notice": "AI unavailable right now, using on-device fallback"
         }
+    reason = _last_fallback_info.get("reason")
+    notice = _last_fallback_info.get("notice")
+    if not reason or reason == "none":
+        reason = "ai_unavailable"
+    if not notice:
+        notice = "The AI could not answer this one, so this answer comes from offline mode."
     return {
         "degraded_fallback": True,
-        "fallback_reason": _last_fallback_info.get("reason", "rate_limited"),
-        "fallback_notice": _last_fallback_info.get("notice", "AI unavailable right now, using on-device fallback")
+        "fallback_reason": reason,
+        "fallback_notice": notice
     }
 
 
@@ -324,10 +331,11 @@ class DirectGeminiProvider(InferenceProvider):
             "   - QUERY_INFO: finding/searching/listing files, reading notes, checking dates/oldest/newest, viewing organized folders, or auditing duplicates/forgotten files WITHOUT moving/deleting them.\n"
             "   - FILE_OPERATION: organizing, sorting, cleaning, moving, renaming, archiving, separating peers, trashing duplicates/forgotten files, or confirming a prior proposal ('Yes', 'Proceed', 'Do it').\n"
             "2. sub_intent (pick best match):\n"
-            "   - For CONVERSATION: 'greeting_or_capability', 'advice_or_chat', 'format_sorting_proposal'\n"
+            "   - For CONVERSATION: 'greeting_or_capability', 'advice_or_chat', 'format_sorting_proposal', 'clarification_needed'\n"
             "   - For QUERY_INFO: 'read_only_search', 'deduplicate_audit', 'deduplicate_near_audit', 'forgotten_audit', 'view_organized_folders'\n"
             "   - For FILE_OPERATION: 'general_mutation', 'deduplicate_clean', 'deduplicate_near_clean', 'forgotten_clean', 'format_batch_execute', 'peer_separation', 'voucher_sorting', 'academic_organization'\n"
             "3. include_near: true if user mentions near/similar/revised duplicates OR if confirming a duplicate cleanup when Session State has include_near=true or near_duplicates_count > 0.\n"
+            "4. CRITICAL SAFETY RULE: A vague prompt (e.g. 'that electricity thing', 'clean up a bit', 'do some cleanup') must NEVER resolve to FILE_OPERATION or a destructive action (deduplicate_clean, forgotten_clean) via continuity alone without explicit target or affirmative confirmation. Vague prompts about an item ('that electricity thing') are QUERY_INFO ('read_only_search'). Ambiguous cleanup prompts ('clean up a bit') are CONVERSATION ('clarification_needed').\n"
             'Return strict JSON: {"intent": "...", "sub_intent": "...", "include_near": bool, "resolved_goal": "clean normalized goal", "target": "extracted subject"}'
         )
 
@@ -338,7 +346,7 @@ class DirectGeminiProvider(InferenceProvider):
             "contents": [{"role": "user", "parts": [{"text": user_text}]}],
             "generationConfig": {
                 "temperature": 0.0,
-                "maxOutputTokens": 110,
+                "maxOutputTokens": 256,
                 "responseMimeType": "application/json"
             }
         }
@@ -356,14 +364,25 @@ class DirectGeminiProvider(InferenceProvider):
                     if candidates:
                         parts = candidates[0].get("content", {}).get("parts", [])
                         if parts:
-                            parsed = extract_json_plan(parts[0].get("text", ""))
+                            raw_text = parts[0].get("text", "")
+                            parsed = extract_json_plan(raw_text)
                             if parsed and isinstance(parsed, dict) and "intent" in parsed:
                                 parsed["_model_used"] = model
                                 parsed["_is_llm"] = True
                                 mark_ai_success()
                                 return parsed
+                            else:
+                                print(f"[Storage Copilot Gemini] classify_micro parse failed on model '{model}'. Raw output: {raw_text[:200]}")
+                                set_last_fallback_reason("ai_unavailable", "The AI could not answer this one, so this answer comes from offline mode.")
+                        else:
+                            print(f"[Storage Copilot Gemini] classify_micro model '{model}' candidate has empty parts. Finish reason: {candidates[0].get('finishReason')}")
+                            set_last_fallback_reason("ai_unavailable", "The AI could not answer this one, so this answer comes from offline mode.")
+                    else:
+                        print(f"[Storage Copilot Gemini] classify_micro model '{model}' returned empty candidates.")
+                        set_last_fallback_reason("ai_unavailable", "The AI could not answer this one, so this answer comes from offline mode.")
                 elif resp.status_code == 429:
                     resp_text = resp.text or ""
+                    print(f"[Storage Copilot Gemini] Model '{model}' hit quota (429): {resp_text[:150]}")
                     if "GenerateRequestsPerDay" in resp_text or "quotaId" in resp_text or "RESOURCE_EXHAUSTED" in resp_text:
                         mark_model_cooldown(model, seconds=300.0)
                         set_last_fallback_reason("daily_quota_exceeded")
@@ -372,23 +391,29 @@ class DirectGeminiProvider(InferenceProvider):
                     mark_model_cooldown(model, seconds=15.0)
                     continue
                 elif resp.status_code in (404, 503):
+                    print(f"[Storage Copilot Gemini] Model '{model}' unavailable ({resp.status_code}): {resp.text[:150]}")
                     mark_model_cooldown(model, seconds=60.0)
                     set_last_fallback_reason("rate_limited")
                     continue
                 else:
+                    print(f"[Storage Copilot Gemini] Model '{model}' error {resp.status_code}: {resp.text[:150]}")
                     set_last_fallback_reason("rate_limited")
                     continue
-            except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
+            except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+                print(f"[Storage Copilot Gemini] Model '{model}' network error: {e}")
                 saw_network_error = True
                 set_last_fallback_reason("no_internet")
                 continue
-            except Exception:
+            except Exception as e:
+                print(f"[Storage Copilot Gemini] Model '{model}' exception: {e}")
                 saw_network_error = True
                 set_last_fallback_reason("no_internet")
                 continue
 
         if saw_network_error:
             set_last_fallback_reason("no_internet")
+        elif not _last_fallback_info.get("reason") or _last_fallback_info.get("reason") == "none":
+            set_last_fallback_reason("ai_unavailable", "The AI could not answer this one, so this answer comes from offline mode.")
         return {}
 
 

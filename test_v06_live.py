@@ -51,7 +51,7 @@ def test_suite():
     print("\n--- Test 1: Health Endpoint & Version Verification ---")
     h_resp = requests.get(f"{BASE_URL}/health").json()
     assert_test(h_resp.get("status") == "running", "Health status is 'running'")
-    assert_test(h_resp.get("version") in ("v0.6-live", "v0.6.2-live", "v0.7.0-live", "v0.8.0"), f"Version starts with 'v0.6', 'v0.7' or 'v0.8' (got '{h_resp.get('version')}')")
+    assert_test(h_resp.get("version") in ("v0.6-live", "v0.6.2-live", "v0.7.0-live", "v0.8.0", "v0.8.1"), f"Version starts with 'v0.6', 'v0.7' or 'v0.8' (got '{h_resp.get('version')}')")
     assert_test("v0.6" in h_resp.get("engine", "") or "v0.7" in h_resp.get("engine", "") or "v0.8" in h_resp.get("engine", ""), f"Engine reports v0.6, v0.7 or v0.8: '{h_resp.get('engine')}'")
 
     # 2. Seed Fixtures
@@ -79,7 +79,7 @@ def test_suite():
     assert_test(c_resp1.get("type") == "conversation", f"Greeting returns type 'conversation' (got {c_resp1.get('type')})")
     assert_test(len(c_resp1.get("actions", [])) == 0, "No file mutation actions staged for greeting")
     assert_test(len(c_resp1.get("message", "")) > 10, "Has non-empty message")
-    assert_test(c_resp1.get("version") in ("v0.6-live", "v0.6.2-live", "v0.7.0-live", "v0.8.0"), f"Returns version starts with v0.6, v0.7 or v0.8 (got '{c_resp1.get('version')}')")
+    assert_test(c_resp1.get("version") in ("v0.6-live", "v0.6.2-live", "v0.7.0-live", "v0.8.0", "v0.8.1"), f"Returns version starts with v0.6, v0.7 or v0.8 (got '{c_resp1.get('version')}')")
 
     # 3b. "What else"
     c_resp2 = requests.post(f"{BASE_URL}/propose_plan", json={"prompt": "What else", "target_folder": "Download"}).json()

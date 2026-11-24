@@ -267,6 +267,9 @@ def handle_query_info_turn(
     # Inspect for damaged/corrupted files in storage
     corrupt_files = []
     for itm in manifest:
+        f_rel = itm.get("path", "").replace("\\", "/")
+        if f_rel.startswith("Documents/Review/Damaged"):
+            continue
         health = inspect_file_health(itm.get("full_path", ""))
         if health.get("is_corrupt"):
             corrupt_files.append({"name": itm["name"], "path": itm["path"], "reason": health.get("reason", "Corrupt file")})
@@ -328,6 +331,11 @@ def handle_query_info_turn(
             kw_matched = [f for f in matched_items if f.get("is_relevant")]
             if kw_matched:
                 matched_items = kw_matched
+        for f in matched_items:
+            if f.get("relevance_score", 0.0) <= 0.0:
+                f["relevance_score"] = 50.0
+                f["is_relevant"] = True
+                f["match_reasons"] = [f"Date match: {expected_ym}"]
         matched_items.sort(key=lambda x: (x.get("relevance_score", 0.0), x.get("mtime", 0.0)), reverse=True)
     elif is_directory_inventory and not parsed_q.get("target_tokens"):
         if parsed_q.get("folder_constraint"):
@@ -340,30 +348,72 @@ def handle_query_info_turn(
             matched_items = sorted_by_newest
     elif is_oldest_req:
         matched_items = list(reversed(sorted_by_newest[-10:])) if sorted_by_newest else []
+        for f in matched_items:
+            if f.get("relevance_score", 0.0) <= 0.0:
+                f["relevance_score"] = 40.0
+                f["is_relevant"] = True
+                f["match_reasons"] = ["Oldest file in storage"]
     elif is_latest_req:
         matched_items = sorted_by_newest[:10]
+        for f in matched_items:
+            if f.get("relevance_score", 0.0) <= 0.0:
+                f["relevance_score"] = 40.0
+                f["is_relevant"] = True
+                f["match_reasons"] = ["Latest download in storage"]
     elif "today" in lower_norm:
         matched_items = [f for f in manifest if f.get("relative_age") == "Today"]
+        for f in matched_items:
+            if f.get("relevance_score", 0.0) <= 0.0:
+                f["relevance_score"] = 50.0
+                f["is_relevant"] = True
+                f["match_reasons"] = ["Downloaded today"]
     elif "yesterday" in lower_norm:
         matched_items = [f for f in manifest if f.get("relative_age") == "Yesterday"]
+        for f in matched_items:
+            if f.get("relevance_score", 0.0) <= 0.0:
+                f["relevance_score"] = 50.0
+                f["is_relevant"] = True
+                f["match_reasons"] = ["Downloaded yesterday"]
     elif any(w in lower_norm for w in ("receipt", "receipts", "voucher", "vouchers", "fee", "bill", "bills", "invoice")):
         matched_items = [
             f for f in manifest
             if any(re.search(rf"\b{re.escape(k)}\b", f["name"].lower()) or re.search(rf"\b{re.escape(k)}\b", (f.get("snippet") or "").lower()) for k in ("receipt", "voucher", "bill", "invoice", "fee", "challan"))
         ]
+        for f in matched_items:
+            fn_l = f["name"].lower()
+            snip_l = (f.get("snippet") or "").lower()
+            fn_hit = any(re.search(rf"\b{re.escape(k)}\b", fn_l) for k in ("receipt", "voucher", "bill", "invoice", "fee", "challan"))
+            snip_hit = any(re.search(rf"\b{re.escape(k)}\b", snip_l) for k in ("receipt", "voucher", "bill", "invoice", "fee", "challan"))
+            bonus = 45.0 if fn_hit else (35.0 if snip_hit else 0.0)
+            if bonus > f.get("relevance_score", 0.0):
+                f["relevance_score"] = bonus
+                f["is_relevant"] = True
+                f["match_reasons"] = ["Category match in filename" if fn_hit else "Category match in content"]
     elif any(w in lower_norm for w in ("lecture", "lectures", "notes", "assignment", "academic", "university")):
         matched_items = [
             f for f in manifest
             if classify_document(f["name"], f.get("snippet") or "", user_profile=ctx["profile"])["is_academic_study"]
         ]
+        for f in matched_items:
+            if f.get("relevance_score", 0.0) <= 0.0:
+                f["relevance_score"] = 40.0
+                f["is_relevant"] = True
+                f["match_reasons"] = ["Academic study document"]
     else:
         # Strictly enforce honest-empty: only include candidates scoring >= 35.0
         matched_items = [f for f in manifest if f.get("is_relevant")]
-        matched_items.sort(key=lambda x: (x.get("relevance_score", 0.0), x.get("mtime", 0.0)), reverse=True)
+
+    # FIX 5 (P1): Filter out 0-score matches when searching and sort strictly by score
+    if not is_directory_inventory:
+        matched_items = [f for f in matched_items if f.get("relevance_score", 0.0) > 0.0]
+    matched_items.sort(key=lambda x: (x.get("relevance_score", 0.0), x.get("mtime", 0.0)), reverse=True)
+
+    # Slice to top 15 before building ranked matches and calculating message count
+    matched_items = matched_items[:15]
 
     # Build structured ranked match objects with snippets and match reasons (Phase 9.x P0 #6)
     ranked_matches = []
-    for idx, m in enumerate(matched_items[:15], 1):
+    for idx, m in enumerate(matched_items, 1):
         doc_class = classify_document(m["name"], m.get("snippet", ""), user_profile=ctx["profile"])
         type_label = doc_class.get("type_label", "Document")
         reasons = m.get("match_reasons") or []
@@ -404,22 +454,26 @@ def handle_query_info_turn(
     if matched_items and is_gemini_available():
         top_slice = ranked_matches
         sys_prompt = f"""You are Storage Copilot answering a READ-ONLY file lookup for {owner_name}.
-Matched Files in '{target_folder}/':
+Matched Files ({len(top_slice)} files):
 {json.dumps(top_slice, indent=2)}
 {deep_context_block}
 
 Rules:
+- You must report on EXACTLY these {len(top_slice)} matched files (if stating a count, state exactly '{len(top_slice)} matching', never any other number).
 - Cite the matched filenames in bold, their paths in code spans, sizes, document categories, and relevant snippet details.
 - NEVER output robotic debug strings like 'Match: Filename matches:'.
 - Keep the summary clear, grounded, and helpful.
 """
         llm_msg = call_gemini_text(sys_prompt, raw_prompt)
         if llm_msg:
+            # FIX 5 (P1): Enforce exact count header agreement
+            header = f"Found **{len(top_slice)} matching document(s)** across storage:\n\n"
+            full_msg = header + llm_msg if not llm_msg.startswith("Found **") else llm_msg
             return {
                 "type": "query_info",
                 "intent": "QUERY_INFO",
-                "message": llm_msg + damaged_note,
-                "analysis": llm_msg,
+                "message": full_msg + damaged_note,
+                "analysis": full_msg,
                 "matches": top_slice,
                 "badges": ["Search", "Read-Only"],
                 "version": config.APP_VERSION,

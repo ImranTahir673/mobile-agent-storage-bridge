@@ -1,5 +1,5 @@
 # Storage Copilot — Architectural Questions, Suggestions & Decision Ledger
-> **Target Version**: `v0.8.0` (Phase 9.3 Post-Retest Hardening Complete)  
+> **Target Version**: `v0.8.1` (Phase 9.4 Post-Retest Hardening Complete)  
 > **Status**: Ready for User Review & Sign-Off  
 > **Maintained By**: Antigravity Assistant & Engineering Team
 

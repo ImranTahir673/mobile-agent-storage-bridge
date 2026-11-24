@@ -2,7 +2,7 @@
 import os
 import time
 
-APP_VERSION = "v0.8.0"
+APP_VERSION = "v0.8.1"
 SERVER_BOOT_TIME = int(time.time())
 SERVER_BOOT_ID = f"build-v0.6.2-{SERVER_BOOT_TIME}"
 GEMINI_QUOTA_BLOCKED_UNTIL = 0.0

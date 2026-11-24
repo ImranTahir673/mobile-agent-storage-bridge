@@ -27,19 +27,22 @@ FIXTURE_SIGNATURES: Dict[str, str] = {
     fname: hashlib.sha256(content.encode("utf-8")).hexdigest()
     for fname, content in SEED_FIXTURE_CONTENTS.items()
 }
+FIXTURE_HASHES: set = set(FIXTURE_SIGNATURES.values())
 
 
 def is_fixture_signature(file_path: str) -> bool:
-    """Returns True if the file matches one of the 12 known seed stub filenames and SHA-256 signatures."""
-    fname = os.path.basename(file_path)
-    expected_hash = FIXTURE_SIGNATURES.get(fname)
-    if not expected_hash:
-        return False
+    """
+    Returns True if the file content matches one of the known seed stub SHA-256 signatures,
+    regardless of filename (handles renamed stubs e.g. in Documents/Finances).
+    """
     try:
         if os.path.exists(file_path) and os.path.isfile(file_path):
+            # Seed stubs are small text fixtures (< 10 KB)
+            if os.path.getsize(file_path) > 10240:
+                return False
             with open(file_path, "rb") as fh:
                 file_hash = hashlib.sha256(fh.read()).hexdigest()
-            return file_hash == expected_hash
+            return file_hash in FIXTURE_HASHES
     except Exception:
         pass
     return False

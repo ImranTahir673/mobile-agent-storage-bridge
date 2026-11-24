@@ -40,6 +40,31 @@ def handle_conversation_turn(
     lower_p = raw_prompt.lower()
     fb_diag = get_last_fallback_info()
 
+    # FIX 3 (P0): Clarification needed for vague cleanup prompts
+    if sub_intent == "clarification_needed":
+        msg = "Did you mean the duplicate files from earlier, or something else? Please specify what you'd like to clean or organize."
+        return {
+            "type": "conversation",
+            "intent": "CONVERSATION",
+            "message": msg,
+            "analysis": msg,
+            "version": config.APP_VERSION,
+            "model_source": "copilot-guard",
+            "is_llm": classification.get("is_llm", False),
+            "degraded_fallback": classification.get("degraded_fallback", False),
+            "fallback_reason": fb_diag["fallback_reason"],
+            "fallback_notice": fb_diag["fallback_notice"],
+            "actions": [],
+            "plan": [],
+            "badges": ["Clarification"],
+            "quick_chips": [
+                "🧹 Clean Duplicates",
+                "📋 Sort Student Vouchers",
+                "👥 Separate Peer Documents",
+                "🏷️ Clean Download Names"
+            ]
+        }
+
     if sub_intent == "format_sorting_proposal":
         target_dir = resolve_target_directory(target_folder)
         unorg_files = get_unorganized_download_files(target_dir)

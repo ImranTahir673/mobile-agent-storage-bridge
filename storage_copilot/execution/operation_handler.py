@@ -2,6 +2,7 @@ import os
 import re
 import json
 import uuid
+from collections import defaultdict
 from typing import Dict, Any, List, Optional
 
 from storage_copilot import config
@@ -255,9 +256,24 @@ def handle_file_operation_turn(
     is_damage_quarantine_prompt = sub_intent == "damaged_quarantine" or any(w in lower_p for w in ("damaged", "corrupt", "quarantine"))
     if is_damage_quarantine_prompt:
         scan_data = scan_directory_manifest(target_folder=target_folder, query_prompt=raw_prompt)
-        manifest = scan_data["manifest"]
+        manifest = list(scan_data["manifest"])
+
+        # FIX 6 (P1): Expand quarantine scope to match damaged-notice scope across Download/ and Documents/
+        other_folder = "Documents" if target_folder.lower() == "download" else "Download"
+        other_dir = os.path.join(config.BASE_STORAGE_DIR, other_folder)
+        if os.path.exists(other_dir) and os.path.isdir(other_dir):
+            other_scan = scan_directory_manifest(target_folder=other_folder, query_prompt=raw_prompt)
+            existing_paths = {m["full_path"] for m in manifest}
+            for itm in other_scan.get("manifest", []):
+                if itm["full_path"] not in existing_paths:
+                    manifest.append(itm)
+                    existing_paths.add(itm["full_path"])
+
         damaged_files = []
         for itm in manifest:
+            f_rel = itm.get("path", "").replace("\\", "/")
+            if f_rel.startswith("Documents/Review/Damaged"):
+                continue
             health = inspect_file_health(itm.get("full_path", ""))
             if health.get("is_corrupt"):
                 damaged_files.append((itm, health.get("reason", "Corrupted file structure")))
@@ -335,8 +351,31 @@ def handle_file_operation_turn(
     if sub_intent == "format_batch_execute":
         target_dir = resolve_target_directory(target_folder)
         unorg_files = get_unorganized_download_files(target_dir)
+
+        # FIX 1 (P0): Honor file-type constraint if specified in prompt
+        gather_exts = None
+        if re.search(r"\b(?:pdfs?|\.pdf)\b", lower_p):
+            gather_exts = {".pdf"}
+        elif re.search(r"\b(?:apks?|apps?|\.apk|\.xapk)\b", lower_p):
+            gather_exts = {".apk", ".xapk", ".apks"}
+        elif re.search(r"\b(?:images?|photos?|pictures?|\.png|\.jpg|\.jpeg|\.webp|\.gif)\b", lower_p):
+            gather_exts = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
+        elif re.search(r"\b(?:videos?|movies?|\.mp4|\.mkv|\.avi|\.mov)\b", lower_p):
+            gather_exts = {".mp4", ".mkv", ".avi", ".mov"}
+        elif re.search(r"\b(?:audios?|music|songs?|\.mp3|\.wav|\.m4a|\.flac)\b", lower_p):
+            gather_exts = {".mp3", ".wav", ".m4a", ".flac"}
+        elif re.search(r"\b(?:docs?|documents?|\.docx?|\.doc|\.txt)\b", lower_p) and not any(k in lower_p for k in ("voucher", "receipt", "bill", "archive")):
+            gather_exts = {".doc", ".docx", ".pdf", ".txt"}
+        elif re.search(r"\b(?:zips?|archives?|\.zip|\.rar|\.7z|\.tar|\.gz)\b", lower_p):
+            gather_exts = {".zip", ".rar", ".7z", ".tar", ".gz"}
+        elif re.search(r"\b(?:scripts?|code|programs?|\.py|\.js|\.html|\.css)\b", lower_p):
+            gather_exts = {".py", ".js", ".html", ".css"}
+
+        if gather_exts:
+            unorg_files = [f for f in unorg_files if os.path.splitext(f.name)[1].lower() in gather_exts]
+
         if not unorg_files:
-            msg = f"✨ **All files in `{target_folder}/` are already organized!**\n\nEvery file has been grouped into its dedicated format subfolder."
+            msg = f"✨ **All files in `{target_folder}/` are already organized!**\n\nNo loose unorganized files matching your criteria remain."
             return {
                 "type": "conversation",
                 "intent": "FILE_OPERATION",
@@ -358,7 +397,8 @@ def handle_file_operation_turn(
                 ]
             }
 
-        batch_size = 25
+        # FIX 1 (P0): Strict 20-action batch cap
+        batch_size = min(20, getattr(config, "DEFAULT_MAX_ACTIONS_PER_BATCH", 20))
         batch_slice = unorg_files[:batch_size]
         remaining = len(unorg_files) - len(batch_slice)
         actions = []
@@ -376,6 +416,20 @@ def handle_file_operation_turn(
                 "ai_inspected": False
             })
 
+        # FIX 1 (P0): Present breakdown table first in plan message
+        cat_counts = defaultdict(int)
+        for f in batch_slice:
+            cat = get_format_category(f.name)
+            cat_counts[cat["folder"]] += 1
+        rows = []
+        for cat_name, info in FORMAT_CATEGORIES.items():
+            cnt = cat_counts.get(info["folder"], 0)
+            if cnt > 0:
+                rows.append(f"| {info['emoji']} **{info['label']}** | `{target_folder}/{info['folder']}/` | **{cnt} files** |")
+        if cat_counts.get("Other", 0) > 0:
+            rows.append(f"| 📁 **Other Files** | `{target_folder}/Other/` | **{cat_counts['Other']} files** |")
+        table_md = "\n".join(rows)
+
         plan_id = str(uuid.uuid4())
         batch_info = {
             "batch_size": len(actions),
@@ -386,6 +440,7 @@ def handle_file_operation_turn(
         }
         plan_desc = f"Format Sorting: Batch of {len(actions)} files into {target_folder}/ subfolders ({remaining} remaining)"
         msg = (
+            f"### 📊 Format Breakdown\n{table_md}\n\n"
             f"Staging **Batch of {len(actions)} files** to move into dedicated format folders (`{target_folder}/PDFs/`, `{target_folder}/APKs/`, etc.).\n\n"
             f"- **Remaining files after this batch:** **{remaining} files**\n\n"
             "Review the proposed moves below and tap **Approve Selected** to execute."
@@ -423,16 +478,22 @@ def handle_file_operation_turn(
 
     # Gather Extension & Category Pre-Filters (P0 #2 & #7)
     gather_exts = None
-    if re.search(r"\b(?:gather|collect)\s+(?:all\s+)?pdfs?\b|\bonly\s+pdfs?\b|\ball\s+pdfs?\b", lower_p):
+    if re.search(r"\b(?:gather|collect|move|sort|organize|group)\s+(?:all\s+)?pdfs?\b|\bonly\s+pdfs?\b|\ball\s+pdfs?\b|\bpdfs?\s+only\b|\b(?:gather|collect)\s+pdfs?\b", lower_p):
         gather_exts = {".pdf"}
-    elif re.search(r"\b(?:gather|collect)\s+(?:all\s+)?apks?\b|\bonly\s+apks?\b|\ball\s+apks?\b", lower_p):
+    elif re.search(r"\b(?:gather|collect|move|sort|organize|group)\s+(?:all\s+)?apks?\b|\bonly\s+apks?\b|\ball\s+apks?\b|\bapks?\s+only\b|\b(?:gather|collect)\s+apks?\b", lower_p):
         gather_exts = {".apk", ".xapk", ".apks"}
-    elif re.search(r"\b(?:gather|collect)\s+(?:all\s+)?(?:images?|photos?)\b|\bonly\s+(?:images?|photos?)\b|\ball\s+(?:images?|photos?)\b", lower_p):
+    elif re.search(r"\b(?:gather|collect|move|sort|organize|group)\s+(?:all\s+)?(?:images?|photos?)\b|\bonly\s+(?:images?|photos?)\b|\ball\s+(?:images?|photos?)\b|\b(?:gather|collect)\s+(?:images?|photos?)\b", lower_p):
         gather_exts = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
-    elif re.search(r"\b(?:gather|collect)\s+(?:all\s+)?(?:docs?|documents?)\b|\bonly\s+docx?\b", lower_p) and not any(k in lower_p for k in ("voucher", "receipt", "bill", "archive")):
+    elif re.search(r"\b(?:gather|collect|move|sort|organize|group)\s+(?:all\s+)?(?:videos?|movies?)\b|\bonly\s+(?:videos?|movies?)\b|\ball\s+(?:videos?|movies?)\b", lower_p):
+        gather_exts = {".mp4", ".mkv", ".avi", ".mov"}
+    elif re.search(r"\b(?:gather|collect|move|sort|organize|group)\s+(?:all\s+)?(?:audios?|music)\b|\bonly\s+(?:audios?|music)\b|\ball\s+(?:audios?|music)\b", lower_p):
+        gather_exts = {".mp3", ".wav", ".m4a", ".flac"}
+    elif re.search(r"\b(?:gather|collect|move|sort|organize|group)\s+(?:all\s+)?(?:docs?|documents?)\b|\bonly\s+docx?\b", lower_p) and not any(k in lower_p for k in ("voucher", "receipt", "bill", "archive")):
         gather_exts = {".doc", ".docx", ".pdf", ".txt"}
-    elif re.search(r"\b(?:gather|collect)\s+(?:all\s+)?(?:zips?|archives?)\b|\bonly\s+zips?\b|\ball\s+zips?\b", lower_p):
+    elif re.search(r"\b(?:gather|collect|move|sort|organize|group)\s+(?:all\s+)?(?:zips?|archives?)\b|\bonly\s+zips?\b|\ball\s+zips?\b", lower_p):
         gather_exts = {".zip", ".rar", ".7z", ".tar", ".gz"}
+    elif re.search(r"\b(?:gather|collect|move|sort|organize|group)\s+(?:all\s+)?(?:scripts?|code|py)\b", lower_p):
+        gather_exts = {".py", ".js", ".html", ".css"}
 
     gather_cat = None
     if re.search(r"\b(?:gather|collect|organize|find)\s+(?:my\s+|all\s+)?(?:receipts?|invoices?)\b", lower_p) and not any(k in lower_p for k in ("voucher", "fee", "challan")):
@@ -496,6 +557,7 @@ def handle_file_operation_turn(
                 "snippet": (f.get("snippet") or "")[:200]
             }
             for f in manifest[:60]
+            if not inspect_file_health(f.get("full_path", "")).get("is_corrupt")
         ]
         sys_prompt = f"""You are Storage Copilot generating a safe JSON Action Plan for {owner_name}.
 Known Peers: {', '.join(peer_names)}.
@@ -511,6 +573,7 @@ Rules:
 - Utility bills -> Documents/Finances/
 - NEVER touch Identity Passes ('Sumbal pass.pdf', 'Yousaf Pass.pdf') when organizing university study materials!
 - Never use generic 'Document_2025-04-13.pdf' names.
+- Never use placeholder folder names like 'Peer_Name'; if peer cannot be identified, route to Documents/Review/.
 Return JSON:
 {{
   "type": "plan",
@@ -527,11 +590,26 @@ Return JSON:
             for act in raw_actions:
                 act_type = act.get("type")
                 if act_type == "make_dir":
+                    p_path = act.get("path", "")
+                    if any(ph in p_path for ph in ("Peer_Name", "<PeerName>", "<Peer_Name>", "<Subject>", "<Category>", "PeerName")):
+                        act["path"] = "Documents/Review"
                     validated.append(act)
                 elif act_type in ("move", "copy", "trash"):
                     src = act.get("source") or act.get("path") or ""
                     matched_src = manifest_paths.get(src.lower()) or manifest_names.get(os.path.basename(src).lower())
                     if matched_src:
+                        # FIX 1 (P0): Honor gather_exts constraint in LLM actions
+                        if gather_exts:
+                            src_ext = os.path.splitext(matched_src)[1].lower()
+                            if src_ext not in gather_exts:
+                                continue
+                        full_s = os.path.join(config.BASE_STORAGE_DIR, matched_src)
+                        # FIX 7: Never route corrupt files in organise plans
+                        if inspect_file_health(full_s).get("is_corrupt"):
+                            continue
+                        dst = act.get("destination", "")
+                        if any(ph in dst for ph in ("Peer_Name", "<PeerName>", "<Peer_Name>", "<Subject>", "<Category>", "PeerName")):
+                            act["destination"] = f"Documents/Review/{os.path.basename(dst)}"
                         if act_type in ("move", "copy"):
                             act["source"] = matched_src
                         else:
@@ -539,15 +617,41 @@ Return JSON:
                         validated.append(act)
 
             if validated:
+                # FIX 1 (P0): Strict 20-action batch cap on LLM generated plan
+                MAX_BATCH_ACTIONS = getattr(config, "DEFAULT_MAX_ACTIONS_PER_BATCH", 20)
+                file_acts = [a for a in validated if a.get("type") in ("move", "copy", "trash", "delete")]
+                rem_batch_count = 0
+                if len(file_acts) > MAX_BATCH_ACTIONS:
+                    allowed_sources = {a.get("source") or a.get("path") for a in file_acts[:MAX_BATCH_ACTIONS]}
+                    rem_batch_count = len(file_acts) - MAX_BATCH_ACTIONS
+                    capped_actions = []
+                    for a in validated:
+                        if a.get("type") == "make_dir":
+                            capped_actions.append(a)
+                        elif (a.get("source") or a.get("path")) in allowed_sources:
+                            capped_actions.append(a)
+                    validated = capped_actions
+
                 validated = ensure_unique_plan_destinations(validated)
                 formatted_actions = format_plan_badges(validated, peer_names, manifest_lookup)
                 plan_id = str(uuid.uuid4())
                 resp_msg = gemini_resp.get("message") or f"Synthesized Action Plan for: {resolved_goal}"
+
+                # FIX 1 (P0): Present breakdown table first in plan message
+                cat_counts = defaultdict(int)
+                for a in [act for act in formatted_actions if act.get("type") in ("move", "copy", "trash")]:
+                    ext = os.path.splitext(a.get("source") or a.get("path") or "")[1].upper().replace(".", "")
+                    cat_counts[ext or "Files"] += 1
+                rows = [f"| 📄 **{ext}** | **{cnt} files** |" for ext, cnt in cat_counts.items()]
+                breakdown_md = "### 📊 File Breakdown\n" + "\n".join(rows) + "\n\n" if rows else ""
+                batch_note = f" (showing first {MAX_BATCH_ACTIONS} files, {rem_batch_count} remaining in next batch)" if rem_batch_count > 0 else ""
+                full_msg = f"{breakdown_md}{resp_msg}{batch_note}"
+
                 return {
                     "type": "plan",
                     "intent": "FILE_OPERATION",
-                    "message": resp_msg,
-                    "analysis": resp_msg,
+                    "message": full_msg,
+                    "analysis": full_msg,
                     "version": config.APP_VERSION,
                     "model_source": gemini_resp.get("_model_used", "gemini-2.5-flash"),
                     "is_llm": True,
@@ -559,7 +663,7 @@ Return JSON:
                     "plan": {
                         "plan_id": plan_id,
                         "version": "1.0",
-                        "description": resp_msg,
+                        "description": full_msg,
                         "collision_strategy": "RENAME_NUMERIC",
                         "actions": formatted_actions
                     },
@@ -746,8 +850,11 @@ Return JSON:
     else:
         # General organization
         detected_exts = set()
-        for ext in (".pdf", ".docx", ".pptx", ".xlsx", ".txt", ".png", ".jpg", ".jpeg", ".mp4", ".mp3", ".zip", ".py"):
-            if ext in lower_p or f"{ext[1:]}s" in lower_p or f"{ext[1:]} files" in lower_p:
+        if gather_exts:
+            detected_exts.update(gather_exts)
+        for ext in (".pdf", ".docx", ".pptx", ".xlsx", ".txt", ".png", ".jpg", ".jpeg", ".mp4", ".mp3", ".zip", ".py", ".apk"):
+            ext_token = ext[1:]
+            if ext in lower_p or f"{ext_token}s" in lower_p or f"{ext_token} files" in lower_p or re.search(rf"\b{ext_token}s?\b", lower_p):
                 detected_exts.add(ext)
 
         target_items = [
@@ -767,9 +874,8 @@ Return JSON:
 
                 health = inspect_file_health(item.get("full_path", ""))
                 if health.get("is_corrupt"):
-                    target_d = "Documents/Review/Damaged"
-                    clean_title = fn
-                    rationale = f"Corrupted/damaged file isolated into {target_d}: {health.get('reason')}"
+                    # FIX 7 (P2): Files flagged corrupt must never appear in organise plans! They go to quarantine, not organise.
+                    continue
                 else:
                     matched_peer = next((p for p in peer_names if p.lower() in fn.lower() or p.lower() in snip.lower()), None)
                     if matched_peer:
@@ -841,6 +947,36 @@ Return JSON:
             ]
         }
 
+    # FIX 1 (P0): Enforce 20-action batch cap
+    MAX_BATCH_ACTIONS = getattr(config, "DEFAULT_MAX_ACTIONS_PER_BATCH", 20)
+    file_acts = [a for a in plan_actions if a.get("type") in ("move", "copy", "trash", "delete")]
+    rem_batch_count = 0
+    if len(file_acts) > MAX_BATCH_ACTIONS:
+        allowed_sources = {a.get("source") or a.get("path") for a in file_acts[:MAX_BATCH_ACTIONS]}
+        rem_batch_count = len(file_acts) - MAX_BATCH_ACTIONS
+        capped_actions = []
+        for a in plan_actions:
+            if a.get("type") == "make_dir":
+                capped_actions.append(a)
+            elif (a.get("source") or a.get("path")) in allowed_sources:
+                capped_actions.append(a)
+        plan_actions = capped_actions
+
+    # FIX 7 (P2): Sanitize any placeholder/template folder names in final plan actions
+    sanitized_actions = []
+    for a in plan_actions:
+        dst = a.get("destination") or a.get("path") or ""
+        if any(ph in dst for ph in ("Peer_Name", "<PeerName>", "<Peer_Name>", "<Subject>", "<Category>", "PeerName")):
+            cleaned_dest = re.sub(r"Documents/Peers/(?:Peer_Name|<PeerName>|<Peer_Name>|PeerName)/?", "Documents/Review/", dst)
+            if not cleaned_dest.startswith("Documents/Review"):
+                cleaned_dest = f"Documents/Review/{os.path.basename(dst)}"
+            if a.get("destination"):
+                a["destination"] = cleaned_dest
+            if a.get("path") and a.get("type") == "make_dir":
+                a["path"] = os.path.dirname(cleaned_dest) or "Documents/Review"
+        sanitized_actions.append(a)
+    plan_actions = sanitized_actions
+
     plan_actions = ensure_unique_plan_destinations(plan_actions)
     formatted_actions = format_plan_badges(plan_actions, peer_names, manifest_lookup)
     plan_id = str(uuid.uuid4())
@@ -851,7 +987,16 @@ Return JSON:
         "collision_strategy": "RENAME_NUMERIC",
         "actions": formatted_actions
     }
-    msg = f"I've inspected your storage ({len(manifest)} real files on disk) and synthesized an Action Plan for: \"{plan_desc}\""
+
+    # FIX 1 (P0): Present breakdown table first in plan message
+    cat_counts = defaultdict(int)
+    for a in [act for act in formatted_actions if act.get("type") in ("move", "copy", "trash")]:
+        ext = os.path.splitext(a.get("source") or a.get("path") or "")[1].upper().replace(".", "")
+        cat_counts[ext or "Files"] += 1
+    rows = [f"| 📄 **{ext}** | **{cnt} files** |" for ext, cnt in cat_counts.items()]
+    breakdown_md = "### 📊 File Breakdown\n" + "\n".join(rows) + "\n\n" if rows else ""
+    batch_note = f" (showing first {MAX_BATCH_ACTIONS} files, {rem_batch_count} remaining in next batch)" if rem_batch_count > 0 else ""
+    msg = f"{breakdown_md}I've inspected your storage ({len(manifest)} real files on disk) and synthesized an Action Plan for: \"{plan_desc}\"{batch_note}"
     return {
         "type": "plan",
         "intent": "FILE_OPERATION",
